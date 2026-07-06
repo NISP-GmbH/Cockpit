@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
+    />
+    <title>Cockpit</title>
+    <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Tab bar -->
+      <div id="tabbar">
+        <div id="tabs"></div>
+        <div id="tab-menu-wrap">
+          <button id="tab-menu-btn" title="New tab &amp; tools">＋ New ▾</button>
+          <div id="tab-menu" class="hidden">
+            <button id="deck-btn" title="Command Deck - your home dashboard">🏠 Home</button>
+            <button id="focus-btn" title="Start a focus session (pin a project, mute Slack, countdown)">🎯 Focus session</button>
+            <button id="new-tab-btn" title="New connection (Ctrl+Shift+T)">＋ New connection</button>
+            <button id="slack-btn" title="Open a Slack channel">＃ Slack</button>
+            <button id="sftp-btn" title="Browse files (SFTP) of the active SSH tab">📁 Files</button>
+            <button id="local-term-btn" title="Open a local terminal (run Claude / CDP tools)">🖥 Local terminal</button>
+            <button id="code-btn" title="Open VS Code (code-server) — Shift-click to choose a folder">🧑‍💻 VS Code</button>
+            <button id="web-btn" title="Open a web page">🌐 Web page</button>
+            <button id="notes-btn" title="Notes board">📝 Notes</button>
+            <button id="expose-btn" title="3D overview of all tabs (F3)">🧊 3D view</button>
+            <div class="tab-menu-sep"></div>
+            <button id="toggle-slack-feed" title="Show/hide the Slack updates board">💬 Slack board</button>
+            <button id="toggle-whatsapp-feed" title="Show/hide the WhatsApp board">🟢 WhatsApp board</button>
+            <button id="toggle-gmail" title="Show/hide the Inbox board">📧 Inbox board</button>
+          </div>
+        </div>
+        <div id="tz-wrap">
+          <button id="tz-btn" title="World clock / timezone comparator">🕐 TZ ▾</button>
+          <div id="tz-panel" class="hidden">
+            <div class="tz-head">
+              <span>🕐 Meeting planner — drag the columns to scrub time</span>
+              <span class="tz-head-actions">
+                <button id="tz-now" title="Reset to current time">Now</button>
+                <button id="tz-close" title="Close">✕</button>
+              </span>
+            </div>
+            <div id="tz-grid"></div>
+            <div id="tz-foot" class="tz-foot"></div>
+            <div class="tz-add">
+              <input id="tz-add-label" type="text" placeholder="Label (e.g. Berlin)" />
+              <input id="tz-add-zone" type="text" list="tz-zones" placeholder="Zone (e.g. Europe/Berlin)" />
+              <button id="tz-add-btn" title="Add / save timezone">＋</button>
+            </div>
+            <div id="tz-add-msg"></div>
+            <div id="tz-timer">
+              <div class="tzt-row">
+                <span class="tzt-label">⏲ Timer</span>
+                <input id="tzt-h" type="number" min="0" max="99" value="0" title="Hours" /><span class="tzt-u">h</span>
+                <input id="tzt-m" type="number" min="0" max="59" value="5" title="Minutes" /><span class="tzt-u">m</span>
+                <button id="tzt-start" title="Start / pause">▶ Start</button>
+                <button id="tzt-reset" title="Reset">Reset</button>
+              </div>
+              <div id="tzt-display" class="tzt-display">00:05:00</div>
+            </div>
+            <datalist id="tz-zones">
+              <option value="America/Los_Angeles">Pacific (PST/PDT)</option>
+              <option value="America/Denver">Mountain (MST/MDT)</option>
+              <option value="America/Chicago">Central US (CST/CDT)</option>
+              <option value="America/New_York">Eastern (EST/EDT)</option>
+              <option value="America/Sao_Paulo">São Paulo</option>
+              <option value="Europe/London">London (GMT/BST)</option>
+              <option value="Europe/Berlin">Central Europe (CET/CEST)</option>
+              <option value="Europe/Paris">Paris</option>
+              <option value="Europe/Athens">Athens (EET)</option>
+              <option value="Europe/Moscow">Moscow</option>
+              <option value="Asia/Dubai">Dubai</option>
+              <option value="Asia/Kolkata">India (IST)</option>
+              <option value="Asia/Singapore">Singapore</option>
+              <option value="Asia/Shanghai">China</option>
+              <option value="Asia/Tokyo">Japan (JST)</option>
+              <option value="Australia/Sydney">Sydney</option>
+              <option value="UTC">UTC</option>
+            </datalist>
+          </div>
+        </div>
+        <div id="term-menu-wrap">
+          <button id="term-menu-btn" title="Terminal settings">🖥 ▾</button>
+          <div id="term-menu" class="hidden">
+            <div class="term-menu-head">Terminal</div>
+            <label class="term-menu-row"><span>Theme</span><select id="theme-select" title="Terminal theme"></select></label>
+            <button id="broadcast-btn" title="Mirror your typing to every connected terminal">⇄ Broadcast typing</button>
+            <div class="term-menu-note">Broadcast mirrors your typing to every connected ssh/local terminal.</div>
+            <button id="smartlinks-btn" title="Make IPs, file paths and JSON in terminal output clickable">🔎 Smart output</button>
+            <div class="term-menu-note">Click an IP to SSH, a file path to grab it, JSON to pretty-print. URLs open in a web tab.</div>
+            <button id="vitals-btn" title="Show a live load/mem/disk sparkline strip on each SSH tab">📈 Host vitals</button>
+            <label class="term-menu-row"><span>Poll every</span><select id="vitals-interval" title="How often to sample host vitals">
+              <option value="5">5 s</option>
+              <option value="15">15 s</option>
+              <option value="30">30 s</option>
+              <option value="60">60 s</option>
+            </select></label>
+            <div class="term-menu-note">Polls each connected SSH host over a side channel (never your shell).</div>
+          </div>
+        </div>
+        <button id="privacy-btn" title="Privacy Curtain - blur sensitive content for screen sharing (F9)">🕶</button>
+        <button id="settings-btn" title="Settings">⚙</button>
+      </div>
+
+      <!-- Main content: terminal/Slack/web panes + Gmail sidebar -->
+      <div id="main-row">
+        <div id="terminals">
+          <!-- Shown when no tab is open: let the user choose what to open. -->
+          <div id="empty-state" class="hidden">
+            <div class="es-card">
+              <div class="es-title">🛩 Cockpit</div>
+              <div class="es-sub">Nothing open yet — pick something to start:</div>
+              <div class="es-actions">
+                <button id="es-deck" type="button">🏠 Command Deck</button>
+                <button id="es-ssh" type="button">＋ SSH connection</button>
+                <button id="es-local" type="button">🖥 Local terminal</button>
+                <button id="es-web" type="button">🌐 Web page</button>
+                <button id="es-notes" type="button">📝 Notes</button>
+              </div>
+              <div class="es-hint">…or use the <b>＋ New ▾</b> menu any time.</div>
+            </div>
+          </div>
+          <!-- Scrollback search (Ctrl+Shift+F) -->
+          <div id="search-bar" class="hidden">
+            <input id="search-input" type="text" placeholder="Find in scrollback…" />
+            <span id="search-info"></span>
+            <button id="search-prev" title="Previous (Shift+Enter)">▲</button>
+            <button id="search-next" title="Next (Enter)">▼</button>
+            <button id="search-close" title="Close (Esc)">✕</button>
+          </div>
+        </div>
+
+        <!-- SFTP file browser (active SSH tab) -->
+        <div id="sftp-panel" class="hidden">
+          <div class="sftp-head">
+            <span id="sftp-title">📁 Files</span>
+            <span class="spacer"></span>
+            <button id="sftp-up" title="Up one folder">↑</button>
+            <button id="sftp-refresh" title="Refresh">⟳</button>
+            <button id="sftp-upload" title="Upload file(s) here">⬆</button>
+            <button id="sftp-close" title="Close">✕</button>
+          </div>
+          <div id="sftp-path"></div>
+          <div id="sftp-list"></div>
+          <div id="sftp-status"></div>
+        </div>
+
+        <!-- Drag handle to resize the right sidebar -->
+        <div id="sidebar-divider" class="hidden" title="Drag to resize"></div>
+
+        <!-- Right sidebar: stacked Slack updates + Gmail inbox (both optional) -->
+        <div id="right-sidebar" class="hidden">
+          <!-- Slack updates board: latest messages across all channels -->
+          <div id="slack-feed" class="hidden">
+            <div class="side-header">
+              <span>💬 Slack updates</span>
+              <span class="side-header-actions">
+                <button id="slack-feed-clear" title="Clear">🗑</button>
+                <button id="slack-feed-hide" title="Hide board">✕</button>
+              </span>
+            </div>
+            <div id="slack-feed-items"></div>
+          </div>
+
+          <div class="board-divider hidden" data-above="slack"></div>
+
+          <!-- WhatsApp updates board: latest messages across your chats -->
+          <div id="whatsapp-feed" class="hidden">
+            <div class="side-header">
+              <span>🟢 WhatsApp</span>
+              <span class="side-header-actions">
+                <button id="whatsapp-feed-clear" title="Clear">🗑</button>
+                <button id="whatsapp-feed-hide" title="Hide board">✕</button>
+              </span>
+            </div>
+            <div id="whatsapp-feed-items"></div>
+          </div>
+
+          <div class="board-divider hidden" data-above="whatsapp"></div>
+
+          <!-- Gmail inbox -->
+          <div id="gmail-panel" class="hidden">
+            <div id="gmail-header">
+              <span>📧 Inbox</span>
+              <span class="side-header-actions">
+                <button id="gmail-refresh" title="Refresh inbox">⟳</button>
+                <button id="gmail-hide" title="Hide board">✕</button>
+              </span>
+            </div>
+            <div id="gmail-items"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Black Box: scrubbable timeline of everything (F4) -->
+      <div id="blackbox" class="hidden">
+        <div class="bb-head">
+          <span class="bb-title">✈️ Black Box</span>
+          <span id="bb-range" class="bb-range"></span>
+          <span class="bb-spacer"></span>
+          <span id="bb-cursor" class="bb-cursor-time"></span>
+          <button id="bb-now" title="Jump to now">Now</button>
+          <button id="bb-zoom-out" title="Zoom out">−</button>
+          <button id="bb-zoom-in" title="Zoom in">+</button>
+          <button id="bb-close" title="Close (F4)">✕</button>
+        </div>
+        <div id="bb-track"></div>
+        <div id="bb-summary"></div>
+      </div>
+
+      <!-- Status bar -->
+      <div id="statusbar">
+        <span id="status-text">Ready</span>
+        <div id="project-widget" title="Project time - click to open">
+          <span class="pw-icon">🗂</span>
+          <span id="pw-name">No project</span>
+          <span id="pw-time">0m</span>
+          <button id="pw-stop" title="Start/stop the timer">▶</button>
+        </div>
+        <button id="blackbox-btn" title="Black Box timeline (F4)">✈️</button>
+        <span id="status-vitals" class="hidden"></span>
+        <div id="calendar" class="hidden" title="Hover for upcoming appointments (also stops the flash)"></div>
+      </div>
+    </div>
+
+    <!-- Connection dialog -->
+    <div id="dialog-overlay" class="hidden">
+      <div id="dialog">
+        <h2>New SSH Connection</h2>
+        <div class="dialog-body">
+          <div class="saved-col">
+            <label>Saved sessions</label>
+            <select id="saved-list" size="10"></select>
+            <div class="saved-actions">
+              <button id="save-session-btn" type="button">Save</button>
+              <button id="delete-session-btn" type="button">Delete</button>
+            </div>
+          </div>
+          <div class="form-col">
+            <label for="f-name">Name</label>
+            <input id="f-name" type="text" placeholder="My server" />
+
+            <div class="row">
+              <div class="grow">
+                <label for="f-host">Host</label>
+                <input id="f-host" type="text" placeholder="example.com" />
+              </div>
+              <div class="port">
+                <label for="f-port">Port</label>
+                <input id="f-port" type="number" value="22" min="1" max="65535" />
+              </div>
+            </div>
+
+            <label for="f-user">Username</label>
+            <input id="f-user" type="text" placeholder="root" />
+
+            <label for="f-auth">Authentication</label>
+            <select id="f-auth">
+              <option value="agent">SSH agent (Pageant / OpenSSH)</option>
+              <option value="key">Private key file</option>
+              <option value="password">Password</option>
+            </select>
+
+            <div id="key-fields" class="hidden">
+              <label for="f-key">Private key file</label>
+              <div class="row">
+                <input id="f-key" type="text" class="grow" placeholder="C:\Users\you\.ssh\id_ed25519" />
+                <button id="browse-key-btn" type="button">Browse…</button>
+              </div>
+              <label for="f-passphrase">Passphrase (if key is encrypted)</label>
+              <input id="f-passphrase" type="password" autocomplete="off" />
+            </div>
+
+            <div id="password-fields" class="hidden">
+              <label for="f-password">Password</label>
+              <input id="f-password" type="password" autocomplete="off" />
+            </div>
+          </div>
+        </div>
+        <div class="dialog-footer">
+          <span id="dialog-error"></span>
+          <div class="spacer"></div>
+          <button id="cancel-btn" type="button">Cancel</button>
+          <button id="connect-btn" type="button" class="primary">Connect</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Find in page for the active web tab (Ctrl+F) -->
+    <div id="web-find" class="hidden">
+      <input id="web-find-input" type="text" placeholder="Find in page…" spellcheck="false" />
+      <span id="web-find-info"></span>
+      <button id="web-find-prev" title="Previous (Shift+Enter)">▲</button>
+      <button id="web-find-next" title="Next (Enter)">▼</button>
+      <button id="web-find-close" title="Close (Esc)">✕</button>
+    </div>
+
+    <!-- SSH tab hover: terminal shortcut cheat-sheet -->
+    <div id="tab-help" class="hidden">
+      <div id="tab-help-paste"></div>
+      <div id="tab-help-project"></div>
+      <div id="tab-help-view"></div>
+      <div id="tab-help-cmds"></div>
+      <div class="th-title">Terminal shortcuts</div>
+      <table>
+        <tr><td>Ctrl+Shift+F</td><td>Find in scrollback</td></tr>
+        <tr><td>Ctrl+Shift+C / V</td><td>Copy / Paste</td></tr>
+        <tr><td>Right / middle click</td><td>Paste</td></tr>
+        <tr><td>Select text</td><td>Auto-copy</td></tr>
+        <tr><td>Ctrl &nbsp;+ / − / 0</td><td>Font zoom (or Ctrl+scroll)</td></tr>
+        <tr><td>Ctrl+Shift+T / W</td><td>New / close tab</td></tr>
+        <tr><td>Ctrl+Tab</td><td>Switch tab</td></tr>
+        <tr><td>Ctrl+PageUp / PageDown</td><td>Scroll a page up / down</td></tr>
+        <tr><td>R / Enter</td><td>Reconnect / close (when dropped)</td></tr>
+      </table>
+      <div id="tab-help-hops"></div>
+    </div>
+
+    <!-- Focus Session: start dialog + floating countdown HUD -->
+    <div id="focus-overlay" class="hidden">
+      <div id="focus-card">
+        <div class="fo-title">🎯 Focus session</div>
+        <div class="fo-sub">Pin a project, mute Slack, dim the other tabs, and get a summary note when the time is up.</div>
+        <label class="fo-row">Project <select id="focus-project"></select></label>
+        <div class="fo-row fo-durs">
+          <button data-min="25" type="button">25 min</button>
+          <button data-min="50" type="button">50 min</button>
+          <button data-min="90" type="button">90 min</button>
+          <input id="focus-custom" type="number" min="1" max="480" placeholder="custom" />
+        </div>
+        <div class="fo-actions">
+          <button id="focus-start" type="button">Start focus</button>
+          <button id="focus-cancel" type="button">Cancel</button>
+        </div>
+      </div>
+    </div>
+    <div id="focus-hud" class="hidden">
+      <span id="focus-hud-proj"></span>
+      <span id="focus-hud-time"></span>
+      <button id="focus-hud-end" title="End the session now">End</button>
+    </div>
+
+    <!-- Grab a file from the current shell (in-band, works at any nesting depth) -->
+    <div id="grab-overlay" class="hidden">
+      <div id="grab-box">
+        <div class="grab-title">📥 Get a file from this shell</div>
+        <div class="grab-sub">Works through the current terminal session - even inside a nested ssh, sudo, tmux, or container. The path can be absolute or relative to the shell's current directory (pwd). <b>Preview</b> shows the contents in a scrollable viewer (logs jump to the end); <b>Download</b> saves it. Best for small/medium files; use SFTP for large ones.</div>
+        <input id="grab-path" type="text" placeholder="path to file (absolute, or relative to pwd)" spellcheck="false" autocomplete="off" />
+        <div class="grab-actions">
+          <button id="grab-preview">👁 Preview</button>
+          <button id="grab-go">📥 Download</button>
+          <button id="grab-cancel">Cancel</button>
+        </div>
+        <div id="grab-status" class="grab-status"></div>
+      </div>
+    </div>
+
+    <!-- Note color palette (right-click a note) -->
+    <div id="note-palette" class="hidden"></div>
+
+    <!-- Web tab hover: CDP helper snippet to hand to Claude -->
+    <div id="web-help" class="hidden">
+      <div id="web-help-project"></div>
+      <div class="wh-head">
+        <span class="th-title">CDP helper — let Claude drive this page</span>
+        <button id="web-help-copy" type="button">Copy</button>
+      </div>
+      <pre class="wh-body"></pre>
+    </div>
+
+    <!-- Subtle full-window pulse as a meeting approaches -->
+    <div id="meeting-flash" class="hidden"></div>
+
+    <!-- Reusable spinner toast for longer background tasks -->
+    <div id="busy-toast" class="hidden">
+      <span class="busy-spinner"></span>
+      <span id="busy-msg"></span>
+    </div>
+
+    <!-- Project accounting overlay -->
+    <div id="project-overlay" class="hidden">
+      <div id="project-panel">
+        <div class="pa-head">
+          <div class="pa-tabs">
+            <button id="pa-tab-day" class="pa-tab active">Day</button>
+            <button id="pa-tab-month" class="pa-tab">Month</button>
+            <button id="pa-tab-log" class="pa-tab">Entries</button>
+          </div>
+          <span class="spacer"></span>
+          <button id="pa-wrapped" title="Cockpit Wrapped - your work, recapped">🎁 Wrapped</button>
+          <button id="pa-close" title="Close">✕</button>
+        </div>
+
+        <div id="pa-last-action" class="hidden">
+          <span id="pa-last-text"></span>
+          <button id="pa-undo-btn" title="Undo (Ctrl+U)">↩ Revert</button>
+        </div>
+
+        <div id="pa-day" class="pa-view">
+          <div class="pa-chart-wrap"><canvas id="pa-day-chart"></canvas></div>
+          <div id="pa-day-list" class="pa-list"></div>
+          <div id="pa-day-split" class="pa-split hidden" title="Drag to resize the project list vs the apps list"></div>
+          <div id="pa-day-apps" class="pa-apps"></div>
+          <div class="pa-add">
+            <input id="pa-new-name" type="text" placeholder="New project name…" maxlength="60" />
+            <button id="pa-new-btn" type="button">＋ Add</button>
+          </div>
+        </div>
+
+        <div id="pa-month" class="pa-view hidden">
+          <div class="pa-month-nav">
+            <button id="pa-month-prev" title="Previous month">‹</button>
+            <span id="pa-month-label"></span>
+            <button id="pa-month-next" title="Next month">›</button>
+          </div>
+          <div class="pa-chart-wrap"><canvas id="pa-month-chart"></canvas></div>
+          <div id="pa-month-apps" class="pa-apps"></div>
+        </div>
+
+        <div id="pa-entries" class="pa-view hidden">
+          <div class="pa-ent-nav">
+            <button id="pa-ent-prev" title="Previous day">‹</button>
+            <span id="pa-ent-label"></span>
+            <button id="pa-ent-next" title="Next day">›</button>
+            <span class="spacer"></span>
+            <span id="pa-ent-total"></span>
+            <button id="pa-ent-add" title="Log a block of time by hand">＋ Add entry</button>
+          </div>
+          <div id="pa-ent-form" class="hidden"></div>
+          <div id="pa-ent-list" class="pa-list"></div>
+        </div>
+
+        <div class="pa-foot">
+          <label id="pa-apptrack" title="Sample the foreground app every few seconds and attribute that time to the running project. Local only; app names only, no window titles.">
+            <input type="checkbox" id="pa-apptrack-cb" /> 📊 Track time in other apps
+          </label>
+          <label id="pa-apptrack-detail" title="Also keep the active tab / open file from the window title, bucketed as 'app › context' (e.g. chrome › Gmail, Code › renderer.js). More granular but more sensitive - the context can contain page/doc names. Local only.">
+            <input type="checkbox" id="pa-apptrack-detail-cb" /> Detailed App Tracking
+          </label>
+          <span id="pa-apptrack-hint" class="pa-foot-hint"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Centered, hard-to-miss alert for an unacknowledged imminent meeting -->
+    <div id="meeting-alert" class="hidden">
+      <div class="ma-card">
+        <div class="ma-icon">📅</div>
+        <div id="ma-title" class="ma-title"></div>
+        <div id="ma-when" class="ma-when"></div>
+        <div class="ma-actions">
+          <a id="ma-join" class="ma-join hidden" target="_blank">▶ Join meeting</a>
+          <button id="ma-dismiss" type="button" class="ma-dismiss">Dismiss</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Calendar hover preview (upcoming appointments) -->
+    <div id="calendar-preview" class="hidden">
+      <div class="gp-subj">Upcoming appointments</div>
+      <div id="calendar-preview-list"></div>
+    </div>
+
+    <!-- Gmail hover preview -->
+    <div id="gmail-preview" class="hidden">
+      <div class="gp-subj"></div>
+      <div class="gp-from"></div>
+      <div class="gp-body"></div>
+      <div class="gp-atts"></div>
+    </div>
+
+    <!-- Settings dialog -->
+    <div id="settings-overlay" class="hidden">
+      <div id="settings-dialog">
+        <h2>Settings</h2>
+        <div class="settings-section">
+          <h3>Slack</h3>
+          <div id="settings-slack-status" class="settings-status">Not connected</div>
+          <label for="set-slack-bot">Bot / user token (xoxb-… or xoxp-…)</label>
+          <input id="set-slack-bot" type="password" autocomplete="off" placeholder="xoxb-…" />
+          <label for="set-slack-app">App-level token (xapp-…, for Socket Mode)</label>
+          <input id="set-slack-app" type="password" autocomplete="off" placeholder="xapp-…" />
+          <div class="settings-row">
+            <button id="set-slack-connect" type="button" class="primary">Connect</button>
+            <button id="set-slack-forget" type="button">Disconnect &amp; forget tokens</button>
+          </div>
+          <label for="set-slack-notify" style="margin-top: 12px">Desktop notifications (when window not focused)</label>
+          <select id="set-slack-notify">
+            <option value="all">All messages</option>
+            <option value="mentions">Only mentions / @here</option>
+            <option value="off">Off</option>
+          </select>
+          <span id="settings-error"></span>
+        </div>
+
+        <div class="settings-section" style="margin-top: 14px">
+          <h3>WhatsApp</h3>
+          <div id="settings-wa-status" class="settings-status">Not connected</div>
+          <div class="settings-status">
+            Links your <b>personal</b> WhatsApp by scanning a QR code (like WhatsApp Web) —
+            no API key. Uses the unofficial multi-device protocol; keep usage light.
+          </div>
+          <div id="wa-qr-wrap" class="hidden">
+            <div class="settings-status">Open WhatsApp → <b>Linked devices</b> → <b>Link a device</b>, then scan:</div>
+            <img id="wa-qr" alt="WhatsApp QR code" />
+          </div>
+          <div class="settings-row">
+            <button id="set-wa-connect" type="button" class="primary">Connect / show QR</button>
+            <button id="set-wa-logout" type="button">Disconnect &amp; forget</button>
+          </div>
+        </div>
+
+        <div class="settings-section" style="margin-top: 14px">
+          <h3>Google (Gmail + Calendar)</h3>
+          <div id="settings-google-status" class="settings-status">Not connected</div>
+          <label for="set-google-id">OAuth Client ID</label>
+          <input id="set-google-id" type="text" autocomplete="off" placeholder="…apps.googleusercontent.com" />
+          <label for="set-google-secret">OAuth Client secret</label>
+          <input id="set-google-secret" type="password" autocomplete="off" placeholder="GOCSPX-…" />
+          <div class="settings-row">
+            <button id="set-google-connect" type="button" class="primary">Connect &amp; sign in</button>
+            <button id="set-google-forget" type="button">Disconnect</button>
+          </div>
+          <span id="settings-google-error"></span>
+        </div>
+
+        <div class="settings-section" style="margin-top: 14px">
+          <h3>Terminal alerts</h3>
+          <label class="settings-check">
+            <input type="checkbox" id="set-claude-watch" />
+            Highlight an SSH tab when Claude Code asks a question
+          </label>
+          <label class="settings-check" style="margin-top: 6px">
+            <input type="checkbox" id="set-meeting-chime" />
+            Play a chime 3 minutes before a meeting
+          </label>
+          <label class="settings-check" style="margin-top: 6px">
+            <input type="checkbox" id="set-cmd-done" />
+            Chime + notify when a long command finishes in a background SSH tab
+          </label>
+        </div>
+
+        <div class="settings-section" style="margin-top: 14px">
+          <h3>Mini-cockpit (always-on-top)</h3>
+          <label class="settings-check">
+            <input type="checkbox" id="set-pip" />
+            Show a tiny floating window with the next meeting and tasks
+          </label>
+        </div>
+
+        <div class="settings-section" style="margin-top: 14px">
+          <h3>Reminders</h3>
+          <label class="settings-check">
+            <input type="checkbox" id="set-reminder-on" />
+            Pop up a periodic reminder overlay
+          </label>
+          <label for="set-reminder-text" style="margin-top: 8px">Reminder text</label>
+          <input id="set-reminder-text" type="text" placeholder="Zu…." maxlength="120" />
+          <div class="settings-row" style="margin-top: 8px">
+            <label for="set-reminder-min" style="margin: 0">Every</label>
+            <input id="set-reminder-min" type="number" min="1" max="600" style="width: 64px" />
+            <label for="set-reminder-max" style="margin: 0">to</label>
+            <input id="set-reminder-max" type="number" min="1" max="600" style="width: 64px" />
+            <span>minutes (randomized)</span>
+          </div>
+        </div>
+
+        <div class="settings-section" style="margin-top: 14px">
+          <h3>✈️ Black Box (activity timeline)</h3>
+          <div class="settings-status">
+            Passively records a local, scrubbable timeline of your activity — commands,
+            messages, meetings, notes, tabs. Stored on this machine only, never sent anywhere.
+            Open it with <b>F4</b> or the ✈️ button in the status bar.
+          </div>
+          <label class="settings-check">
+            <input type="checkbox" id="set-bb-on" />
+            Record activity
+          </label>
+          <label class="settings-check" style="margin-top: 6px">
+            <input type="checkbox" id="set-bb-text" />
+            Include message text (off = log only that a message arrived, not its content)
+          </label>
+          <div class="settings-row" style="margin-top: 8px">
+            <label for="set-bb-days" style="margin: 0">Keep</label>
+            <input id="set-bb-days" type="number" min="1" max="365" style="width: 64px" />
+            <span>days</span>
+            <span class="bb-spacer"></span>
+            <span id="bb-stats" class="settings-status" style="margin: 0"></span>
+            <button id="set-bb-clear" type="button">Clear log</button>
+          </div>
+        </div>
+
+        <div class="settings-section" style="margin-top: 14px">
+          <h3>Web extensions (unpacked)</h3>
+          <div class="settings-status">
+            Load an unpacked Chromium extension folder (must contain <code>manifest.json</code>)
+            into the web tabs. Electron supports only a subset of extension APIs, so some
+            extensions may not fully work. Press F12 in a web tab for its DevTools.
+          </div>
+          <div id="web-ext-list" class="settings-status"></div>
+          <div class="settings-row">
+            <button id="web-ext-add" type="button" class="primary">Add extension folder…</button>
+            <button id="web-ext-clear" type="button">Remove all (restart)</button>
+            <span id="web-ext-msg"></span>
+          </div>
+        </div>
+
+        <div class="settings-section" style="margin-top: 14px">
+          <h3>Automation (CDP remote debugging)</h3>
+          <div class="settings-status">
+            Lets external tools (e.g. Claude Code via Chrome DevTools Protocol) drive this app.
+            Local-only (127.0.0.1). Blank = off. <b>Restart required.</b> Anything on this machine
+            can attach while enabled.
+          </div>
+          <label for="set-debug-port">Remote debugging port</label>
+          <input id="set-debug-port" type="number" min="1024" max="65535" placeholder="e.g. 9222 (blank = off)" />
+          <div class="settings-row">
+            <button id="debug-port-save" type="button" class="primary">Save</button>
+            <span id="debug-port-msg"></span>
+          </div>
+        </div>
+
+        <div class="settings-section" style="margin-top: 14px">
+          <h3>Quick commands</h3>
+          <div class="settings-status">
+            One per line. Run them into an SSH tab from that tab's hover menu.
+          </div>
+          <div class="ssh-hop-row">
+            <textarea id="set-quick-cmds" rows="4"
+              placeholder="claude --resume --permission-mode auto&#10;htop&#10;tail -f /var/log/syslog"></textarea>
+          </div>
+          <div class="settings-row">
+            <button id="quick-cmds-save" type="button" class="primary">Save commands</button>
+            <span id="quick-cmds-msg"></span>
+          </div>
+        </div>
+
+        <div class="settings-section" style="margin-top: 14px">
+          <h3>SSH auto-hop commands</h3>
+          <label class="settings-check">
+            <input type="checkbox" id="set-auto-hop" />
+            Enable auto-hop (run these commands automatically after an SSH tab connects)
+          </label>
+          <label class="settings-check" style="margin-top: 6px">
+            <input type="checkbox" id="set-auto-hop-collect" />
+            Collect auto-hops (record <code>ssh …</code> commands you type into the list)
+          </label>
+          <div class="settings-status">
+            These <code>ssh …</code> commands are auto-run after an SSH tab reconnects (one per
+            line) when auto-hop is enabled. Edit or delete lines to fix them, then Save.
+          </div>
+          <div id="ssh-hops-list"></div>
+          <div class="settings-row">
+            <button id="ssh-hops-save" type="button" class="primary">Save hops</button>
+            <span id="ssh-hops-msg"></span>
+          </div>
+        </div>
+
+        <div class="settings-section" style="margin-top: 14px">
+          <h3>ssh:// links</h3>
+          <label class="settings-check">
+            <input type="checkbox" id="set-ssh-protocol" />
+            Open <code>ssh://</code> links in Cockpit (register as the system handler)
+          </label>
+          <span id="ssh-protocol-msg" class="settings-status"></span>
+          <label for="set-ssh-jumphost" style="margin-top: 8px">Jump / bastion host (optional)</label>
+          <select id="set-ssh-jumphost-saved">
+            <option value="">- custom / none -</option>
+          </select>
+          <input id="set-ssh-jumphost" type="text" autocomplete="off" placeholder="user@bastion  or  bastion -p 2222" />
+          <div class="settings-status">
+            Clicking an <code>ssh://user@host:port</code> link opens a new terminal and connects.
+            If a jump host is set, Cockpit connects there first and then runs
+            <code>ssh user@host</code> to reach the target. Pick a saved SSH session above to
+            use it as the jump host, or type one below. Auth uses the SSH agent (or your
+            <code>~/.ssh</code> keys).
+          </div>
+        </div>
+
+        <div class="settings-section" style="margin-top: 14px">
+          <h3>Project accounting</h3>
+          <label class="settings-check">
+            <input type="checkbox" id="set-auto-project" />
+            Auto-switch the active project when I switch tabs
+          </label>
+          <div class="settings-status">
+            Assign a project to a tab from its hover cheat-sheet ("Track time as"). With this on,
+            activating that tab switches the running timer to its project. Tabs with no assigned
+            project leave the current one running.
+          </div>
+        </div>
+
+        <div class="dialog-footer">
+          <div class="spacer"></div>
+          <button id="settings-close-btn" type="button">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Slack connection dialog -->
+    <div id="slack-overlay" class="hidden">
+      <div id="slack-dialog">
+        <h2>Open Slack channel</h2>
+        <div id="slack-conn-status"></div>
+        <label for="slack-channel">Channel</label>
+        <select id="slack-channel" disabled></select>
+        <div class="dialog-footer">
+          <span id="slack-error"></span>
+          <div class="spacer"></div>
+          <button id="slack-settings-link" type="button">Open Settings…</button>
+          <button id="slack-cancel-btn" type="button">Close</button>
+          <button id="slack-open-btn" type="button" class="primary" disabled>Open channel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Periodic colorful reminder overlay -->
+    <div id="reminder-overlay" class="hidden"><span id="reminder-msg">Zu….</span></div>
+
+    <!-- Cockpit pet: a task buddy that cheers completions and sulks at overdue notes -->
+    <div id="cockpit-pet" title="Your task buddy — click for status">
+      <span class="pet-face">🐤</span>
+      <div class="pet-bubble"></div>
+    </div>
+
+    <!-- Command palette (Ctrl+L) -->
+    <div id="cmd-palette" class="hidden">
+      <div id="cmd-palette-box">
+        <input
+          id="cmd-palette-input"
+          type="text"
+          spellcheck="false"
+          placeholder="Jump to a session, tab, bookmark, note, or command…"
+        />
+        <div id="cmd-palette-list"></div>
+      </div>
+    </div>
+
+    <!-- xterm + addons (UMD globals) -->
+    <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
+    <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+    <script src="../node_modules/@xterm/addon-web-links/lib/addon-web-links.js"></script>
+    <script src="../node_modules/@xterm/addon-search/lib/addon-search.js"></script>
+    <script src="vendor/three.min.js"></script>
+    <script src="vendor/CSS3DRenderer.js"></script>
+    <script src="../node_modules/chart.js/dist/chart.umd.js"></script>
+    <script src="emoji-map.js"></script>
+    <script src="renderer.js"></script>
+  </body>
+</html>
