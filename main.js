@@ -614,6 +614,22 @@ app.whenReady().then(() => {
       return { ok: false, error: err.message || String(err) };
     }
   });
+  // Pick one file and hand it back as base64, for the in-band send: it goes through
+  // the terminal itself, so it lands in the shell you are actually in - the last hop -
+  // rather than on the host SFTP is attached to. Capped, because every byte is typed.
+  ipcMain.handle('file:pickBase64', async (_e, { maxBytes }) => {
+    try {
+      const res = await dialog.showOpenDialog(mainWindow, { properties: ['openFile'] });
+      if (res.canceled || !res.filePaths || !res.filePaths[0]) return { ok: false, canceled: true };
+      const p = res.filePaths[0];
+      const size = fs.statSync(p).size;
+      const cap = Number(maxBytes) || 1024 * 1024;
+      if (size > cap) return { ok: false, tooBig: true, size, cap, name: path.basename(p) };
+      return { ok: true, name: path.basename(p), size, b64: fs.readFileSync(p).toString('base64') };
+    } catch (err) {
+      return { ok: false, error: err.message || String(err) };
+    }
+  });
   ipcMain.handle('sftp:upload', async (_e, { tabId, dir }) => {
     try {
       const res = await dialog.showOpenDialog(mainWindow, {

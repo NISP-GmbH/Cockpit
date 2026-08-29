@@ -383,6 +383,40 @@ function showTabHelp(tabEl) {
     });
     els.tabHelpPaste.appendChild(grabBtn);
 
+    // The exact counterpart to the grab: in-band, so it lands in the shell you are
+    // actually in - the last hop of an ssh chain, inside sudo, inside a container.
+    const sendBtn = document.createElement('button');
+    sendBtn.className = 'th-cmd th-plain';
+    sendBtn.textContent = '📤 Send a file…';
+    sendBtn.title =
+      'Upload a file into the shell this terminal is in right now\n' +
+      'Works at any depth (ssh in ssh, sudo, a container). Small files only - every\n' +
+      'byte is typed through the terminal; use Files (SFTP) for anything large.';
+    sendBtn.addEventListener('click', () => {
+      els.tabHelp.classList.add('hidden');
+      const r = tabs.get(tabHelpTabId);
+      if (r) sendFileInBand(r);
+    });
+    els.tabHelpPaste.appendChild(sendBtn);
+
+    // And the SFTP browser, which was only reachable from the "+ New" menu.
+    if (rec.kind === 'ssh') {
+      const filesBtn = document.createElement('button');
+      filesBtn.className = 'th-cmd th-plain';
+      filesBtn.textContent = '📁 Files (SFTP)…';
+      filesBtn.title =
+        'Browse this host over SFTP: upload (⬆), download, and move around\n' +
+        'Attached to the host you connected to, so it does not follow further hops.';
+      filesBtn.addEventListener('click', () => {
+        els.tabHelp.classList.add('hidden');
+        const r = tabs.get(tabHelpTabId);
+        if (r) activateTab(r.id);
+        if (!sftpOpen) openSftp();
+        else refreshSftpForActive();
+      });
+      els.tabHelpPaste.appendChild(filesBtn);
+    }
+
     // Ask the shell where it actually is - survives ssh in ssh, sudo, a container.
     const whereBtn = document.createElement('button');
     whereBtn.className = 'th-cmd th-plain';
@@ -2161,6 +2195,12 @@ function breatheSync() {
   if (on && !breathe) breatheStart();
   else if (!on && breathe) breatheStop();
 }
+function relaxPhaseClass(el, phase) {
+  if (!el) return;
+  el.classList.toggle('rx-p-work', phase === 'work');
+  el.classList.toggle('rx-p-break', phase === 'break');
+  el.classList.toggle('rx-p-long', phase === 'long');
+}
 function relaxRender() {
   const chip = document.getElementById('relax-widget');
   const hud = document.getElementById('relax-hud');
@@ -2182,7 +2222,7 @@ function relaxRender() {
   }
   const label = RELAX_LABEL[relax.phase];
   chip.classList.remove('hidden');
-  chip.classList.toggle('rx-break', relax.phase !== 'work');
+  relaxPhaseClass(chip, relax.phase);
   chip.classList.toggle('rx-parked', relax.parked);
   document.getElementById('rx-icon').textContent = RELAX_ICON[relax.phase];
   document.getElementById('rx-phase').textContent = relax.parked ? label + ' done' : label;
@@ -2205,7 +2245,10 @@ function relaxRender() {
   // Parked, the pill is advertising the phase that is WAITING, not the one that just
   // ended - so it takes that colour, grows, and lights up the button to press.
   const shownPhase = relax.parked ? relaxNextPhase() : relax.phase;
-  hud.classList.toggle('rx-break', shownPhase !== 'work');
+  relaxPhaseClass(hud, shownPhase);
+  // The circle and the suggestion live in the stack, so colouring it carries the
+  // phase down to them without another lookup each.
+  relaxPhaseClass(document.getElementById('rx-stack'), shownPhase);
   hud.classList.toggle('rx-parked', relax.parked);
   hud.classList.toggle('rx-towork', relax.parked && shownPhase === 'work');
   // The suggestion belongs to a break that is under way - not to the hand-off after
@@ -2827,7 +2870,10 @@ api.onPtyData(({ tabId, data }) => {
   const rec = tabs.get(tabId);
   if (rec && rec.term) {
     captureStream(rec, typeof data === 'string' ? data : streamDecode(rec, binaryToUint8(data)));
-    if (rec._probe) {
+    if (rec._send) {
+      const vis = rec._send.feed(typeof data === 'string' ? data : u8ToLatin1(binaryToUint8(data)));
+      if (vis) writeToTerm(rec, vis);
+    } else if (rec._probe) {
       const vis = rec._probe.feed(typeof data === 'string' ? data : u8ToLatin1(binaryToUint8(data)));
       if (vis) writeToTerm(rec, vis);
     } else if (rec._grab) {
@@ -3100,7 +3146,7 @@ function setSplitPreset(preset) {
   updateStatusBar();
   persistSplit();
   const rec = activeTabId ? tabs.get(activeTabId) : null;
-  if (rec && (rec.kind === 'ssh' || rec.kind === 'local') && rec.term) rec.term.focus();
+  if (rec && (rec.kind === 'ssh' || rec.kind === 'local')) focusTerm(rec);
 }
 
 function updateLayoutButton() {
@@ -3182,7 +3228,7 @@ function activateTab(id) {
         rec.term.scrollToBottom(); // catch up to output that arrived while this tab was hidden
         rec._pendingBottom = false;
       }
-      rec.term.focus();
+      focusTerm(rec);
     } else if (rec.kind === 'slack' && rec.inputEl) {
       rec.inputEl.focus();
     } else if (rec.kind === 'deck') {
@@ -3500,9 +3546,20 @@ function setTabTitle(id, title) {
 }
 
 // Double-click a tab's title to rename it inline.
+// Clicking a tab activates it, and activateTab focuses its terminal on the NEXT frame.
+// The same clicks that open the title editor therefore have a focus steal already in
+// flight: it lands a frame later, blurs the editor, and blur commits - so on ssh and
+// local tabs the rename box opened and shut again before anything could be typed.
+// Nothing may pull focus back to a terminal while a title is being edited.
+let renamingTabId = null;
+function focusTerm(rec) {
+  if (renamingTabId) return;
+  if (rec && rec.term) rec.term.focus();
+}
 function startTabRename(id, titleEl) {
   const rec = tabs.get(id);
   if (!rec || !titleEl) return;
+  renamingTabId = id;
   rec.tabEl.draggable = false; // let the caret/selection work instead of dragging the tab
   titleEl.contentEditable = 'true';
   titleEl.classList.add('editing');
@@ -3513,6 +3570,8 @@ function startTabRename(id, titleEl) {
   sel.addRange(range);
   titleEl.focus();
   const finish = (commit) => {
+    if (renamingTabId !== id) return; // already finished
+    renamingTabId = null;
     titleEl.removeEventListener('keydown', onKey);
     titleEl.removeEventListener('blur', onBlur);
     titleEl.contentEditable = 'false';
@@ -3521,6 +3580,7 @@ function startTabRename(id, titleEl) {
     const name = titleEl.textContent.trim();
     if (commit && name) applyTabRename(rec, name);
     else titleEl.textContent = rec.customTitle || (rec.profile && rec.profile.name) || name || rec.kind;
+    focusTerm(rec); // back to typing where you were
   };
   const onKey = (e) => {
     e.stopPropagation();
@@ -4205,10 +4265,14 @@ function tunnelCard(t, host) {
   meta.appendChild(dot);
   const info = document.createElement('span');
   info.className = 'tun-info';
+  // A tunnel can be listening happily while every connection is refused at the far
+  // end. That is the confusing case, so say so on the card rather than looking fine.
   info.textContent =
     t.status === 'error'
       ? t.error || 'error'
-      : `${st.label} · ${t.conns} conn${t.conns === 1 ? '' : 's'} · ↑ ${fmtBytes(t.up)}  ↓ ${fmtBytes(t.down)}`;
+      : `${st.label} · ${t.conns} conn${t.conns === 1 ? '' : 's'} · ↑ ${fmtBytes(t.up)}  ↓ ${fmtBytes(t.down)}` +
+        (t.error ? ` · ⚠ ${t.error}` : '');
+  if (t.error) info.classList.add('tun-warn');
   meta.appendChild(info);
   const stop = document.createElement('button');
   stop.className = 'tun-stop';
@@ -4750,7 +4814,10 @@ api.onData(({ tabId, data }) => {
   if (rec && rec.term) {
     const u8 = binaryToUint8(data);
     captureStream(rec, streamDecode(rec, u8)); // ssh: latin1 bytes -> UTF-8 text (history + recorder)
-    if (rec._probe) {
+    if (rec._send) {
+      const vis = rec._send.feed(u8ToLatin1(u8)); // our own base64 echoing back
+      if (vis) writeToTerm(rec, vis);
+    } else if (rec._probe) {
       const vis = rec._probe.feed(u8ToLatin1(u8)); // the where-am-I exchange, start to finish
       if (vis) writeToTerm(rec, vis);
     } else if (rec._grab) {
@@ -9624,18 +9691,147 @@ els.sftpUp.addEventListener('click', () => {
     loadSftp(rec);
   }
 });
-els.sftpUpload.addEventListener('click', async () => {
-  const rec = activeSshRec();
-  if (!rec) return;
-  els.sftpStatus.textContent = 'Uploading…';
-  const r = await api.sftpUpload(rec.id, rec.sftpCwd || '.');
-  if (r.ok) {
-    els.sftpStatus.textContent = 'Uploaded: ' + r.uploaded.join(', ');
-    loadSftp(rec);
-  } else {
-    els.sftpStatus.textContent = r.canceled ? 'Upload canceled.' : 'Upload failed: ' + r.error;
+// Upload into whatever folder the Files panel is showing, or the login directory.
+// Reports in the terminal as well as the panel, because it can be started from the
+// hover sheet with the panel shut.
+// A terminal line discipline drops anything past ~4 KB on one line, so the base64 has
+// to arrive in pieces. 2 KB a piece leaves room for the printf around it.
+const SEND_CHUNK = 2048;
+const SEND_MAX_BYTES = 1024 * 1024; // every byte is typed into a shell; be honest about it
+const SEND_PACE_MS = 12; // let the shell keep up rather than flooding the pty
+function shQuote(str) {
+  return "'" + String(str).split("'").join("'" + '\\' + "''") + "'";
+}
+// The command sequence: start a temp file, append the base64 a chunk at a time, decode
+// it into place, then report the exit code and the resulting size between markers.
+function buildSendCommands(name, b64, tok, startLit, endLit) {
+  const q = shQuote(name);
+  const tmp = shQuote('/tmp/.cockpit-send-' + tok);
+  const out = [];
+  out.push('printf ' + "'" + '\\n%s\\n' + "'" + ' ' + startLit + '; : > ' + tmp);
+  for (let i = 0; i < b64.length; i += SEND_CHUNK) {
+    out.push('printf ' + "'%s'" + ' ' + shQuote(b64.slice(i, i + SEND_CHUNK)) + ' >> ' + tmp);
   }
-});
+  // base64 is -d on GNU and -D on BSD/macOS; try both rather than guess.
+  out.push('(base64 -d ' + tmp + ' 2>/dev/null || base64 -D ' + tmp + ') > ' + q + ' 2>/dev/null; rc=$?; printf ' +
+    "'" + '\\n%s %s %s\\n' + "'" + ' ' + endLit + ' "$rc" "$(wc -c < ' + q + ' 2>/dev/null)"; rm -f ' + tmp);
+  return out;
+}
+// Send a file straight through this terminal, so it lands wherever the shell actually
+// is - the LAST hop of an ssh chain, inside sudo, inside a container - which is where
+// SFTP cannot reach. The whole exchange is swallowed by the tap, so the screen only
+// gets the one-line result.
+async function sendFileInBand(rec) {
+  if (!rec || (rec.kind !== 'ssh' && rec.kind !== 'local') || !rec.term) return;
+  if (rec._grab || rec._probe || rec._send) {
+    writeToTerm(rec, '\r\n\x1b[2m[this terminal is busy with another transfer]\x1b[0m\r\n');
+    return;
+  }
+  const picked = await api.pickBase64(SEND_MAX_BYTES);
+  if (!picked || picked.canceled) return;
+  if (picked.tooBig) {
+    writeToTerm(
+      rec,
+      '\r\n\x1b[31m[' + picked.name + ' is ' + fmtBytes(picked.size) + ' - too big to type through a terminal (limit ' +
+        fmtBytes(picked.cap) + '). Use the Files panel, or scp.]\x1b[0m\r\n'
+    );
+    return;
+  }
+  if (!picked.ok) {
+    writeToTerm(rec, '\r\n\x1b[31m[could not read that file: ' + (picked.error || 'unknown') + ']\x1b[0m\r\n');
+    return;
+  }
+  const tok = 'S' + Math.random().toString(36).slice(2, 12).toUpperCase().replace(/[^A-Z0-9]/g, '') + 'S';
+  const startMark = '::U8' + tok + '::';
+  const endMark = '::V8' + tok + '::';
+  // Split so the resolved marker never appears in the echoed command line.
+  const startLit = "'::U8''" + tok + "::'";
+  const endLit = "'::V8''" + tok + "::'";
+  const send = {
+    done: false,
+    started: false,
+    all: '',
+    timer: null,
+    feed(text) {
+      if (this.done) return text;
+      this.all += text;
+      if (!this.started) {
+        const i = this.all.indexOf(startMark);
+        if (i === -1) {
+          if (this.all.length > 8192) this.all = this.all.slice(-2048);
+          return '';
+        }
+        this.started = true;
+        this.all = this.all.slice(i + startMark.length);
+      }
+      const j = this.all.indexOf(endMark);
+      if (j === -1) {
+        // Only the echo of our own chunks is in here; keep it off the screen.
+        if (this.all.length > 65536) this.all = this.all.slice(-4096);
+        return '';
+      }
+      const after = this.all.slice(j + endMark.length);
+      const m = after.match(/(-?\\d+)\\s+(\\d*)/);
+      const rc = m ? parseInt(m[1], 10) : -1;
+      const bytes = m && m[2] ? parseInt(m[2], 10) : -1;
+      const nl = after.indexOf('\\n');
+      const tail = nl === -1 ? '' : after.slice(nl + 1);
+      this.finish(rc, bytes);
+      return tail;
+    },
+    finish(rc, bytes) {
+      if (this.done) return;
+      this.done = true;
+      clearTimeout(this.timer);
+      if (rec._send === this) rec._send = null;
+      const okSize = bytes === picked.size;
+      const note =
+        rc === 0 && okSize
+          ? '\x1b[2m[sent ' + picked.name + ' (' + fmtBytes(picked.size) + ') to this shell]\x1b[0m'
+          : rc === 0
+            ? '\x1b[31m[' + picked.name + ' arrived as ' + bytes + ' bytes, expected ' + picked.size + ']\x1b[0m'
+            : '\x1b[31m[send failed (exit ' + rc + ') - is base64 available on that host?]\x1b[0m';
+      writeToTerm(rec, note + '\r\n');
+    },
+  };
+  send.timer = setTimeout(() => send.finish(-1, -1), 120000);
+  rec._send = send;
+  writeToTerm(
+    rec,
+    '\r\n\x1b[2m[sending ' + picked.name + ' (' + fmtBytes(picked.size) + ') through this terminal \u2026]\x1b[0m\r\n'
+  );
+  const cmds = buildSendCommands(picked.name, picked.b64, tok, startLit, endLit);
+  const write = (data) => {
+    if (rec.kind === 'local') api.ptyWrite(rec.id, data);
+    else api.write(rec.id, data);
+  };
+  for (const cmd of cmds) {
+    if (send.done) return; // timed out or the tab went away
+    write(cmd + '\r');
+    await new Promise((r) => setTimeout(r, SEND_PACE_MS));
+  }
+}
+async function sendFileToHost(rec) {
+  if (!rec || rec.kind !== 'ssh') return;
+  const dir = rec.sftpCwd || '.';
+  els.sftpStatus.textContent = 'Uploading…';
+  const r = await api.sftpUpload(rec.id, dir);
+  if (r && r.ok) {
+    const names = r.uploaded.join(', ');
+    els.sftpStatus.textContent = 'Uploaded: ' + names;
+    if (rec.term) {
+      writeToTerm(rec, '\r\n\x1b[2m[sent ' + names + ' to ' + (dir === '.' ? 'your home directory' : dir) + ']\x1b[0m\r\n');
+    }
+    if (sftpOpen) loadSftp(rec);
+  } else if (r && r.canceled) {
+    els.sftpStatus.textContent = 'Upload canceled.';
+  } else {
+    const msg = (r && r.error) || 'unknown error';
+    els.sftpStatus.textContent = 'Upload failed: ' + msg;
+    if (rec.term) writeToTerm(rec, '\r\n\x1b[31m[upload failed: ' + msg + ']\x1b[0m\r\n');
+  }
+}
+els.sftpUpload.addEventListener('click', () => sendFileToHost(activeSshRec()));
 
 // ---------------------------------------------------------------------------
 // Google: Gmail strip + Calendar bar
@@ -12913,13 +13109,16 @@ els.notesBtn.addEventListener('click', () => createNotesTab());
       breatheSync();
     });
   });
-  const rxHud = document.getElementById('relax-hud');
-  if (rxHud) {
-    rxHud.addEventListener('mousedown', relaxHudDrag);
-    rxHud.addEventListener('dblclick', (e) => {
+  // The whole visible stack is a drag handle, not just the pill: during a break the
+  // circle is the big obvious thing on screen, so that is what the hand reaches for.
+  ['relax-hud', 'rx-breathe', 'rx-tip'].forEach((hid) => {
+    const el = document.getElementById(hid);
+    if (!el) return;
+    el.addEventListener('mousedown', relaxHudDrag);
+    el.addEventListener('dblclick', (e) => {
       if (!e.target.closest('button')) relaxResetHudPos();
     });
-  }
+  });
   // A window that shrank or a monitor that changed must not leave it off-screen.
   window.addEventListener('resize', () => {
     relaxHudClamped = false;
