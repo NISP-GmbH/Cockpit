@@ -164,6 +164,7 @@ const els = {
   codeBtn: document.getElementById('code-btn'),
   emptyState: document.getElementById('empty-state'),
   sftpBtn: document.getElementById('sftp-btn'),
+  filesBtn: document.getElementById('files-btn'),
   sftpPanel: document.getElementById('sftp-panel'),
   sftpUp: document.getElementById('sftp-up'),
   sftpRefresh: document.getElementById('sftp-refresh'),
@@ -218,6 +219,8 @@ const els = {
   setGoogleId: document.getElementById('set-google-id'),
   setGoogleSecret: document.getElementById('set-google-secret'),
   setGoogleConnect: document.getElementById('set-google-connect'),
+  setMailQuiet: document.getElementById('set-mail-quiet'),
+  setMailUndo: document.getElementById('set-mail-undo'),
   setGoogleForget: document.getElementById('set-google-forget'),
   settingsGoogleError: document.getElementById('settings-google-error'),
   setClaudeWatch: document.getElementById('set-claude-watch'),
@@ -234,6 +237,7 @@ const els = {
   setReminderMax: document.getElementById('set-reminder-max'),
   setPip: document.getElementById('set-pip'),
   setGrass: document.getElementById('set-grass'),
+  setJoinWraps: document.getElementById('set-join-wraps'),
   setWheelKeys: document.getElementById('set-wheel-keys'),
   setTmuxPrefix: document.getElementById('set-tmux-prefix'),
   setTmuxAutoExit: document.getElementById('set-tmux-autoexit'),
@@ -299,7 +303,7 @@ function createTabChrome(id, title, kind) {
   tabEl.innerHTML =
     '<span class="kind-glyph"></span><span class="title"></span><span class="unread"></span><span class="close" title="Close">✕</span>';
   tabEl.querySelector('.kind-glyph').textContent =
-    kind === 'slack' ? '#' : kind === 'web' ? '🌐' : kind === 'notes' ? '📝' : kind === 'deck' ? '🏠' : '>_';
+    kind === 'slack' ? '#' : kind === 'web' ? '🌐' : kind === 'notes' ? '📝' : kind === 'deck' ? '🏠' : kind === 'mail' ? '📧' : '>_';
   const titleEl = tabEl.querySelector('.title');
   titleEl.textContent = title;
   titleEl.title = 'Double-click to rename';
@@ -348,10 +352,20 @@ function createTabChrome(id, title, kind) {
 
 let tabHelpTimer = null;
 let tabHelpTabId = null;
+let tabHelpKeys = false; // is the shortcut table folded open?
 let quickCommands = [];
 
+// The sheet has grown a lot of actions; the key list is reference material, so it
+// starts folded and stays however you leave it.
+function applyTabHelpKeys() {
+  const t = document.getElementById('th-keys');
+  const b = document.getElementById('th-keys-btn');
+  if (t) t.classList.toggle('hidden', !tabHelpKeys);
+  if (b) b.classList.toggle('open', tabHelpKeys);
+}
 function showTabHelp(tabEl) {
   clearTimeout(tabHelpTimer);
+  applyTabHelpKeys();
   const p = els.tabHelp;
   tabHelpTabId = tabEl.dataset.id;
   const rec = tabs.get(tabHelpTabId);
@@ -405,7 +419,7 @@ function showTabHelp(tabEl) {
       filesBtn.className = 'th-cmd th-plain';
       filesBtn.textContent = '📁 Files (SFTP)…';
       filesBtn.title =
-        'Browse this host over SFTP: upload (⬆), download, and move around\n' +
+        'Browse this host over SFTP: 📤 Upload, ⬇ download, and move around\n' +
         'Attached to the host you connected to, so it does not follow further hops.';
       filesBtn.addEventListener('click', () => {
         els.tabHelp.classList.add('hidden');
@@ -439,6 +453,32 @@ function showTabHelp(tabEl) {
     });
     els.tabHelpPaste.appendChild(whereBtn);
 
+    // tmux keeps the size its client had when it attached, so a pane can stay the
+    // wrong size long after the terminal is right.
+    const sizeBtn = document.createElement('button');
+    sizeBtn.className = 'th-cmd th-plain';
+    sizeBtn.textContent = '📐 Fix the size';
+    sizeBtn.title =
+      'Tell the far end this terminal is ' + (rec.term ? rec.term.cols + 'x' + rec.term.rows : '?') + '\n' +
+      'Sends the resize signal, sets the pty size with stty, and refreshes tmux\n' +
+      'Skipped while a full-screen program is on screen - go back to a shell first';
+    sizeBtn.addEventListener('click', () => {
+      els.tabHelp.classList.add('hidden');
+      const r = tabs.get(tabHelpTabId);
+      if (!r) return;
+      const told = resyncTermSize(r);
+      if (r.term) {
+        writeToTerm(
+          r,
+          told
+            ? '\r\n\x1b[2m[told the shell this terminal is ' + r.term.cols + 'x' + r.term.rows + ']\x1b[0m\r\n'
+            : '\r\n\x1b[2m[sent the resize signal only - leave the full-screen program to say it in words]\x1b[0m\r\n'
+        );
+        r.term.focus();
+      }
+    });
+    els.tabHelpPaste.appendChild(sizeBtn);
+
     // Capture the current terminal selection into a sticky note, auto-tagged with the
     // host, timestamp, and the command that produced it (Ctrl+Shift+N does the same).
     const hasSel = !!(rec.term.getSelection() || '').trim();
@@ -456,6 +496,23 @@ function showTabHelp(tabEl) {
       }
     });
     els.tabHelpPaste.appendChild(noteBtn);
+
+    // For output that wrapped at a word boundary, where no heuristic can tell.
+    const joinBtn = document.createElement('button');
+    joinBtn.className = 'th-cmd th-plain' + (hasSel ? '' : ' th-disabled');
+    joinBtn.textContent = '🔗 Copy as one line';
+    joinBtn.title = hasSel
+      ? 'Copy the selection with every line break removed - for a long value that the terminal broke across rows'
+      : 'Select some wrapped output first';
+    joinBtn.addEventListener('click', () => {
+      els.tabHelp.classList.add('hidden');
+      const r = tabs.get(tabHelpTabId);
+      if (!r || !r.term) return;
+      const sel = r.term.getSelection();
+      if (sel) api.clipboardWrite(joinAllLines(sel));
+      r.term.focus();
+    });
+    els.tabHelpPaste.appendChild(joinBtn);
   }
 
   // Port forwarding (SSH tunnels) - only for real ssh connections.
@@ -706,6 +763,9 @@ function termScrollKey(term, e, id) {
 //   custom  whatever you type.
 // The best answer for tmux is usually none of these: 'set -g mouse on' makes tmux
 // request mouse tracking, and then xterm forwards a plain wheel natively.
+// On by default: a wrapped line pasted with its wraps in it is broken text, and that
+// is far more often wrong than a genuinely full-width line being joined.
+let copyJoinWraps = true;
 let wheelKeys = 'page';
 let wheelUpSeq = '\x1b[5~';
 let wheelDownSeq = '\x1b[6~';
@@ -875,7 +935,12 @@ function smartFindLinks(text) {
   while ((m = RE_PATH.exec(text))) {
     const p = m[1];
     if (p.length < 3 || !p.includes('/')) continue; // need a real path, not a lone "/"
-    out.push({ start: m.index, len: p.length, kind: 'path', text: p });
+    // A path written at the end of a sentence picks up the full stop, which then
+    // becomes part of the filename and hides the extension: 'a.json.' is neither a
+    // json file nor a file that exists.
+    const clean = p.replace(/[.,;:]+$/, '');
+    if (clean.length < 3 || !clean.includes('/')) continue;
+    out.push({ start: m.index, len: clean.length, kind: 'path', text: clean });
   }
   // `ls -l` row: the bare filename at the end isn't a "path" (no slash), but it's grabbable
   // relative to the shell's cwd - link it for regular files and symlinks.
@@ -1616,7 +1681,14 @@ let relaxBellSound = 'bell'; // a key of BELL_VOICES
 let relaxNotify = true;
 let relaxLinkProject = true;
 let relaxAutoNext = false;
-let relaxAutoStart = true; // begin a cycle as soon as Cockpit is up
+// "Auto-start" used to mean "always start", which is wrong for anyone who stopped it
+// on purpose: quitting and reopening handed them a cycle back. It now means "start
+// again if it was running", and this is the flag that remembers which.
+let relaxAutoStart = true;
+// Missing means an install from before this was tracked: behave as it used to and
+// start, then record the truth from here on. A crash or a kill leaves this true,
+// which is right - it WAS running.
+let relaxWasRunning = true;
 let relaxBreathe = true; // guide breathing during breaks
 let relaxTips = true; // suggest something to do with the break
 
@@ -1661,7 +1733,13 @@ const RELAX_LONG_TIPS = [
   'Lie down for five minutes',
   'Do something with your hands: tidy one surface',
   'Message someone back that you have been meaning to',
-];let relaxBreathePattern = 'calm';
+];
+let relaxBreathePattern = 'calm';
+// Off by default: sound that starts on its own is a surprise, and a surprise is the
+// opposite of what a break is for.
+let relaxMusicOn = false;
+let relaxMusic = 'rain';
+let relaxMusicVol = 0.22;
 
 // Breathing patterns for the break HUD. A step with no `scale` holds whatever size the
 // circle already has, which is what makes a hold read as a hold; `dim` is its opacity,
@@ -1722,6 +1800,9 @@ let relaxAutoStarted = false;
 function relaxMaybeAutoStart() {
   if (relaxAutoStarted || relax) return;
   if (!relaxAutoStart || !relaxSettingsReady || !relaxProjectsReady) return;
+  // Only pick it up again if it was running when Cockpit last closed. Stopping it is
+  // a decision, and it should survive a restart like any other.
+  if (!relaxWasRunning) return;
   relaxAutoStarted = true;
   relaxStart();
 }
@@ -1869,6 +1950,7 @@ function relaxSaveSettings() {
     relaxLinkProject,
     relaxAutoNext,
     relaxAutoStart,
+    relaxWasRunning,
     relaxBreathe,
     relaxTips,
     relaxParkNudge,
@@ -1878,6 +1960,9 @@ function relaxSaveSettings() {
     relaxEveningMax,
     relaxTipIdx,
     relaxBreathePattern,
+    relaxMusicOn,
+    relaxMusic,
+    relaxMusicVol,
     relaxDefaultsV: RELAX_DEFAULTS_V, // from here on these values are real choices
     relaxDoneToday,
     relaxDay,
@@ -1915,6 +2000,8 @@ function relaxStart() {
     timer: null,
   };
   relax.timer = setInterval(relaxTick, 1000);
+  relaxWasRunning = true;
+  relaxSaveSettings();
   relaxBeginPhase('work');
   logEvent('system', {
     title: '🍵 Time Relax started (' + relaxWorkMin + '/' + relaxBreakMin + ')',
@@ -2067,6 +2154,8 @@ function relaxStop() {
     if (r.projectWasRunning && !paRunning) setProjectRunning(true);
     else if (!r.projectWasRunning && paRunning) setProjectRunning(false);
   }
+  relaxWasRunning = false;
+  relaxSaveSettings();
   logEvent('system', {
     title: '🍵 Time Relax stopped (' + relaxDoneToday + ' work phases today)',
   });
@@ -2206,6 +2295,7 @@ function relaxRender() {
   const hud = document.getElementById('relax-hud');
   if (!chip || !hud) return;
   breatheSync();
+  musicSync();
   parkSync();
   const petKey = relax ? relax.phase + (relax.running ? 'r' : 'p') + (relax.parked ? 'k' : '') : '-';
   if (petKey !== relaxPetKey) {
@@ -2310,6 +2400,11 @@ function openRelaxDialog() {
   eveningRenderRow();
   relaxFillBreathe();
   document.getElementById('rx-breathe-pattern').value = relaxBreathePattern;
+  document.getElementById('rx-music').checked = relaxMusicOn;
+  relaxFillMusic();
+  document.getElementById('rx-music-kind').value = relaxMusic;
+  document.getElementById('rx-music-vol').value = Math.round(relaxMusicVol * 100);
+  relaxRenderMusic();
   relaxRenderBreathe();
   if (relaxDay !== relaxToday()) relaxDoneToday = 0;
   document.getElementById('rx-today').textContent = relaxDoneToday
@@ -2348,6 +2443,40 @@ function eveningRenderRow() {
   const row = document.getElementById('rx-evening-row');
   const on = document.getElementById('rx-evening');
   if (row && on) row.classList.toggle('hidden', !on.checked);
+}
+// The picker is built from RELAX_MUSIC itself, so a new piece needs no markup.
+function relaxFillMusic() {
+  const el = document.getElementById('rx-music-kind');
+  if (!el || el.options.length) return;
+  Object.keys(RELAX_MUSIC).forEach((k) => {
+    const o = document.createElement('option');
+    o.value = k;
+    o.textContent = RELAX_MUSIC[k].label;
+    el.appendChild(o);
+  });
+}
+function relaxMusicVolFromDialog() {
+  const v = parseInt((document.getElementById('rx-music-vol') || {}).value, 10);
+  return Number.isFinite(v) ? Math.max(0.02, Math.min(1, v / 100)) : relaxMusicVol;
+}
+function relaxRenderMusic() {
+  const row = document.getElementById('rx-music-row');
+  const on = document.getElementById('rx-music');
+  if (row && on) row.classList.toggle('hidden', !on.checked);
+  const out = document.getElementById('rx-music-vol-out');
+  if (out) out.textContent = Math.round(relaxMusicVolFromDialog() * 100) + '%';
+}
+// Hear it before committing to it: eight seconds, then it fades out by itself.
+let musicPreviewTimer = null;
+function relaxPreviewMusic() {
+  clearTimeout(musicPreviewTimer);
+  const kind = (document.getElementById('rx-music-kind') || {}).value;
+  relaxMusicVol = relaxMusicVolFromDialog();
+  musicStart(kind, true);
+  musicPreviewTimer = setTimeout(() => {
+    musicStop();
+    musicSync(); // hand it back to whatever the phase wants
+  }, 8000);
 }
 function relaxFillBreathe() {
   const el = document.getElementById('rx-breathe-pattern');
@@ -2453,7 +2582,45 @@ function relaxApplyDialog() {
   relaxEveningMax = Math.max(relaxEveningMin, num('rx-evening-max', 1, 120, 5));
   const bp = document.getElementById('rx-breathe-pattern').value;
   if (BREATHE_PATTERNS[bp]) relaxBreathePattern = bp;
+  relaxMusicOn = document.getElementById('rx-music').checked;
+  const mk = document.getElementById('rx-music-kind').value;
+  if (RELAX_MUSIC[mk]) relaxMusic = mk;
+  relaxMusicVol = relaxMusicVolFromDialog();
   relaxSaveSettings();
+}
+
+// A newline that only exists because the row ran out of width is not part of the
+// text. xterm already joins the wraps IT made (the buffer flags them), but a remote
+// that formats to $COLUMNS - and every extra ssh hop, tmux pane or pager in the way -
+// sends real newlines instead, and pasting those into an editor or a URL bar breaks
+// whatever you copied. A row that reaches the last column almost certainly continues;
+// a shorter row ended because the writer ended it.
+function joinHardWraps(text, cols) {
+  if (!text || !cols || cols < 8) return text;
+  const rows = text.split(/\r?\n/);
+  const out = [rows[0]];
+  for (let i = 1; i < rows.length; i++) {
+    // Test the ORIGINAL row width, not the joined-up result, or one full row would
+    // swallow every line after it.
+    if (rows[i - 1].length >= cols) out[out.length - 1] += rows[i];
+    else out.push(rows[i]);
+  }
+  return out.join('\n');
+}
+// The deliberate version, for output that wrapped at a word boundary so the rows are
+// short and no heuristic can spot them: glue every line together.
+function joinAllLines(text) {
+  return (text || '')
+    .split(/\r?\n/)
+    .map((l, i) => (i ? l.replace(/^\s+/, "") : l))
+    .join('')
+    .replace(/\s+$/, '');
+}
+// One place decides what actually reaches the clipboard.
+function copySelection(term) {
+  const sel = term.getSelection();
+  if (!sel) return;
+  api.clipboardWrite(copyJoinWraps ? joinHardWraps(sel, term.cols) : sel);
 }
 
 function createTab(profile) {
@@ -2534,10 +2701,7 @@ function createTab(profile) {
   });
 
   // PuTTY-style: copy to clipboard as soon as you select text.
-  term.onSelectionChange(() => {
-    const sel = term.getSelection();
-    if (sel) api.clipboardWrite(sel);
-  });
+  term.onSelectionChange(() => copySelection(term));
 
   const pasteFromClipboard = () => {
     const text = api.clipboardRead();
@@ -2567,8 +2731,7 @@ function createTab(profile) {
     if (e.ctrlKey && e.shiftKey) {
       const k = e.key.toLowerCase();
       if (k === 'c') {
-        const sel = term.getSelection();
-        if (sel) api.clipboardWrite(sel);
+        copySelection(term);
         return false;
       }
       if (k === 'v') {
@@ -2742,10 +2905,7 @@ function createLocalTab(opts) {
     if (r) termSendSize(r, cols, rows);
     else api.ptyResize(id, cols, rows);
   });
-  term.onSelectionChange(() => {
-    const sel = term.getSelection();
-    if (sel) api.clipboardWrite(sel);
-  });
+  term.onSelectionChange(() => copySelection(term));
   const pasteFromClipboard = () => {
     const text = api.clipboardRead();
     if (text) term.paste(text);
@@ -2767,8 +2927,7 @@ function createLocalTab(opts) {
     if (e.ctrlKey && e.shiftKey) {
       const k = e.key.toLowerCase();
       if (k === 'c') {
-        const sel = term.getSelection();
-        if (sel) api.clipboardWrite(sel);
+        copySelection(term);
         return false;
       }
       if (k === 'v') {
@@ -2870,11 +3029,9 @@ api.onPtyData(({ tabId, data }) => {
   const rec = tabs.get(tabId);
   if (rec && rec.term) {
     captureStream(rec, typeof data === 'string' ? data : streamDecode(rec, binaryToUint8(data)));
-    if (rec._send) {
-      const vis = rec._send.feed(typeof data === 'string' ? data : u8ToLatin1(binaryToUint8(data)));
-      if (vis) writeToTerm(rec, vis);
-    } else if (rec._probe) {
-      const vis = rec._probe.feed(typeof data === 'string' ? data : u8ToLatin1(binaryToUint8(data)));
+    const quiet = rec._send || rec._probe || rec._size || rec._ask;
+    if (quiet) {
+      const vis = quiet.feed(typeof data === 'string' ? data : u8ToLatin1(binaryToUint8(data)));
       if (vis) writeToTerm(rec, vis);
     } else if (rec._grab) {
       const vis = rec._grab.feed(typeof data === 'string' ? data : u8ToLatin1(binaryToUint8(data)));
@@ -3233,6 +3390,8 @@ function activateTab(id) {
       rec.inputEl.focus();
     } else if (rec.kind === 'deck') {
       renderDeck(rec); // refresh the dashboard the moment it's shown
+    } else if (rec.kind === 'mail') {
+      mailOnShow();
     }
   });
   persistActiveTab();
@@ -3287,6 +3446,7 @@ async function captureWebThumb(rec) {
 function closeTab(id) {
   const rec = tabs.get(id);
   if (!rec) return;
+  if (rec.kind === 'mail' && mailDraftDirty() && !window.confirm('Discard the message you are writing?')) return;
   // Visual order, not map order: tabs can be dragged around. Read it before the
   // element is removed, so the neighbour fallback still has something to work with.
   const orderBefore = [...els.tabs.querySelectorAll('.tab')].map((t) => t.dataset.id);
@@ -3307,6 +3467,7 @@ function closeTab(id) {
   const wasNotes = rec.kind === 'notes';
   const wasLocal = rec.kind === 'local';
   const wasDeck = rec.kind === 'deck';
+  const wasMail = rec.kind === 'mail';
   rec.tabEl.remove();
   rec.paneEl.remove();
   tabs.delete(id);
@@ -3326,6 +3487,11 @@ function closeTab(id) {
   if (wasWeb) persistOpenWebTabs();
   if (wasLocal) persistTabOrder();
   if (wasDeck) persistTabOrder();
+  if (wasMail) {
+    mailHidePop();
+    mailReset();
+    persistTabOrder();
+  }
   if (wasNotes) {
     notesBoardEl = null;
     api.saveSettings({ notesTabOpen: false });
@@ -3419,6 +3585,77 @@ function startConnection(rec) {
   });
 }
 
+// --- Resync the size --------------------------------------------------------
+// A SIGWINCH is the only thing ssh can say about size, and it is not always enough:
+// tmux sizes a window from ITS client, and a client that was attached before the size
+// settled keeps the old idea until something tells it otherwise. So say it in words as
+// well - `stty` sets the pty size from the inside, and `tmux refresh-client -C` tells
+// tmux directly. Both are silent and both are harmless where they do not apply.
+function quietCommand(rec, body) {
+  if (!rec || (rec.kind !== 'ssh' && rec.kind !== 'local')) return false;
+  if (rec.status !== 'connected' || !rec.term) return false;
+  if (inBandBusy(rec)) return false;
+  try {
+    // Never type into a full-screen program: the keystrokes would land in vim, tmux
+    // copy-mode or Claude rather than a shell.
+    if (rec.term.buffer.active.type !== 'normal') return false;
+  } catch (_) {
+    return false;
+  }
+  const tok = 'Q' + Math.random().toString(36).slice(2, 10).toUpperCase().replace(/[^A-Z0-9]/g, '') + 'Q';
+  const startMark = '::Q6' + tok + '::';
+  const endMark = '::R6' + tok + '::';
+  const startLit = "'::Q6''" + tok + "::'";
+  const endLit = "'::R6''" + tok + "::'";
+  const tap = {
+    done: false,
+    all: '',
+    timer: null,
+    feed(text) {
+      if (this.done) return text;
+      this.all += text;
+      const i = this.all.indexOf(startMark);
+      if (i === -1) {
+        if (this.all.length > 8192) this.all = this.all.slice(-2048);
+        return '';
+      }
+      if (this.all.indexOf(endMark, i + startMark.length) === -1) return '';
+      this.finish();
+      return ''; // and the prompt it printed: the screen never moved
+    },
+    finish() {
+      if (this.done) return;
+      this.done = true;
+      clearTimeout(this.timer);
+      if (rec._size === this) rec._size = null;
+    },
+  };
+  tap.timer = setTimeout(() => tap.finish(), 4000);
+  rec._size = tap;
+  const cmd = 'printf ' + "'%s'" + ' ' + startLit + '; ' + body + '; printf ' + "'%s\\n'" + ' ' + endLit + '\r';
+  if (rec.kind === 'local') api.ptyWrite(rec.id, cmd);
+  else api.write(rec.id, cmd);
+  return true;
+}
+// The signal AND the words. Returns false when it could only send the signal.
+function resyncTermSize(rec) {
+  if (!rec || (rec.kind !== 'ssh' && rec.kind !== 'local') || !rec.term) return false;
+  const cols = rec.term.cols;
+  const rows = rec.term.rows;
+  if (!cols || !rows) return false;
+  nudgeRemoteSize(rec); // what dragging the window edge does
+  const body =
+    'stty rows ' + rows + ' cols ' + cols + ' 2>/dev/null; ' +
+    // Only inside tmux, and both spellings, since the separator changed between
+    // versions. Failure is silent either way.
+    '[ -n "$TMUX" ] && { tmux refresh-client -C ' +
+    cols + 'x' + rows +
+    ' 2>/dev/null || tmux refresh-client -C ' +
+    cols + ',' + rows +
+    ' 2>/dev/null; }'
+  return quietCommand(rec, body);
+}
+
 // --- Where am I -----------------------------------------------------------
 // Three ways to learn the real host and directory, cheapest first:
 //   1. OSC 7, which many shells emit on every prompt. Free, invisible, but not
@@ -3473,7 +3710,7 @@ function parseWhereTitle(title) {
 function probeWhere(rec) {
   if (!rec || (rec.kind !== 'ssh' && rec.kind !== 'local')) return false;
   if (rec.status !== 'connected' || !rec.term) return false;
-  if (rec._grab || rec._probe) return false; // one in-band conversation at a time
+  if (inBandBusy(rec)) return false; // one in-band conversation at a time
   try {
     // Never type into a full-screen program. On the alternate screen the keystrokes
     // would land in vim, tmux's copy-mode or Claude, not in a shell.
@@ -3746,94 +3983,238 @@ function startGrab() {
 // (with a Save button in the viewer). No dialog - triggered from a Smart-output link.
 function previewJsonFile(rec, filePath) {
   if (!rec || (rec.kind !== 'ssh' && rec.kind !== 'local')) return;
-  beginGrab(rec, filePath, { preview: true });
+  beginGrab(rec, filePath, {
+    preview: true,
+    // There is no dialog behind this one, so anything it wants to say has to go to
+    // the terminal - otherwise a refusal is indistinguishable from a dead link.
+    onStatus: (msg, kind) => {
+      if (kind !== 'err' && kind !== 'warn') return;
+      if (rec.term) {
+        writeToTerm(rec, '\r\n\x1b[33m[' + msg + ']\x1b[0m\r\n');
+      }
+    },
+  });
 }
 
-// Core in-band file fetch. opts.onStatus(msg, kind) reports into the grab dialog (optional);
-// opts.preview => decode + pretty-print JSON instead of the Save dialog.
+// Anything that uses the terminal as a transport. The routers hand the stream to one tap
+// at a time, so a second conversation would read the first one’s output.
+function inBandBusy(rec) {
+  return !!(rec && (rec._grab || rec._send || rec._probe || rec._size || rec._ask));
+}
+// A user asked for this; a where-am-I probe or a size resync did not. They finish in
+// milliseconds and cap themselves at 4 s, so wait for the stream rather than refusing.
+// Abandoning them instead would leave their reply to land on screen.
+function whenInBandFree(rec, onFree, onGaveUp) {
+  const started = Date.now();
+  const wait = () => {
+    if (!inBandBusy(rec)) return onFree();
+    if (Date.now() - started > 6000) return onGaveUp();
+    setTimeout(wait, 120);
+  };
+  wait();
+}
+
+// ---------------------------------------------------------------------------
+// In-band download, in verified slices.
+// ---------------------------------------------------------------------------
+// One `base64 <file>` dump cannot be trusted: the bytes come back by scrolling through
+// every terminal between here and the file, and a relaying terminal (a tmux or screen
+// pane, most of all) does not forward every line it renders - lines that scroll away
+// during a flood go to ITS scrollback, not to us. A 13 KB file lost 5-9 whole lines that
+// way. So ask for the file a slice at a time, check each slice against the length that
+// was asked for, and retry the ones that come back short. Slices start large and halve
+// on failure: a clean path stays fast, a lossy one still finishes.
+const GRAB_SLICE_MAX = 12288; // source bytes per request when nothing is being lost
+const GRAB_SLICE_MIN = 512; // small enough to survive a badly behaved pane
+const GRAB_SLICE_TRIES = 3; // attempts at one slice before the slice is halved
+
+// Ask the shell one question and hand back what it printed, with the whole exchange
+// swallowed. Resolves null if it never answers.
+function inBandAsk(rec, body, timeoutMs) {
+  return new Promise((resolve) => {
+    if (!rec || (rec.kind !== 'ssh' && rec.kind !== 'local')) return resolve(null);
+    const tok = 'A' + Math.random().toString(36).slice(2, 12).toUpperCase().replace(/[^A-Z0-9]/g, '') + 'A';
+    const startMark = '::G4' + tok + '::';
+    const endMark = '::H4' + tok + '::';
+    // Split so the resolved marker never appears in the echoed command line.
+    const startLit = "'::G4''" + tok + "::'";
+    const endLit = "'::H4''" + tok + "::'";
+    const ask = {
+      done: false,
+      all: '',
+      timer: null,
+      feed(text) {
+        if (this.done) return text;
+        this.all += text;
+        const i = this.all.indexOf(startMark);
+        if (i === -1) {
+          if (this.all.length > 8192) this.all = this.all.slice(-2048);
+          return '';
+        }
+        const j = this.all.indexOf(endMark, i + startMark.length);
+        if (j === -1) return '';
+        const payload = this.all.slice(i + startMark.length, j);
+        const after = this.all.slice(j + endMark.length);
+        const nl = after.indexOf('\n');
+        this.finish(payload, nl === -1 ? '' : after.slice(nl + 1));
+        return this.tail; // whatever genuinely followed: the prompt
+      },
+      finish(payload, tail) {
+        if (this.done) return;
+        this.done = true;
+        this.tail = tail || '';
+        clearTimeout(this.timer);
+        if (rec._ask === this) rec._ask = null;
+        resolve(payload);
+      },
+    };
+    ask.timer = setTimeout(() => ask.finish(null), timeoutMs || 20000);
+    rec._ask = ask;
+    const cmd = 'printf \'%s\' ' + startLit + '; ' + body + '; printf \'\\n%s\\n\' ' + endLit + '\r';
+    if (rec.kind === 'local') api.ptyWrite(rec.id, cmd);
+    else api.write(rec.id, cmd);
+  });
+}
+
+// base64 of one slice, on a single line so a narrow pane cannot wrap it into more rows
+// than it has to render. `tail -c +N | head -c LEN` is POSIX everywhere that matters.
+function grabSliceCmd(q, offset, len) {
+  return 'tail -c +' + (offset + 1) + ' ' + q + ' 2>/dev/null | head -c ' + len + ' | base64 | tr -d \'\\n\'';
+}
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i) & 0xff;
+  return out;
+}
+function bytesToB64(bytes) {
+  let bin = '';
+  // In chunks, or a few hundred KB of arguments blows the call stack.
+  for (let i = 0; i < bytes.length; i += 8192) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+  }
+  return btoa(bin);
+}
+
+// Core in-band file fetch. opts.onStatus(msg, kind) reports into the grab dialog
+// (optional); opts.preview => decode + pretty-print instead of the Save dialog.
 function beginGrab(rec, filePath, opts) {
   opts = opts || {};
   const status = opts.onStatus || (() => {});
   if (!rec || !filePath) return;
-  if (rec._grab) return status('A grab is already in progress on this tab…', 'warn');
+  // Another real transfer is a conflict worth reporting; a probe or a size resync is
+  // just something to wait a moment for.
+  if (rec._grab || rec._send) return status('Another transfer is already running on this tab…', 'warn');
+  if (rec._probe || rec._size || rec._ask) {
+    status('Waiting for the terminal…', '');
+    return whenInBandFree(
+      rec,
+      () => beginGrab(rec, filePath, opts),
+      () => status('The terminal is busy with another in-band command - try again.', 'err')
+    );
+  }
+  grabInSlices(rec, filePath, opts, status);
+}
 
-  const tok = 'X' + Math.random().toString(36).slice(2, 12).toUpperCase().replace(/[^A-Z0-9]/g, '') + 'X';
-  const startMark = `::S9${tok}::`; // ':' is not a base64 char, so the marker can't collide with the data
-  const endMark = `::E9${tok}::`;
-  // Echo-safe literals: the '' split means the resolved marker never appears
-  // verbatim in the echoed command line, only in the real output.
-  const startLit = `'::S9''${tok}::'`;
-  const endLit = `'::E9''${tok}::'`;
-  const q = "'" + filePath.replace(/'/g, `'\\''`) + "'";
+async function grabInSlices(rec, filePath, opts, status) {
+  const q = shQuote(filePath);
   const name = filePath.split('/').pop() || 'download';
-
-  const grab = {
-    done: false,
-    started: false,
-    all: '',
-    timer: null,
-    // Returns the text that should still be written to the terminal. Everything
-    // from the grab command's echo through the base64 blob and the end marker is
-    // suppressed, so the transfer leaves no mess - only the fresh prompt tail shows.
-    feed(text) {
-      if (this.done) return text;
-      this.all += text;
-      if (!this.started) {
-        const i = this.all.indexOf(startMark);
-        if (i === -1) {
-          if (this.all.length > 8192) this.all = this.all.slice(-2048); // bound pre-start growth
-          return ''; // still swallowing the echoed command
-        }
-        this.started = true;
-        this.all = this.all.slice(i + startMark.length);
-      }
-      if (this.all.length > 90000000) {
-        this.finish({ error: 'File is too large for an in-band grab - use SFTP or scp instead.' });
-        return '';
-      }
-      const j = this.all.indexOf(endMark);
-      if (j === -1) return ''; // base64 still streaming - keep it off the screen
-      const after = this.all.slice(j + endMark.length);
-      const m = after.match(/-?\d+/);
-      const rc = m ? parseInt(m[0], 10) : 0;
-      const nl = after.indexOf('\n'); // drop the "<endMark> <rc>" line; show the prompt after it
-      const tail = nl === -1 ? '' : after.slice(nl + 1);
-      const b64 = this.all.slice(0, j).replace(/[^A-Za-z0-9+/=]/g, '');
-      this.finish({ rc, b64 });
-      const note =
-        rc === 0
-          ? `\x1b[2m[received ${name} (${fmtBytes(Math.floor((b64.length * 3) / 4))})]\x1b[0m\r\n`
-          : `\x1b[2m[grab failed: exit ${rc}]\x1b[0m\r\n`;
-      return note + tail;
-    },
-    finish(res) {
-      if (this.done) return;
-      this.done = true;
-      clearTimeout(this.timer);
-      if (rec._grab === this) rec._grab = null;
-      onGrabFinished(name, res, opts, rec);
-    },
+  rec._grab = { sliced: true }; // hold the slot for the whole run
+  const finish = (res) => {
+    rec._grab = null;
+    onGrabFinished(name, res, opts, rec);
   };
-  grab.timer = setTimeout(
-    () => grab.finish({ error: 'Timed out. Is `base64` available on that host? For big files use SFTP/scp.' }),
-    60000
-  );
-  rec._grab = grab;
+  try {
+    status('Asking how big ' + name + ' is…', '');
+    // A missing or unreadable file gives nothing, which is how we tell.
+    const sizeTxt = await inBandAsk(rec, '{ wc -c < ' + q + '; } 2>/dev/null', 15000);
+    if (sizeTxt === null) {
+      return finish({
+        error:
+          'No answer from the shell. Is it at a prompt? A full-screen program (tmux copy-mode, ' +
+          'vim, Claude) holds the terminal, and the file has to come back through it.',
+      });
+    }
+    const total = parseInt(String(sizeTxt).replace(/[^0-9]/g, ''), 10);
+    if (!Number.isFinite(total) || total <= 0) {
+      return finish({ error: 'Cannot read ' + name + ' - check the path and permissions.' });
+    }
+    if (total > 90000000) {
+      return finish({
+        error: name + ' is ' + fmtBytes(total) + ' - too large for a terminal transfer. Use the Files (SFTP) panel.',
+      });
+    }
 
-  // Leave a visible note in place of the (suppressed) base64 so the terminal isn't silent.
-  if (rec.term) writeToTerm(rec, `\r\n\x1b[2m[sending file ${name} via base64 terminal output …]\x1b[0m\r\n`);
-
-  const cmd = `printf '\\n%s\\n' ${startLit}; base64 ${q} 2>/dev/null; printf '\\n%s %s\\n' ${endLit} "$?"\r`;
-  if (rec.kind === 'local') api.ptyWrite(rec.id, cmd);
-  else api.write(rec.id, cmd);
-  status('Fetching ' + name + ' …', '');
+    const bytes = new Uint8Array(total);
+    let off = 0;
+    let slice = Math.min(GRAB_SLICE_MAX, total);
+    let retries = 0;
+    while (off < total) {
+      const want = Math.min(slice, total - off);
+      const txt = await inBandAsk(rec, grabSliceCmd(q, off, want), 30000);
+      const b64 = txt === null ? '' : String(txt).replace(/[^A-Za-z0-9+/=]/g, '');
+      let got = null;
+      if (b64 && decodedBytes(b64) === want) {
+        try {
+          got = b64ToBytes(b64);
+        } catch (_) {
+          got = null; // not valid base64 after all
+        }
+      }
+      if (got && got.length === want) {
+        bytes.set(got, off);
+        off += want;
+        retries = 0;
+        status(
+          'Fetching ' + name + ' - ' + Math.floor((off / total) * 100) + '% (' + fmtBytes(off) + ' of ' + fmtBytes(total) + ')',
+          ''
+        );
+        continue;
+      }
+      // Short or unreadable: something between here and the file is dropping lines.
+      retries += 1;
+      if (retries >= GRAB_SLICE_TRIES) {
+        retries = 0;
+        if (slice <= GRAB_SLICE_MIN) {
+          return finish({
+            error:
+              'Cannot get ' + name + ' through this terminal: even ' + fmtBytes(GRAB_SLICE_MIN) + ' at a time ' +
+              'comes back incomplete. Something in the path is dropping output - use the Files (SFTP) panel.',
+          });
+        }
+        slice = Math.max(GRAB_SLICE_MIN, Math.floor(slice / 2));
+        status('Losing bytes - retrying in ' + fmtBytes(slice) + ' pieces…', 'warn');
+      }
+    }
+    finish({ rc: 0, b64: bytesToB64(bytes), want: total });
+  } catch (err) {
+    finish({ error: 'Transfer failed: ' + ((err && err.message) || err) });
+  }
+}
+// base64 is 4 characters per 3 bytes, minus whatever the padding stands in for.
+function decodedBytes(b64) {
+  const pad = (b64.match(/=+$/) || [''])[0].length;
+  return Math.floor((b64.length * 3) / 4) - pad;
 }
 async function onGrabFinished(name, res, opts, rec) {
   opts = opts || {};
   const status = opts.onStatus || (() => {});
   if (res.error) return status(res.error, 'err');
   if (res.rc) return status('Could not read the file (exit ' + res.rc + '). Check the path and permissions.', 'err');
-  const bytes = Math.floor((res.b64.length * 3) / 4);
+  const bytes = decodedBytes(res.b64);
+  // The host told us how big the file is. If what arrived is a different size, the
+  // stream was mangled on the way - tmux and screen redraw a pane rather than passing
+  // bytes through, which is the usual culprit for a long transfer. Say so and stop;
+  // a silently corrupt file is worse than no file.
+  if (res.want >= 0 && bytes !== res.want) {
+    return status(
+      'Damaged in transit: ' + fmtBytes(bytes) + ' of ' + fmtBytes(res.want) + ' arrived. ' +
+        'Every extra hop adds a terminal that has to carry the whole stream, and a long one ' +
+        'can lose bytes there - a nested ssh or a tmux/screen pane are the usual culprits. ' +
+        'Grab it to the first hop and use the Files (SFTP) panel from there.',
+      'err'
+    );
+  }
   if (opts.preview) {
     let text = null;
     try {
@@ -3871,6 +4252,10 @@ async function onGrabFinished(name, res, opts, rec) {
   }
 }
 els.grabGo.addEventListener('click', startGrab);
+// Text-shaped files are worth looking at before deciding to keep them.
+function looksPreviewable(name) {
+  return /\.(json|log|out|err|txt|md|ya?ml|conf|cfg|ini|csv|xml|toml|sh|service)$/i.test(name || '');
+}
 function startGrabPreview() {
   const rec = tabs.get(grabTargetId);
   const filePath = els.grabPath.value.trim();
@@ -3878,8 +4263,17 @@ function startGrabPreview() {
 }
 if (els.grabPreview) els.grabPreview.addEventListener('click', startGrabPreview);
 els.grabCancel.addEventListener('click', closeGrabOverlay);
+// Keep the buttons honest about which one Enter will press.
+function updateGrabDefault() {
+  if (!els.grabPreview || !els.grabGo) return;
+  const previewable = looksPreviewable(els.grabPath.value.trim());
+  els.grabPreview.classList.toggle('primary', previewable);
+  els.grabGo.classList.toggle('primary', !previewable);
+}
+els.grabPath.addEventListener('input', updateGrabDefault);
 els.grabPath.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') startGrab();
+  // Enter follows what the file is: look at a config or a log, save a tarball.
+  if (e.key === 'Enter') (looksPreviewable(els.grabPath.value.trim()) ? startGrabPreview : startGrab)();
   else if (e.key === 'Escape') closeGrabOverlay();
 });
 els.grabOverlay.addEventListener('mousedown', (e) => {
@@ -4814,11 +5208,11 @@ api.onData(({ tabId, data }) => {
   if (rec && rec.term) {
     const u8 = binaryToUint8(data);
     captureStream(rec, streamDecode(rec, u8)); // ssh: latin1 bytes -> UTF-8 text (history + recorder)
-    if (rec._send) {
-      const vis = rec._send.feed(u8ToLatin1(u8)); // our own base64 echoing back
-      if (vis) writeToTerm(rec, vis);
-    } else if (rec._probe) {
-      const vis = rec._probe.feed(u8ToLatin1(u8)); // the where-am-I exchange, start to finish
+    // The quiet conversations - a send, a where-am-I, a size resync - all swallow
+    // their own echo and output; only the grab writes a note in place of it.
+    const quiet = rec._send || rec._probe || rec._size || rec._ask;
+    if (quiet) {
+      const vis = quiet.feed(u8ToLatin1(u8));
       if (vis) writeToTerm(rec, vis);
     } else if (rec._grab) {
       const vis = rec._grab.feed(u8ToLatin1(u8)); // hides the base64; returns only the tail
@@ -4979,6 +5373,8 @@ api.onStatus(({ tabId, line }) => {
     // A reconnected shell (and anything it re-attaches to, tmux above all) needs to be
     // told the size for real, not just at shell-open time.
     setTimeout(() => nudgeRemoteSize(rec), 400);
+    // And again in words once the shell has a prompt, for whatever attaches later.
+    setTimeout(() => resyncTermSize(rec), 1500);
     probeWhereSoon(rec, 1200);
     replayStartupCommands(rec);
     // One-shot hop for an ssh:// link opened through a jump/bastion host.
@@ -6188,6 +6584,7 @@ function tabKey(rec) {
   if (rec.kind === 'slack') return 'slack:' + ((rec.channel && rec.channel.id) || '');
   if (rec.kind === 'notes') return 'notes';
   if (rec.kind === 'deck') return 'deck';
+  if (rec.kind === 'mail') return 'mail';
   return rec.kind + ':' + rec.id;
 }
 
@@ -6233,6 +6630,8 @@ function persistTabOrder() {
       entry = { kind: 'notes' };
     } else if (rec.kind === 'deck') {
       entry = { kind: 'deck' };
+    } else if (rec.kind === 'mail') {
+      entry = { kind: 'mail' };
     }
     if (!entry) continue;
     if (rec.customTitle) entry.title = rec.customTitle; // remember a manual rename
@@ -6761,9 +7160,13 @@ async function openSettings() {
   updateGoogleStatusUI(googleEmail);
   els.setClaudeWatch.checked = claudeWatch;
   els.setMeetingChime.checked = meetingChime;
+  els.setMailQuiet.checked = mailQuietFocus;
+  els.setMailUndo.value = String(mailUndoSec);
+  if (els.setMailUndo.value !== String(mailUndoSec)) els.setMailUndo.value = '15';
   els.setCmdDone.checked = cmdDoneNotify;
   els.setPip.checked = pipEnabled;
   els.setGrass.checked = exposeGrass;
+  els.setJoinWraps.checked = copyJoinWraps;
   els.setWheelKeys.value = wheelKeys;
   els.setTmuxPrefix.value = tmuxPrefix;
   els.setTmuxAutoExit.checked = tmuxAutoExit;
@@ -6863,6 +7266,16 @@ els.setClaudeWatch.addEventListener('change', () => {
   api.saveSettings({ claudeWatch });
 });
 
+els.setMailUndo.addEventListener('change', () => {
+  mailUndoSec = parseInt(els.setMailUndo.value, 10) || 0;
+  api.saveSettings({ mailUndoSec });
+});
+
+els.setMailQuiet.addEventListener('change', () => {
+  mailQuietFocus = els.setMailQuiet.checked;
+  api.saveSettings({ mailQuietFocus });
+});
+
 els.setMeetingChime.addEventListener('change', () => {
   meetingChime = els.setMeetingChime.checked;
   api.saveSettings({ meetingChime });
@@ -6907,14 +7320,16 @@ function updateWheelKeysUI() {
   els.wheelHelp.textContent = WHEEL_HELP[wheelKeys] || '';
 }
 function saveWheelKeys() {
+  copyJoinWraps = els.setJoinWraps.checked;
   wheelKeys = els.setWheelKeys.value;
   tmuxPrefix = els.setTmuxPrefix.value.trim() || 'C-b';
   tmuxAutoExit = els.setTmuxAutoExit.checked;
   wheelUpSeq = els.setWheelUp.value;
   wheelDownSeq = els.setWheelDown.value;
   updateWheelKeysUI();
-  api.saveSettings({ wheelKeys, tmuxPrefix, tmuxAutoExit, wheelUpSeq, wheelDownSeq });
+  api.saveSettings({ copyJoinWraps, wheelKeys, tmuxPrefix, tmuxAutoExit, wheelUpSeq, wheelDownSeq });
 }
+els.setJoinWraps.addEventListener('change', saveWheelKeys);
 els.setWheelKeys.addEventListener('change', saveWheelKeys);
 els.setTmuxPrefix.addEventListener('change', saveWheelKeys);
 els.setTmuxAutoExit.addEventListener('change', saveWheelKeys);
@@ -7883,6 +8298,8 @@ function jumpToEvent(ev) {
     openSlackChannelById(r.channelId);
   } else if (r.type === 'url' && r.url) {
     api.openExternal(r.url);
+  } else if (r.type === 'mail' && (r.threadId || r.id)) {
+    mailJump(r);
   }
 }
 
@@ -9539,10 +9956,12 @@ function fmtSize(n) {
 function openSftp() {
   sftpOpen = true;
   els.sftpPanel.classList.remove('hidden');
+  if (els.filesBtn) els.filesBtn.classList.add('on');
   refreshSftpForActive();
 }
 function closeSftp() {
   sftpOpen = false;
+  if (els.filesBtn) els.filesBtn.classList.remove('on');
   els.sftpPanel.classList.add('hidden');
 }
 
@@ -9681,7 +10100,12 @@ els.sftpPanel.addEventListener('drop', async (e) => {
   await uploadDropped(rec, pathsFromDrop(e));
 });
 
-els.sftpBtn.addEventListener('click', () => (sftpOpen ? closeSftp() : openSftp()));
+function toggleSftp() {
+  if (sftpOpen) closeSftp();
+  else openSftp();
+}
+els.sftpBtn.addEventListener('click', toggleSftp);
+if (els.filesBtn) els.filesBtn.addEventListener('click', toggleSftp);
 els.sftpClose.addEventListener('click', closeSftp);
 els.sftpRefresh.addEventListener('click', refreshSftpForActive);
 els.sftpUp.addEventListener('click', () => {
@@ -9723,7 +10147,7 @@ function buildSendCommands(name, b64, tok, startLit, endLit) {
 // gets the one-line result.
 async function sendFileInBand(rec) {
   if (!rec || (rec.kind !== 'ssh' && rec.kind !== 'local') || !rec.term) return;
-  if (rec._grab || rec._probe || rec._send) {
+  if (rec._grab || rec._send) {
     writeToTerm(rec, '\r\n\x1b[2m[this terminal is busy with another transfer]\x1b[0m\r\n');
     return;
   }
@@ -9741,7 +10165,38 @@ async function sendFileInBand(rec) {
     writeToTerm(rec, '\r\n\x1b[31m[could not read that file: ' + (picked.error || 'unknown') + ']\x1b[0m\r\n');
     return;
   }
-  const tok = 'S' + Math.random().toString(36).slice(2, 12).toUpperCase().replace(/[^A-Z0-9]/g, '') + 'S';
+  return sendB64InBand(rec, picked);
+}
+// The transfer itself, for bytes that are already in hand: a picked file, or a mail
+// attachment sent to a shell. `file` is { name, size, b64 }. Resolves true on a
+// verified arrival, false otherwise (the reason is always written to the terminal).
+async function sendB64InBand(rec, file) {
+  if (!rec || (rec.kind !== 'ssh' && rec.kind !== 'local') || !rec.term) return false;
+  // Same rule as the grab: another transfer is a conflict, a probe or a resync is
+  // something to wait a moment for (a freshly opened terminal runs one 1.5 s in).
+  if (rec._grab || rec._send) {
+    writeToTerm(rec, '\r\n\x1b[2m[this terminal is busy with another transfer]\x1b[0m\r\n');
+    return false;
+  }
+  if (inBandBusy(rec)) {
+    const free = await new Promise((r) => whenInBandFree(rec, () => r(true), () => r(false)));
+    if (!free) {
+      writeToTerm(rec, '\r\n\x1b[31m[the terminal is busy with another in-band command - try again]\x1b[0m\r\n');
+      return false;
+    }
+  }
+  if (file.size > SEND_MAX_BYTES) {
+    writeToTerm(
+      rec,
+      '\r\n\x1b[31m[' + file.name + ' is ' + fmtBytes(file.size) + ' - too big to type through a terminal (limit ' +
+        fmtBytes(SEND_MAX_BYTES) + ').]\x1b[0m\r\n'
+    );
+    return false;
+  }
+  const picked = file;
+  let settle;
+  const result = new Promise((r) => (settle = r));
+  const tok ='S' + Math.random().toString(36).slice(2, 12).toUpperCase().replace(/[^A-Z0-9]/g, '') + 'S';
   const startMark = '::U8' + tok + '::';
   const endMark = '::V8' + tok + '::';
   // Split so the resolved marker never appears in the echoed command line.
@@ -9771,30 +10226,41 @@ async function sendFileInBand(rec) {
         return '';
       }
       const after = this.all.slice(j + endMark.length);
-      const m = after.match(/(-?\\d+)\\s+(\\d*)/);
+      const m = after.match(/(-?\d+)\s+(\d*)/);
       const rc = m ? parseInt(m[1], 10) : -1;
       const bytes = m && m[2] ? parseInt(m[2], 10) : -1;
-      const nl = after.indexOf('\\n');
+      const nl = after.indexOf('\n');
       const tail = nl === -1 ? '' : after.slice(nl + 1);
-      this.finish(rc, bytes);
+      this.finish(rc, bytes, m ? '' : 'unreadable');
       return tail;
     },
-    finish(rc, bytes) {
+    // `why` separates our own sentinels from a real answer: rc is only an exit code
+    // when the host actually replied.
+    finish(rc, bytes, why) {
       if (this.done) return;
       this.done = true;
       clearTimeout(this.timer);
       if (rec._send === this) rec._send = null;
-      const okSize = bytes === picked.size;
-      const note =
-        rc === 0 && okSize
-          ? '\x1b[2m[sent ' + picked.name + ' (' + fmtBytes(picked.size) + ') to this shell]\x1b[0m'
-          : rc === 0
-            ? '\x1b[31m[' + picked.name + ' arrived as ' + bytes + ' bytes, expected ' + picked.size + ']\x1b[0m'
-            : '\x1b[31m[send failed (exit ' + rc + ') - is base64 available on that host?]\x1b[0m';
+      let note;
+      if (why === 'timeout') {
+        note = '\x1b[31m[no reply after 2 minutes - the shell may be busy, or not a shell at all]\x1b[0m';
+      } else if (why === 'unreadable') {
+        note = '\x1b[31m[the host answered, but the result could not be read]\x1b[0m';
+      } else if (rc !== 0) {
+        note =
+          '\x1b[31m[send failed (exit ' + rc + ') - the host could not decode it. base64 is part of ' +
+          'coreutils, so check PATH rather than installing anything]\x1b[0m';
+      } else if (bytes !== picked.size) {
+        note =
+          '\x1b[31m[' + picked.name + ' arrived as ' + bytes + ' bytes, expected ' + picked.size + ']\x1b[0m';
+      } else {
+        note = '\x1b[2m[sent ' + picked.name + ' (' + fmtBytes(picked.size) + ') to this shell]\x1b[0m';
+      }
       writeToTerm(rec, note + '\r\n');
+      settle(!why && rc === 0 && bytes === picked.size);
     },
   };
-  send.timer = setTimeout(() => send.finish(-1, -1), 120000);
+  send.timer = setTimeout(() => send.finish(-1, -1, 'timeout'), 120000);
   rec._send = send;
   writeToTerm(
     rec,
@@ -9806,10 +10272,11 @@ async function sendFileInBand(rec) {
     else api.write(rec.id, data);
   };
   for (const cmd of cmds) {
-    if (send.done) return; // timed out or the tab went away
+    if (send.done) break; // timed out or the tab went away
     write(cmd + '\r');
     await new Promise((r) => setTimeout(r, SEND_PACE_MS));
   }
+  return result;
 }
 async function sendFileToHost(rec) {
   if (!rec || rec.kind !== 'ssh') return;
@@ -10024,6 +10491,230 @@ const BELL_VOICES = {
     preview: 1,
   },
 };
+// ---------------------------------------------------------------------------
+// Break music. Generated, never a file: there is nothing to ship, nothing to
+// license, and it never loops audibly because it is different every time. Each
+// voice gets a context of its own; `music` holds the nodes and timers so
+// musicStop can take them all down again.
+// ---------------------------------------------------------------------------
+let music = null; // { ctx, out, kind, timers, nodes, alive, preview }
+
+// One buffer of white noise, reused by every noise-based voice.
+function noiseBuffer(ctx, seconds) {
+  const len = Math.floor(ctx.sampleRate * (seconds || 2));
+  const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+  return buf;
+}
+function noiseSource(m) {
+  const src = m.ctx.createBufferSource();
+  src.buffer = noiseBuffer(m.ctx, 2);
+  src.loop = true;
+  m.nodes.push(src);
+  return src;
+}
+// A very slow sine that drifts a parameter around. This is what keeps any of it
+// from sounding like a loop.
+function drift(m, param, centre, depth, hz) {
+  const lfo = m.ctx.createOscillator();
+  const amt = m.ctx.createGain();
+  lfo.frequency.value = hz;
+  amt.gain.value = depth;
+  param.value = centre;
+  lfo.connect(amt).connect(param);
+  lfo.start();
+  m.nodes.push(lfo);
+  return lfo;
+}
+// Do something again on a random interval, for as long as the music runs.
+function every(m, minSec, maxSec, fn) {
+  const wait = () => (minSec + Math.random() * (maxSec - minSec)) * 1000;
+  const tick = () => {
+    if (!m.alive) return;
+    fn();
+    m.timers.push(setTimeout(tick, wait()));
+  };
+  m.timers.push(setTimeout(tick, wait()));
+}
+// One soft note, shared by the bowl and music-box voices.
+function softNote(m, freq, dur, level, type) {
+  const o = m.ctx.createOscillator();
+  const g = m.ctx.createGain();
+  const t = m.ctx.currentTime;
+  o.type = type || 'sine';
+  o.frequency.value = freq;
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(Math.max(0.0002, level), t + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(m.out);
+  o.start(t);
+  o.stop(t + dur + 0.1);
+}
+
+// A pentatonic scale has no wrong notes, which is what makes random pleasant.
+const PENTA = [0, 2, 4, 7, 9];
+function pentaFreq(root, step) {
+  const n = ((step % PENTA.length) + PENTA.length) % PENTA.length;
+  const oct = Math.floor(step / PENTA.length);
+  return root * Math.pow(2, (PENTA[n] + 12 * oct) / 12);
+}
+
+const RELAX_MUSIC = {
+  rain: {
+    label: 'Rain',
+    start(m) {
+      // Two layers: a dark hiss underneath, a brighter band wandering on top.
+      const deep = noiseSource(m);
+      const lp = m.ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = 420;
+      const deepGain = m.ctx.createGain();
+      deepGain.gain.value = 0.5;
+      deep.connect(lp).connect(deepGain).connect(m.out);
+      deep.start();
+      const bright = noiseSource(m);
+      const bp = m.ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.Q.value = 0.7;
+      const brightGain = m.ctx.createGain();
+      bright.connect(bp).connect(brightGain).connect(m.out);
+      bright.start();
+      drift(m, bp.frequency, 1400, 700, 0.05); // the shower moving about
+      drift(m, brightGain.gain, 0.22, 0.1, 0.017);
+    },
+  },
+  waves: {
+    label: 'Ocean waves',
+    start(m) {
+      const src = noiseSource(m);
+      const lp = m.ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      const swell = m.ctx.createGain();
+      src.connect(lp).connect(swell).connect(m.out);
+      src.start();
+      // One breath in and out roughly every twelve seconds.
+      drift(m, swell.gain, 0.34, 0.3, 0.08);
+      drift(m, lp.frequency, 700, 450, 0.08);
+    },
+  },
+  drone: {
+    label: 'Warm drone',
+    start(m) {
+      // A wide, slowly beating chord; the detuned pairs do the shimmering.
+      [110, 164.81, 220, 329.63].forEach((f, i) => {
+        [0, 0.6].forEach((cents, k) => {
+          const o = m.ctx.createOscillator();
+          const g = m.ctx.createGain();
+          o.type = i > 2 ? 'sine' : 'triangle';
+          o.frequency.value = f + cents;
+          g.gain.value = 0;
+          o.connect(g).connect(m.out);
+          o.start();
+          m.nodes.push(o);
+          drift(m, g.gain, 0.075 / (i + 1), 0.055 / (i + 1), 0.021 + i * 0.007 + k * 0.004);
+        });
+      });
+    },
+  },
+  bowls: {
+    label: 'Distant bowls',
+    start(m) {
+      // The bell you already chose, rung softly at random - your own tuned bowl
+      // included, since it is the same engine.
+      const ring = () => {
+        const V = bellVoice(relaxBellSound);
+        const f = V.base * Math.pow(2, (PENTA[Math.floor(Math.random() * 5)] - 12) / 12);
+        softNote(m, f, Math.min(6, V.decay * 1.4), 0.09);
+        softNote(m, f * 2.74, Math.min(4, V.decay), 0.02);
+      };
+      ring();
+      every(m, 6, 15, ring);
+    },
+  },
+  box: {
+    label: 'Music box',
+    start(m) {
+      // A random walk over a pentatonic scale, so nothing can land wrong.
+      let last = 3;
+      every(m, 1.6, 4.5, () => {
+        last = Math.max(0, Math.min(11, last + Math.floor(Math.random() * 5) - 2));
+        softNote(m, pentaFreq(261.63, last), 2.6, 0.05, 'triangle');
+      });
+      // A low root now and then to hold it together.
+      every(m, 9, 16, () => softNote(m, 130.81, 5, 0.035, 'sine'));
+    },
+  },
+};
+
+function musicKind(id) {
+  return RELAX_MUSIC[id] ? id : Object.keys(RELAX_MUSIC)[0];
+}
+// Fade in, because a sound starting at full level in a quiet room is a jump scare.
+const MUSIC_FADE_IN = 2.5;
+const MUSIC_FADE_OUT = 1.6;
+function musicStart(kind, preview) {
+  musicStop(true); // never two at once
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    const out = ctx.createGain();
+    out.gain.setValueAtTime(0.0001, ctx.currentTime);
+    out.gain.exponentialRampToValueAtTime(Math.max(0.0002, relaxMusicVol), ctx.currentTime + MUSIC_FADE_IN);
+    out.connect(ctx.destination);
+    music = { ctx, out, kind: musicKind(kind), timers: [], nodes: [], alive: true, preview: !!preview };
+    RELAX_MUSIC[music.kind].start(music);
+  } catch (_) {
+    music = null; // no audio here; a break is still a break
+  }
+}
+function musicStop(immediate) {
+  const m = music;
+  if (!m) return;
+  music = null;
+  m.alive = false;
+  m.timers.forEach(clearTimeout);
+  m.timers.length = 0;
+  try {
+    const t = m.ctx.currentTime;
+    m.out.gain.cancelScheduledValues(t);
+    m.out.gain.setValueAtTime(Math.max(0.0002, m.out.gain.value), t);
+    m.out.gain.exponentialRampToValueAtTime(0.0001, t + (immediate ? 0.05 : MUSIC_FADE_OUT));
+  } catch (_) {
+    /* already gone */
+  }
+  // Close after the fade, or the tail is cut off mid-note.
+  setTimeout(
+    () => {
+      try {
+        m.ctx.close();
+      } catch (_) {
+        /* already closed */
+      }
+    },
+    (immediate ? 0.1 : MUSIC_FADE_OUT + 0.2) * 1000
+  );
+}
+// Music belongs to a break that is actually running - and never to a meeting.
+function musicWanted() {
+  return !!(
+    relaxMusicOn &&
+    relax &&
+    relax.running &&
+    !relax.parked &&
+    relax.phase !== 'work' &&
+    !inMeeting()
+  );
+}
+// Idempotent: relaxRender calls it once a second. A preview started from the dialog
+// is left alone until it finishes on its own.
+function musicSync() {
+  if (music && music.preview) return;
+  const on = musicWanted();
+  if (on && !music) musicStart(relaxMusic);
+  else if (!on && music) musicStop();
+}
+
 // The knobs behind 'Your own bowl'. This one table is the whole feature: it sets the
 // ranges, builds the sliders, clamps what comes back from the dialog and from saved
 // settings, and names the units. Values are held in the units shown, so the slider
@@ -10233,30 +10924,52 @@ function stopGoogleFeeds() {
 const bbSeenMail = new Set();
 let bbMailPrimed = false;
 let gmailLastMessages = []; // most recent fetch, so the Command Deck can count unread
-async function refreshGmail() {
+// `asked`: the user changed the filter or pressed refresh - that is not mail arriving, so the
+// quiet hold does not apply (the same rule as mailBadge).
+async function refreshGmail(asked) {
   if (!googleConnected) return;
-  const res = await api.googleRecentMail();
+  const inboxQ = mailInboxQuery();
+  const res = await api.googleRecentMail(inboxQ || undefined);
   if (!res || !res.ok) return;
-  gmailLastMessages = res.messages || [];
+  if (inboxQ !== mailInboxQuery()) return; // the filter changed mid-flight; a newer fetch follows
+  const primedBefore = bbMailPrimed;
+  const fresh = [];
   // Log only genuinely-new mail; prime the seen-set on the first fetch so the whole
   // inbox isn't logged as "new" at startup.
   for (const m of res.messages) {
     if (bbSeenMail.has(m.id)) continue;
     bbSeenMail.add(m.id);
     if (bbMailPrimed) {
+      fresh.push(m);
       logEvent('mail', {
         title: shortFrom(m.from) + ' · ' + (m.subject || '(no subject)'),
         detail: m.snippet || '',
-        ref: { type: 'mail', id: m.id },
+        ref: { type: 'mail', id: m.id, threadId: m.threadId || '' },
       });
     }
   }
   bbMailPrimed = true;
+  // Quiet during focus: the board, the Deck count and the tab badge hold still, and the
+  // new mail waits for mailQuietCheck to summarise it. Only once something has been
+  // shown - a cold start inside a work phase still paints the board once.
+  if (!asked && primedBefore && mailQuiet()) {
+    for (const m of fresh) if (!mbox.held.some((h) => h.id === m.id)) mbox.held.push({ id: m.id, from: shortFrom(m.from) });
+    return;
+  }
+  gmailLastMessages = res.messages || [];
+  mailTick();
+  // Say so when the board is filtered, or a quiet Primary-only board reads as an empty inbox.
+  const head = document.querySelector('#gmail-header > span');
+  if (head) {
+    const names = MAIL_CATEGORIES.filter((c) => mailCategories.includes(c.key)).map((c) => c.label);
+    head.textContent = '📧 Inbox' + (names.length ? ' · ' + names.join(', ') : '');
+  }
   els.gmailItems.innerHTML = '';
   for (const m of res.messages) {
     const item = document.createElement('div');
     item.className = 'gmail-item' + (m.unread ? ' unread' : '');
-    item.title = m.from + (m.unread ? '  (unread)' : '');
+    item.title =
+      m.from + (m.unread ? '  (unread)' : '') + '\nClick: open in the Mail tab · Shift+click: Gmail in the browser';
     const subj = document.createElement('div');
     subj.className = 'gmail-subj';
     subj.textContent = m.subject;
@@ -10305,9 +11018,12 @@ async function refreshGmail() {
     item.appendChild(subj);
     item.appendChild(from);
     item.appendChild(actions);
-    item.addEventListener('click', () =>
-      api.openExternal('https://mail.google.com/mail/u/0/#all/' + m.id)
-    );
+    item.addEventListener('click', (e) => {
+      if (e.shiftKey) return api.openExternal('https://mail.google.com/mail/u/0/#all/' + m.id);
+      hideGmailPreview();
+      if (m.threadId) createMailTab({ threadId: m.threadId });
+      else mailJump({ id: m.id });
+    });
     item.addEventListener('mouseenter', () => showGmailPreview(item, m));
     item.addEventListener('mouseleave', hideGmailPreview);
     // Right-click an email to save it as a sticky note (full body if available, else snippet).
@@ -10404,6 +11120,2403 @@ function shortFrom(from) {
   if (!from) return '';
   const m = from.match(/^\s*"?([^"<]+?)"?\s*<.+>/);
   return (m ? m[1] : from).trim();
+}
+
+// ---------------------------------------------------------------------------
+// Mail tab - Gmail in a tab: a thread list, a sandboxed reader, keyboard triage,
+// compose / reply / forward, attachments straight into a shell, and quiet during focus.
+// ---------------------------------------------------------------------------
+const MAIL_VIEWS = [
+  { key: 'INBOX', label: 'Inbox', labelIds: ['INBOX'] },
+  { key: 'UNREAD', label: 'Unread', labelIds: ['INBOX'], q: 'is:unread' },
+  { key: 'STARRED', label: 'Starred', labelIds: ['STARRED'] },
+  { key: 'SENT', label: 'Sent', labelIds: ['SENT'] },
+  { key: 'ALL', label: 'All mail', labelIds: [] },
+];
+// Gmail's inbox categories, as its search spells them. Primary is CATEGORY_PERSONAL underneath.
+const MAIL_CATEGORIES = [
+  { key: 'primary', label: 'Primary' },
+  { key: 'updates', label: 'Updates' },
+  { key: 'promotions', label: 'Promotions' },
+  { key: 'social', label: 'Social' },
+  { key: 'forums', label: 'Forums' },
+];
+// Which categories count as "the inbox": the Mail tab's Inbox and Unread views, the tab
+// badge, the Inbox board, the Home count and the quiet-time summary all follow it, so a
+// hidden category can never be what makes a number go up. Empty = everything.
+let mailCategories = [];
+const MAIL_SEND_MAX = 25 * 1024 * 1024; // Gmail's own attachment limit
+const MAIL_IMG_MAX = 60; // remote images fetched per message on "Load images"
+const MAIL_KEYS = {
+  j: 'next',
+  k: 'prev',
+  Enter: 'open',
+  o: 'open',
+  u: 'back',
+  Escape: 'escape',
+  e: 'archive',
+  '#': 'trash',
+  s: 'star',
+  I: 'read',
+  U: 'unread',
+  l: 'label',
+  r: 'reply',
+  a: 'replyall',
+  f: 'forward',
+  c: 'compose',
+  '/': 'search',
+  '?': 'help',
+  z: 'undo',
+  d: 'dark',
+};
+const MAIL_KEY_HELP = [
+  ['j / k', 'next / previous conversation'],
+  ['Enter / o', 'open'],
+  ['u / Esc', 'back to the list'],
+  ['e', 'archive'],
+  ['#', 'trash'],
+  ['s', 'star'],
+  ['Shift+I', 'mark read'],
+  ['Shift+U', 'mark unread'],
+  ['l', 'label'],
+  ['r / a / f', 'reply / reply all / forward'],
+  ['1 - 9', 'quick reply (open conversation)'],
+  [';; or Ctrl+Space', 'insert a snippet (while writing)'],
+  [';key + Space', 'expand a snippet by its shortcut'],
+  ['c', 'compose'],
+  ['/', 'search'],
+  ['z', 'undo'],
+  ['d', 'dark reading on / off (remembered)'],
+  ['Ctrl+Enter', 'send (while writing)'],
+  ['?', 'this list'],
+];
+let mailQuietFocus = true; // hold new-mail signals during a focus session or a work phase
+const mbox = {
+  view: 'INBOX', // a MAIL_VIEWS key, a user label id, or 'SEARCH'
+  q: '',
+  threads: [],
+  next: null,
+  sel: -1,
+  openId: null, // the thread in the reader
+  thread: null, // { id, messages } once it has loaded
+  labels: [],
+  canSend: null,
+  unread: null, // the INBOX unread count last SHOWN - quiet holds this still
+  loading: false,
+  loadedAt: 0,
+  seq: 0, // bumps per list load, so a slow answer cannot overwrite a newer view
+  draft: null,
+  undo: null,
+  held: [], // mail that arrived while quiet: [{ id, from }]
+  quietWas: false,
+};
+let mailToastTimer = null;
+
+function mailRec() {
+  for (const r of tabs.values()) if (r.kind === 'mail') return r;
+  return null;
+}
+function mailEl(sel) {
+  const rec = mailRec();
+  return rec ? rec.paneEl.querySelector(sel) : null;
+}
+
+function createMailTab(opts) {
+  const have = mailRec();
+  if (have) {
+    activateTab(have.id);
+    if (opts && opts.threadId) mailOpenThread(opts.threadId);
+    return have.id;
+  }
+  const id = newTabId();
+  const { tabEl, paneEl } = createTabChrome(id, 'Mail', 'mail');
+  paneEl.classList.remove('term-pane');
+  paneEl.classList.add('mail-pane');
+  paneEl.tabIndex = -1; // focusable, so the keyboard map has somewhere to listen
+  paneEl.innerHTML =
+    '<div class="mail-top">' +
+    '<input class="mail-search" type="search" placeholder="Search mail  ( / )" spellcheck="false" />' +
+    '<div class="mail-views"></div>' +
+    '<select class="mail-labels" title="Show a label"></select>' +
+    '<span class="mail-spacer"></span>' +
+    '<button class="mail-btn" data-act="refresh" title="Refresh">⟳</button>' +
+    '<button class="mail-btn" data-act="snippets" title="Snippets and quick replies">✂</button>' +
+    '<button class="mail-btn mail-primary" data-act="compose" title="Compose (c)">✏ Compose</button>' +
+    '<button class="mail-btn" data-act="help" title="Keyboard shortcuts (?)">?</button>' +
+    '</div>' +
+    '<div class="mail-cats"></div>' +
+    '<div class="mail-main">' +
+    '<div class="mail-list"></div>' +
+    '<div class="mail-split" title="Drag to resize the list · double-click for the default width"></div>' +
+    '<div class="mail-reader"></div>' +
+    '</div>' +
+    '<div class="mail-toast hidden"></div>' +
+    '<div class="mail-keys hidden"></div>' +
+    '<div class="mail-pop hidden"></div>' +
+    '<div class="mail-compose hidden"></div>' +
+    '<div class="mail-snips hidden"></div>' +
+    '<div class="mail-lightbox hidden"></div>';
+  const rec = {
+    id,
+    kind: 'mail',
+    paneEl,
+    tabEl,
+    unreadEl: tabEl.querySelector('.unread'),
+    status: 'connected',
+    profile: { name: 'Mail' },
+  };
+  tabs.set(id, rec);
+  mailWire(rec);
+  mailWireSplit(rec);
+  mailApplyListW(rec);
+  mailRenderViews();
+  mailCloseReader();
+  activateTab(id);
+  bbTabOpen(rec);
+  persistTabOrder();
+  mailLoad();
+  mailLoadLabels();
+  mailCheckSend();
+  mailLoadContacts(); // warms the address book (a first build reads recent headers once)
+  // Paint what is already known: quiet holds the NUMBER still, it must not hide it from
+  // a tab opened in the middle of a work phase.
+  if (mbox.unread != null) mailShowBadge(mbox.unread);
+  mailBadge();
+  if (opts && opts.threadId) mailOpenThread(opts.threadId);
+  return id;
+}
+
+// The tab closed: forget what it was showing (the draft was already confirmed away).
+function mailReset() {
+  Object.assign(mbox, { threads: [], next: null, sel: -1, openId: null, thread: null, draft: null, undo: null, undoSendId: null });
+  clearInterval(mailSendTick);
+}
+
+function mailWire(rec) {
+  const p = rec.paneEl;
+  p.addEventListener('keydown', mailKeydown);
+  const search = p.querySelector('.mail-search');
+  search.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      mailSearch(search.value);
+      mailFocus();
+    }
+  });
+  p.querySelector('.mail-labels').addEventListener('change', (e) => {
+    const v = e.target.value;
+    if (v) mailSetView(v);
+    mailFocus();
+  });
+  p.querySelector('.mail-top').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-act], [data-view]');
+    if (!b) return;
+    if (b.dataset.view) return mailSetView(b.dataset.view);
+    if (b.dataset.act === 'clear-search') return mailSetView('INBOX');
+    mailDo(b.dataset.act);
+  });
+  p.querySelector('.mail-cats').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-cat]');
+    if (!b) return;
+    mailToggleCategory(b.dataset.cat);
+    mailFocus();
+  });
+  p.querySelector('.mail-list').addEventListener('click', (e) => {
+    if (e.target.closest('[data-act="settings"]')) return openSettings();
+    if (e.target.closest('.mail-more')) return mailLoad(true);
+    const row = e.target.closest('.mail-row');
+    if (!row) return;
+    const t = mbox.threads[+row.dataset.i];
+    if (!t) return;
+    const act = e.target.closest('[data-act]');
+    mbox.sel = +row.dataset.i;
+    if (act) {
+      e.stopPropagation();
+      if (act.dataset.act === 'star') mailToggleStar(t.id);
+      else mailRemove(t.id, act.dataset.act);
+      return;
+    }
+    mailOpenThread(t.id);
+  });
+  p.querySelector('.mail-reader').addEventListener('click', (e) => {
+    const b = e.target.closest('.mr-bar [data-act]');
+    if (b) return mailDo(b.dataset.act);
+    const qr = e.target.closest('.mr-quick [data-qr]');
+    if (qr) return mailQuickReply(+qr.dataset.qr, e.ctrlKey || e.metaKey);
+    if (e.target.closest('.mr-quick [data-snips]')) return mailSnippetManager();
+    const a = e.target.closest('.mm-text a[href]');
+    if (a) {
+      e.preventDefault();
+      mailFollowLink(a.getAttribute('href'), e.ctrlKey || e.metaKey);
+    }
+  });
+  p.querySelector('.mail-toast').addEventListener('click', (e) => {
+    if (e.target.closest('[data-act="undo"]')) mailDo('undo');
+    else if (e.target.closest('[data-act="send-now"]')) mailSendNowPending();
+    else if (e.target.closest('[data-act="reopen"]') && mbox.reopen) {
+      const d = mbox.reopen;
+      if (mailDraftDirty() && !window.confirm('Discard the message you are writing and reopen the unsent one?')) return;
+      mbox.reopen = null;
+      mbox.draft = d;
+      mailRenderCompose();
+    }
+  });
+  const lb = p.querySelector('.mail-lightbox');
+  lb.addEventListener('click', () => lb.classList.add('hidden'));
+  p.querySelector('.mail-keys').addEventListener('click', () => p.querySelector('.mail-keys').classList.add('hidden'));
+  p.querySelector('.mail-keys').innerHTML =
+    '<div class="mk-card"><div class="mk-title">Keyboard</div>' +
+    MAIL_KEY_HELP.map(([k, d]) => `<div class="mk-row"><kbd>${escapeHtml(k)}</kbd><span>${escapeHtml(d)}</span></div>`).join('') +
+    '</div>';
+}
+
+// The list / reader divider. The width is a pixel value on the pane (--mail-list-w) and is
+// saved; the CSS clamps it, so a window made narrower later never squeezes the reader out.
+// While dragging, the message frames stop taking the pointer: an iframe under the cursor
+// would swallow the moves and leave the divider stuck.
+let mailListW = null; // px, or null for the default
+const MAIL_LIST_MIN = 220;
+const MAIL_READER_MIN = 320;
+function mailApplyListW(rec) {
+  if (!rec) return;
+  if (mailListW) rec.paneEl.style.setProperty('--mail-list-w', mailListW + 'px');
+  else rec.paneEl.style.removeProperty('--mail-list-w');
+}
+function mailWireSplit(rec) {
+  const split = rec.paneEl.querySelector('.mail-split');
+  const main = rec.paneEl.querySelector('.mail-main');
+  const list = rec.paneEl.querySelector('.mail-list');
+  let drag = null;
+  split.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    drag = { x: e.clientX, w: list.getBoundingClientRect().width };
+    rec.paneEl.classList.add('mail-resizing'); // first: the frames must let go of the pointer
+    try {
+      split.setPointerCapture(e.pointerId);
+    } catch (_) {
+      /* no live pointer to capture; the resizing class still keeps the frames out of the way */
+    }
+  });
+  split.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    const max = main.getBoundingClientRect().width - MAIL_READER_MIN - split.getBoundingClientRect().width;
+    mailListW = Math.round(Math.max(MAIL_LIST_MIN, Math.min(max, drag.w + e.clientX - drag.x)));
+    mailApplyListW(rec);
+  });
+  const end = (e) => {
+    if (!drag) return;
+    drag = null;
+    try {
+      split.releasePointerCapture(e.pointerId);
+    } catch (_) {
+      /* already released */
+    }
+    rec.paneEl.classList.remove('mail-resizing');
+    api.saveSettings({ mailListW });
+  };
+  split.addEventListener('pointerup', end);
+  split.addEventListener('pointercancel', end);
+  split.addEventListener('dblclick', () => {
+    mailListW = null;
+    mailApplyListW(rec);
+    api.saveSettings({ mailListW: null });
+  });
+}
+function mailFocus() {
+  const rec = mailRec();
+  if (!rec || rec.id !== activeTabId) return;
+  const c = rec.paneEl.querySelector('.mail-compose');
+  if (c && !c.classList.contains('hidden') && c.contains(document.activeElement)) return;
+  rec.paneEl.focus({ preventScroll: true });
+}
+// Called from activateTab: the one explicit moment to catch up on a stale list.
+function mailOnShow() {
+  mailFocus();
+  if (googleConnected && !mbox.loading && Date.now() - mbox.loadedAt > 60000) mailLoad(false, true);
+  if (mbox.canSend == null) mailCheckSend();
+}
+
+// ---- views, search, labels ----
+// '' (all), 'category:primary', or '{category:primary category:updates}' - braces are OR
+// in Gmail search, where plain juxtaposition would be AND and match nothing.
+function mailCategoryQuery(cats) {
+  const on = MAIL_CATEGORIES.map((c) => c.key).filter((k) => (cats || []).includes(k));
+  if (!on.length || on.length === MAIL_CATEGORIES.length) return '';
+  const terms = on.map((k) => 'category:' + k);
+  return terms.length === 1 ? terms[0] : '{' + terms.join(' ') + '}';
+}
+function mailViewQuery() {
+  if (mbox.view === 'SEARCH') return { q: mbox.q, labelIds: [] };
+  const v = MAIL_VIEWS.find((x) => x.key === mbox.view);
+  if (v) {
+    // Categories only mean something inside the inbox; Starred, Sent and the rest are whole.
+    const cat = v.labelIds.includes('INBOX') ? mailCategoryQuery(mailCategories) : '';
+    return { q: [v.q, cat].filter(Boolean).join(' '), labelIds: v.labelIds };
+  }
+  return { q: '', labelIds: [mbox.view] }; // a user label
+}
+// The badge and the board ask for the inbox through the same filter.
+function mailInboxQuery() {
+  return mailCategoryQuery(mailCategories);
+}
+function mailToggleCategory(key) {
+  if (key === 'all') mailCategories = [];
+  else if (mailCategories.includes(key)) mailCategories = mailCategories.filter((k) => k !== key);
+  else mailCategories = mailCategories.concat(key);
+  if (mailCategories.length === MAIL_CATEGORIES.length) mailCategories = []; // all of them is "all"
+  api.saveSettings({ mailCategories });
+  mailRenderCats();
+  if (mailViewHasInbox()) mailSetView(mbox.view);
+  mailBadge(true);
+  refreshGmail(true); // the board follows the same filter, quiet or not - you asked for it
+}
+function mailRenderCats() {
+  const box = mailEl('.mail-cats');
+  if (!box) return;
+  box.classList.toggle('hidden', !mailViewHasInbox());
+  const all = !mailCategories.length;
+  box.innerHTML =
+    '<span class="mail-cats-cap" title="Which inbox categories to show - also what the badge and the Inbox board count">Categories</span>' +
+    `<button class="mail-chip mail-cat${all ? ' sel' : ''}" data-cat="all">All</button>` +
+    MAIL_CATEGORIES.map(
+      (c) =>
+        `<button class="mail-chip mail-cat${mailCategories.includes(c.key) ? ' sel' : ''}" data-cat="${c.key}" title="Click to add or remove ${c.label}">${c.label}</button>`
+    ).join('');
+}
+function mailViewHasInbox() {
+  return mailViewQuery().labelIds.includes('INBOX');
+}
+function mailSetView(view) {
+  mbox.view = view;
+  if (view !== 'SEARCH') {
+    mbox.q = '';
+    const s = mailEl('.mail-search');
+    if (s) s.value = '';
+  }
+  mbox.sel = 0;
+  mbox.threads = [];
+  mbox.next = null;
+  mailCloseReader();
+  mailRenderViews();
+  mailLoad();
+}
+function mailSearch(q) {
+  q = String(q || '').trim();
+  if (!q) return mailSetView('INBOX');
+  mbox.q = q;
+  mailSetView('SEARCH');
+}
+function mailRenderViews() {
+  const box = mailEl('.mail-views');
+  if (!box) return;
+  let html = MAIL_VIEWS.map(
+    (v) => `<button class="mail-chip${mbox.view === v.key ? ' sel' : ''}" data-view="${v.key}">${v.label}</button>`
+  ).join('');
+  const lab = mbox.labels.find((l) => l.id === mbox.view);
+  if (lab) html += `<button class="mail-chip sel" data-view="${escapeHtml(lab.id)}">🏷 ${escapeHtml(lab.name)}</button>`;
+  if (mbox.view === 'SEARCH') {
+    html += `<span class="mail-chip sel">🔍 ${escapeHtml(mbox.q)} <button class="mail-x" data-act="clear-search" title="Clear search">✕</button></span>`;
+  }
+  box.innerHTML = html;
+  mailRenderCats();
+  const sel = mailEl('.mail-labels');
+  if (sel) {
+    const user = mbox.labels.filter((l) => l.type === 'user').sort((a, b) => a.name.localeCompare(b.name));
+    sel.innerHTML =
+      '<option value="">🏷 Labels</option>' +
+      user.map((l) => `<option value="${escapeHtml(l.id)}">${escapeHtml(l.name)}</option>`).join('');
+    sel.value = '';
+    sel.classList.toggle('hidden', !user.length);
+  }
+}
+async function mailLoadLabels() {
+  if (!googleConnected) return;
+  const r = await api.mailListLabels();
+  if (r && r.ok) {
+    mbox.labels = r.labels || [];
+    mailRenderViews();
+  }
+}
+
+// ---- the list ----
+async function mailLoad(more, silent) {
+  if (!mailRec()) return;
+  if (!googleConnected) {
+    mbox.threads = [];
+    mbox.next = null;
+    mailRenderList();
+    return;
+  }
+  if (more && !mbox.next) return;
+  const seq = ++mbox.seq;
+  mbox.loading = true;
+  if (!silent) mailRenderList();
+  const res = await api.mailListThreads({ ...mailViewQuery(), pageToken: more ? mbox.next : undefined, max: 25 });
+  if (seq !== mbox.seq) return; // the view changed while this was on its way
+  mbox.loading = false;
+  if (!res || !res.ok) {
+    if (!silent) mailToast('Could not load mail: ' + ((res && res.error) || 'unknown'), 'err');
+    mailRenderList();
+    return;
+  }
+  mbox.loadedAt = Date.now();
+  const selId = mbox.threads[mbox.sel] && mbox.threads[mbox.sel].id;
+  const merge = silent && !more;
+  const hadPages = !!mbox.next || mbox.threads.length > (res.threads || []).length;
+  mbox.threads = mailMergeThreads(mbox.threads, res.threads || [], more ? 'append' : merge ? 'merge' : 'replace');
+  // A background merge keeps the paging the user already did; anything else starts over.
+  if (!merge || !hadPages) mbox.next = res.nextPageToken || null;
+  const k = selId ? mbox.threads.findIndex((t) => t.id === selId) : -1;
+  mbox.sel = k !== -1 ? k : Math.min(Math.max(mbox.sel, 0), mbox.threads.length - 1);
+  mailRenderList();
+}
+// append: a next page. replace: a fresh view. merge: a background refresh of page one -
+// update what is there, add what is new, and keep the pages the user already loaded,
+// newest first, so a refresh never throws away "Load more".
+function mailMergeThreads(have, got, how) {
+  if (how === 'replace') return got.slice();
+  if (how === 'append') return have.concat(got.filter((t) => !have.some((x) => x.id === t.id)));
+  const byId = new Map(got.map((t) => [t.id, t]));
+  const kept = have.map((t) => byId.get(t.id) || t);
+  const fresh = got.filter((t) => !have.some((x) => x.id === t.id));
+  return fresh.concat(kept).sort((a, b) => (b.date || 0) - (a.date || 0));
+}
+function mailDate(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString())
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  if (d.getFullYear() === now.getFullYear()) return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  return d.toLocaleDateString([], { year: '2-digit', month: 'numeric', day: 'numeric' });
+}
+const mailEntityBox = document.createElement('textarea');
+// Gmail snippets arrive HTML-escaped (&#39; &amp;). A textarea decodes without parsing tags.
+function mailDecodeEntities(s) {
+  mailEntityBox.innerHTML = String(s || '');
+  return mailEntityBox.value;
+}
+function mailRenderList() {
+  const list = mailEl('.mail-list');
+  if (!list) return;
+  if (!googleConnected) {
+    list.innerHTML =
+      '<div class="mail-note">Google is not connected.<br /><button class="mail-btn" data-act="settings">Open Settings</button></div>';
+    return;
+  }
+  const rows = mbox.threads.map((t, i) => {
+    const cls = 'mail-row' + (t.unread ? ' unread' : '') + (i === mbox.sel ? ' sel' : '') + (t.id === mbox.openId ? ' open' : '');
+    return (
+      `<div class="${cls}" data-i="${i}">` +
+      `<button class="mr-star${t.starred ? ' on' : ''}" data-act="star" title="Star (s)">${t.starred ? '★' : '☆'}</button>` +
+      '<div class="mr-main">' +
+      '<div class="mr-line1">' +
+      `<span class="mr-from">${escapeHtml(shortFrom(t.from) || t.from || '')}</span>` +
+      (t.count > 1 ? `<span class="mr-count">${t.count}</span>` : '') +
+      (t.hasAttachment ? '<span class="mr-att" title="Probably has an attachment">📎</span>' : '') +
+      `<span class="mr-date">${mailDate(t.date)}</span>` +
+      '</div>' +
+      `<div class="mr-subj">${escapeHtml(t.subject || '(no subject)')}</div>` +
+      `<div class="mr-snip">${escapeHtml(mailDecodeEntities(t.snippet))}</div>` +
+      '</div>' +
+      '<span class="mr-acts"><button data-act="archive" title="Archive (e)">🗃</button><button data-act="trash" title="Trash (#)">🗑</button></span>' +
+      '</div>'
+    );
+  });
+  let foot = '';
+  if (mbox.loading) foot = '<div class="mail-note">Loading…</div>';
+  else if (!mbox.threads.length) foot = '<div class="mail-note">Nothing here.</div>';
+  else if (mbox.next) foot = '<button class="mail-btn mail-more">Load more</button>';
+  list.innerHTML = rows.join('') + foot;
+  const selEl = list.querySelector('.mail-row.sel');
+  if (selEl) selEl.scrollIntoView({ block: 'nearest' });
+}
+
+// ---- the reader ----
+function mailCloseReader(focus) {
+  mbox.openId = null;
+  mbox.thread = null;
+  const r = mailEl('.mail-reader');
+  if (r) r.innerHTML = '<div class="mail-empty">Pick a conversation<br /><span>j / k to move, Enter to open, ? for keys</span></div>';
+  mailRenderList();
+  if (focus) mailFocus();
+}
+async function mailOpenThread(id) {
+  if (!mailRec() || !id) return;
+  mbox.openId = id;
+  const k = mbox.threads.findIndex((t) => t.id === id);
+  if (k !== -1) mbox.sel = k;
+  mailRenderList();
+  const reader = mailEl('.mail-reader');
+  reader.innerHTML = '<div class="mail-empty">Loading…</div>';
+  const res = await api.mailGetThread(id);
+  if (mbox.openId !== id) return; // moved on while it loaded
+  if (!res || !res.ok) {
+    reader.innerHTML = `<div class="mail-empty">Could not open it: ${escapeHtml((res && res.error) || 'unknown')}</div>`;
+    return;
+  }
+  mbox.thread = { id, messages: res.messages || [] };
+  mailRenderThread();
+  // Opening reads it, as in Gmail.
+  if (mbox.thread.messages.some((m) => (m.labelIds || []).includes('UNREAD'))) mailSetFlag(id, 'UNREAD', false, true);
+}
+function mailThreadHas(id, label) {
+  const t = mbox.threads.find((x) => x.id === id);
+  if (t) return (t.labelIds || []).includes(label);
+  return !!(mbox.thread && mbox.thread.id === id && mbox.thread.messages.some((m) => (m.labelIds || []).includes(label)));
+}
+function mailRenderThread() {
+  const t = mbox.thread;
+  const reader = mailEl('.mail-reader');
+  if (!t || !reader) return;
+  const subj = (t.messages[0] && t.messages[0].subject) || '(no subject)';
+  const starred = mailThreadHas(t.id, 'STARRED');
+  reader.innerHTML =
+    '<div class="mr-bar">' +
+    '<button class="mail-btn" data-act="back" title="Back to the list (u)">←</button>' +
+    '<button class="mail-btn" data-act="archive" title="Archive (e)">🗃 Archive</button>' +
+    '<button class="mail-btn" data-act="trash" title="Trash (#)">🗑</button>' +
+    `<button class="mail-btn mr-starbtn" data-act="star" title="Star (s)">${starred ? '★' : '☆'}</button>` +
+    '<button class="mail-btn" data-act="unread" title="Mark unread (Shift+U)">✉</button>' +
+    '<button class="mail-btn" data-act="label" title="Label (l)">🏷</button>' +
+    '<button class="mail-btn mr-darkbtn" data-act="dark"></button>' +
+    '<span class="mail-spacer"></span>' +
+    '<button class="mail-btn" data-act="reply" title="Reply (r)">↩ Reply</button>' +
+    '<button class="mail-btn" data-act="replyall" title="Reply all (a)">⤶ All</button>' +
+    '<button class="mail-btn" data-act="forward" title="Forward (f)">↪ Forward</button>' +
+    '</div>' +
+    `<div class="mr-subject">${escapeHtml(subj)}</div>` +
+    '<div class="mr-msgs"></div>';
+  mailPaintDarkBtn(reader.querySelector('.mr-darkbtn'));
+  const box = reader.querySelector('.mr-msgs');
+  const last = t.messages.length - 1;
+  t.messages.forEach((m, i) => box.appendChild(mailMessageEl(m, i === last || (m.labelIds || []).includes('UNREAD'))));
+  reader.insertAdjacentHTML('beforeend', mailQuickRowHtml());
+  reader.scrollTop = 0;
+}
+function mailAddr(s) {
+  const m = /<([^>]+)>/.exec(String(s || ''));
+  return (m ? m[1] : String(s || '')).trim();
+}
+function mailMessageEl(m, expanded) {
+  const el = document.createElement('div');
+  el.className = 'mm' + (expanded ? ' open' : '');
+  const when = m.internalDate
+    ? new Date(m.internalDate).toLocaleString([], {
+        weekday: 'short',
+        day: 'numeric',
+        month: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      })
+    : m.date || '';
+  el.innerHTML =
+    '<div class="mm-head">' +
+    `<span class="mm-from">${escapeHtml(shortFrom(m.from) || m.from || '')}</span>` +
+    `<span class="mm-addr">${escapeHtml(mailAddr(m.from))}</span>` +
+    `<span class="mm-date">${escapeHtml(when)}</span>` +
+    '</div>' +
+    `<div class="mm-snip">${escapeHtml(mailDecodeEntities(m.snippet))}</div>` +
+    '<div class="mm-body"></div>';
+  el.querySelector('.mm-head').addEventListener('click', () => {
+    el.classList.toggle('open');
+    if (el.classList.contains('open')) mailFillBody(el, m);
+  });
+  if (expanded) mailFillBody(el, m);
+  return el;
+}
+function mailFillBody(el, m) {
+  if (el._filled) return;
+  el._filled = true;
+  const body = el.querySelector('.mm-body');
+  const to = [m.to && 'to ' + m.to, m.cc && 'cc ' + m.cc].filter(Boolean).join('  ·  ');
+  if (to) {
+    const d = document.createElement('div');
+    d.className = 'mm-to';
+    d.textContent = to;
+    body.appendChild(d);
+  }
+  if (m.html) {
+    const clean = mailSanitize(m.html);
+    let bar = null;
+    if (clean.remote) {
+      bar = document.createElement('div');
+      bar.className = 'mm-imgbar';
+      bar.innerHTML =
+        `🖼 ${clean.remote} remote image${clean.remote === 1 ? '' : 's'} blocked - they can tell the sender you opened this. ` +
+        '<button class="mail-btn">Load images</button>';
+      body.appendChild(bar);
+    }
+    const ifr = document.createElement('iframe');
+    ifr.className = 'mm-frame' + (mailDarkRead ? ' dark' : '');
+    // No allow-scripts: the mail can never run code. allow-same-origin only lets US reach
+    // in, to catch link clicks and size the frame. The CSP in the srcdoc (and the page's
+    // own, which a srcdoc inherits) keeps every remote request out until asked.
+    ifr.setAttribute('sandbox', 'allow-same-origin');
+    ifr.setAttribute('referrerpolicy', 'no-referrer');
+    ifr.srcdoc = mailSrcdoc(clean);
+    ifr.addEventListener('load', () => mailFrameReady(ifr, m));
+    body.appendChild(ifr);
+    if (bar) bar.querySelector('button').addEventListener('click', () => mailLoadImages(ifr, bar));
+  } else {
+    const d = document.createElement('div');
+    d.className = 'mm-text';
+    d.innerHTML = mailTextHtml(m.text || mailDecodeEntities(m.snippet));
+    body.appendChild(d);
+  }
+  const atts = mailAttachmentsEl(m);
+  if (atts) body.appendChild(atts);
+}
+
+// ---- rendering untrusted HTML ----
+// DOMParser documents are inert (no scripts run, nothing is fetched), so this is a safe
+// place to cut. The iframe sandbox is the real wall; this keeps the obvious out of it
+// and moves remote images aside so "Load images" can find them.
+const MAIL_DROP =
+  'script,iframe,frame,frameset,object,embed,applet,form,input,button,select,textarea,option,' +
+  'meta,base,link,noscript,template,portal,audio,video,source,track,' +
+  'animate,set,animateMotion,animateTransform,foreignObject';
+const MAIL_URL_ATTRS = /^(?:href|xlink:href|src|background|poster|action|formaction|srcset|ping|lowsrc|dynsrc|longdesc)$/;
+function mailSanitize(html) {
+  const doc = new DOMParser().parseFromString(String(html || ''), 'text/html');
+  doc.querySelectorAll(MAIL_DROP).forEach((n) => n.remove());
+  let remote = 0;
+  const squash = (v) => String(v || '').replace(/[\u0000- \u007f-\u009f]+/g, '');
+  for (const n of doc.querySelectorAll('*')) {
+    for (const a of [...n.attributes]) {
+      const name = a.name.toLowerCase();
+      if (name.startsWith('on')) {
+        n.removeAttribute(a.name);
+        continue;
+      }
+      if (!MAIL_URL_ATTRS.test(name)) continue;
+      const v = squash(a.value);
+      const lv = v.toLowerCase();
+      if (name === 'href' || name === 'xlink:href') {
+        if (!/^(?:https?:|mailto:|tel:|#)/.test(lv)) n.removeAttribute(a.name);
+      } else if (name === 'src' || name === 'background') {
+        n.removeAttribute(a.name);
+        if (lv.startsWith('cid:')) {
+          n.setAttribute('data-cid', decodeURIComponent(v.slice(4)).replace(/^<|>$/g, ''));
+        } else if (/^(?:https?:)?\/\//.test(lv)) {
+          n.setAttribute(name === 'src' ? 'data-remote-src' : 'data-remote-bg', v);
+          remote++;
+        } else if (/^data:image\//.test(lv)) {
+          n.setAttribute(a.name, a.value);
+        }
+      } else {
+        n.removeAttribute(a.name); // srcset, ping, action and friends: nothing we want to follow
+      }
+    }
+  }
+  const styles = [...doc.head.querySelectorAll('style')].map((s) => s.outerHTML).join('');
+  const bodyAttrs = ['style', 'bgcolor', 'text', 'link', 'vlink']
+    .filter((k) => doc.body && doc.body.hasAttribute(k))
+    .map((k) => ` ${k}="${escapeHtml(doc.body.getAttribute(k))}"`)
+    .join('');
+  return { html: styles + (doc.body ? doc.body.innerHTML : ''), bodyAttrs, remote };
+}
+// Dark reading. Recolouring mail with CSS rules fights every mail that sets its own colours
+// (and many do, inline, on every table cell), so the whole document is inverted instead -
+// the one approach that works for all of them. invert(.88), not 1: white lands on about
+// Cockpit's own background grey and black text on a soft light grey rather than pure white.
+// hue-rotate(180deg) turns the inverted hues back round, so a brand's blue stays blue.
+// Images, video and background images are inverted a second time so photos and logos look
+// like themselves (a little dimmed - the two inversions do not cancel exactly, which suits
+// a dark page). The mail itself never runs code, so this is plain CSS injected by us.
+let mailDarkRead = false;
+const MAIL_DARK_ID = 'cockpit-dark-read';
+const MAIL_DARK_CSS =
+  'html{filter:invert(.88) hue-rotate(180deg)}' +
+  'img,video,picture,canvas,svg image,[background],[style*="background-image"],[style*="background:url"],[style*="background: url"]' +
+  '{filter:invert(1) hue-rotate(180deg)}';
+function mailApplyDark(doc, on) {
+  if (!doc || !doc.documentElement) return;
+  const have = doc.getElementById(MAIL_DARK_ID);
+  if (on && !have) {
+    const st = doc.createElement('style');
+    st.id = MAIL_DARK_ID;
+    st.textContent = MAIL_DARK_CSS;
+    (doc.head || doc.documentElement).appendChild(st);
+  } else if (!on && have) {
+    have.remove();
+  }
+}
+// Flip it for every mail on screen now and every mail from here on (it is saved).
+function mailToggleDark(on) {
+  mailDarkRead = on == null ? !mailDarkRead : !!on;
+  api.saveSettings({ mailDarkRead });
+  const rec = mailRec();
+  if (rec) {
+    rec.paneEl.querySelectorAll('iframe.mm-frame').forEach((f) => {
+      f.classList.toggle('dark', mailDarkRead);
+      mailApplyDark(f.contentDocument, mailDarkRead);
+    });
+    const b = rec.paneEl.querySelector('.mr-darkbtn');
+    if (b) mailPaintDarkBtn(b);
+  }
+}
+function mailPaintDarkBtn(b) {
+  b.textContent = mailDarkRead ? '☀' : '🌙';
+  b.title = mailDarkRead
+    ? 'Show mail as the sender made it (d) - remembered for every mail'
+    : 'Show mail white on black (d) - remembered for every mail';
+  b.classList.toggle('on', mailDarkRead);
+}
+function mailSrcdoc(clean) {
+  return (
+    '<!doctype html><html><head><meta charset="utf-8">' +
+    '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data:; style-src \'unsafe-inline\'; font-src data:">' +
+    '<base target="_blank">' +
+    '<style>html,body{margin:0}body{padding:12px 14px;font:14px/1.45 "Segoe UI",system-ui,sans-serif;' +
+    'color:#202124;background:#fff;overflow-wrap:anywhere}img{max-width:100%;height:auto}a{color:#1a5fb4}' +
+    'blockquote{margin:0 0 0 .5em;padding-left:.8em;border-left:3px solid #ddd;color:#555}pre{white-space:pre-wrap}</style>' +
+    (mailDarkRead ? '<style id="' + MAIL_DARK_ID + '">' + MAIL_DARK_CSS + '</style>' : '') +
+    '</head><body' + clean.bodyAttrs + '>' + clean.html + '</body></html>'
+  );
+}
+function mailFrameReady(ifr, m) {
+  const doc = ifr.contentDocument;
+  if (!doc || !doc.documentElement) return;
+  mailApplyDark(doc, mailDarkRead);
+  const fit = () => {
+    ifr.style.height = Math.min(40000, doc.documentElement.scrollHeight + 2) + 'px';
+  };
+  fit();
+  setTimeout(fit, 250);
+  doc.querySelectorAll('img').forEach((i) => i.addEventListener('load', fit));
+  const follow = (e, background) => {
+    const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a) return;
+    e.preventDefault();
+    mailFollowLink(a.getAttribute('href'), background);
+  };
+  doc.addEventListener('click', (e) => follow(e, e.ctrlKey || e.metaKey));
+  doc.addEventListener('auxclick', (e) => {
+    if (e.button === 1) follow(e, true);
+  });
+  // Keys typed while the mail itself has focus still drive the tab.
+  doc.addEventListener('keydown', mailKeydown);
+  mailResolveCids(doc, m).then(fit);
+  ifr._fit = fit;
+}
+async function mailResolveCids(doc, m) {
+  const els2 = [...doc.querySelectorAll('[data-cid]')];
+  await Promise.all(
+    els2.map(async (el) => {
+      const a = m.cids && m.cids[el.getAttribute('data-cid')];
+      if (!a) return;
+      const b64 = await mailAttB64(m, a);
+      if (!b64) return;
+      const url = 'data:' + (/^image\//.test(a.mimeType) ? a.mimeType : 'image/png') + ';base64,' + b64;
+      el.setAttribute(el.tagName === 'IMG' ? 'src' : 'background', url);
+    })
+  );
+}
+function mailAbsUrl(u) {
+  u = String(u || '').trim();
+  if (u.startsWith('//')) u = 'https:' + u;
+  return /^https?:\/\//i.test(u) ? u : null;
+}
+async function mailLoadImages(ifr, bar) {
+  const doc = ifr.contentDocument;
+  if (!doc) return;
+  bar.textContent = 'Loading images…';
+  const cache = new Map();
+  const get = (url) => {
+    if (!cache.has(url)) cache.set(url, api.mailFetchImage(url).then((r) => (r && r.ok ? r.dataUrl : null)));
+    return cache.get(url);
+  };
+  const items = [...doc.querySelectorAll('[data-remote-src], [data-remote-bg]')].slice(0, MAIL_IMG_MAX);
+  let failed = 0;
+  await Promise.all(
+    items.map(async (el) => {
+      const isSrc = el.hasAttribute('data-remote-src');
+      const url = mailAbsUrl(el.getAttribute(isSrc ? 'data-remote-src' : 'data-remote-bg'));
+      const d = url ? await get(url) : null;
+      if (!d) return failed++;
+      el.setAttribute(isSrc ? 'src' : 'background', d);
+      el.removeAttribute(isSrc ? 'data-remote-src' : 'data-remote-bg');
+    })
+  );
+  if (failed) bar.textContent = `${failed} image${failed === 1 ? '' : 's'} could not be loaded.`;
+  else bar.remove();
+  if (ifr._fit) setTimeout(ifr._fit, 50);
+}
+function mailLinkify(escaped) {
+  return escaped.replace(
+    /\bhttps?:\/\/[^\s<>"']*[^\s<>"'.,;:!?)\]]/g,
+    (u) => `<a href="${u}" title="${u}">${u}</a>`
+  );
+}
+function mailTextHtml(text) {
+  return String(text || '')
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((l) => {
+      const h = mailLinkify(escapeHtml(l));
+      return /^\s*>/.test(l) ? `<span class="mm-q">${h}</span>` : h;
+    })
+    .join('\n');
+}
+function mailFollowLink(href, background) {
+  const u = String(href || '').trim();
+  if (/^mailto:/i.test(u)) return mailComposeFromMailto(u);
+  if (/^tel:/i.test(u)) return api.openExternal(u);
+  if (/^https?:\/\//i.test(u)) return openLinkInTab(u, background);
+}
+function mailComposeFromMailto(u) {
+  let to = '';
+  const fields = {};
+  try {
+    const rest = u.replace(/^mailto:/i, '');
+    const qi = rest.indexOf('?');
+    to = decodeURIComponent(qi === -1 ? rest : rest.slice(0, qi));
+    new URLSearchParams(qi === -1 ? '' : rest.slice(qi + 1)).forEach((v, k) => (fields[k.toLowerCase()] = v));
+  } catch (_) {
+    /* a malformed mailto still opens compose with what could be read */
+  }
+  if (!mailRec()) createMailTab();
+  else activateTab(mailRec().id);
+  mailCompose({ to, cc: fields.cc || '', bcc: fields.bcc || '', subject: fields.subject || '', body: fields.body || '' });
+}
+
+// ---- attachments ----
+const mailAttCache = new Map(); // messageId/attachmentId -> base64, small ones only
+function mailNormB64(s) {
+  const t = String(s || '').replace(/-/g, '+').replace(/_/g, '/').replace(/[^A-Za-z0-9+/]/g, '');
+  return t + '='.repeat((4 - (t.length % 4)) % 4);
+}
+function mailB64Size(b64) {
+  const pad = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
+  return Math.floor((b64.length * 3) / 4) - pad;
+}
+async function mailAttB64(m, a) {
+  if (a.data) return mailNormB64(a.data);
+  if (!a.attachmentId) return null;
+  const key = m.id + '/' + a.attachmentId;
+  if (mailAttCache.has(key)) return mailAttCache.get(key);
+  const r = await api.googleAttachment(m.id, a.attachmentId, a.mimeType);
+  if (!r || !r.ok || !r.dataUrl) return null;
+  const b64 = mailNormB64(r.dataUrl.slice(r.dataUrl.indexOf(',') + 1));
+  if (b64.length < 4 * 1024 * 1024) mailAttCache.set(key, b64); // do not hoard big ones
+  return b64;
+}
+const MAIL_TEXT_EXT = /\.(?:txt|md|json|csv|tsv|log|ya?ml|xml|sh|conf|cfg|ini|toml|py|js|ts|sql|env|diff|patch)$/i;
+function mailIsPdf(a) {
+  return a.mimeType === 'application/pdf' || /\.pdf$/i.test(a.filename || '');
+}
+function mailIsText(a) {
+  return (
+    (/^text\//.test(a.mimeType) || /json|xml|yaml|javascript/.test(a.mimeType) || MAIL_TEXT_EXT.test(a.filename)) &&
+    (!a.size || a.size <= 1024 * 1024)
+  );
+}
+// A name from a stranger becomes a path in a shell: keep it to one plain file name.
+function mailSafeName(name) {
+  const n = String(name || '')
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .split(/[\\/]/)
+    .pop()
+    .trim();
+  return !n || n === '.' || n === '..' ? 'attachment' : n;
+}
+function mailAttachmentsEl(m) {
+  const files = (m.attachments || []).filter((a) => !a.inline);
+  if (!files.length) return null;
+  const wrap = document.createElement('div');
+  wrap.className = 'mm-atts';
+  for (const a of files) {
+    const chip = document.createElement('div');
+    chip.className = 'mm-att';
+    const canPreview = /^image\//.test(a.mimeType) || mailIsText(a) || mailIsPdf(a);
+    const big = a.size > SEND_MAX_BYTES;
+    chip.innerHTML =
+      `<span class="mm-att-name" title="${escapeHtml(a.mimeType)}">📎 ${escapeHtml(a.filename)}</span>` +
+      `<span class="mm-att-size">${a.size ? fmtBytes(a.size) : ''}</span>` +
+      (canPreview
+        ? `<button class="mail-btn" data-act="preview" title="${mailIsPdf(a) ? 'Open in a PDF viewer window' : 'Preview'}">👁${mailIsPdf(a) ? ' View' : ''}</button>`
+        : '') +
+      '<button class="mail-btn" data-act="save" title="Save to disk">💾 Save</button>' +
+      `<button class="mail-btn${big ? ' dim' : ''}" data-act="term" title="${
+        big
+          ? 'Too big to type through a terminal (limit ' + fmtBytes(SEND_MAX_BYTES) + ') - this saves it instead'
+          : "Send to a terminal - it lands in that shell's current directory, at any ssh depth"
+      }">⤴ Terminal</button>`;
+    chip.addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-act]');
+      if (b) mailAttAction(b.dataset.act, m, a, b);
+    });
+    wrap.appendChild(chip);
+  }
+  return wrap;
+}
+async function mailAttAction(act, m, a, btn) {
+  if (act === 'term' && a.size > SEND_MAX_BYTES) act = 'save';
+  if (act === 'term') {
+    mailPickTerminal(btn, (target) => mailSendToTerminal(target, m, a));
+    return;
+  }
+  btn.disabled = true;
+  const b64 = await mailAttB64(m, a);
+  btn.disabled = false;
+  if (!b64) return mailToast('Could not fetch ' + a.filename, 'err');
+  if (act === 'save') {
+    const r = await api.saveBase64(mailSafeName(a.filename), b64);
+    if (r && r.ok) mailToast('Saved to ' + r.savedTo);
+    else if (r && !r.canceled) mailToast('Save failed: ' + (r.error || 'unknown'), 'err');
+  } else if (act === 'preview' && mailIsPdf(a)) {
+    const r = await api.previewPdf(mailSafeName(a.filename), b64);
+    if (!r || !r.ok) mailToast('Could not preview ' + a.filename + ': ' + ((r && r.error) || 'unknown'), 'err');
+  } else if (act === 'preview') {
+    mailPreview(a, b64);
+  }
+}
+function mailPreview(a, b64) {
+  const lb = mailEl('.mail-lightbox');
+  if (!lb) return;
+  lb.innerHTML = '';
+  if (/^image\//.test(a.mimeType)) {
+    const img = document.createElement('img');
+    img.src = 'data:' + a.mimeType + ';base64,' + b64;
+    img.alt = a.filename;
+    lb.appendChild(img);
+  } else {
+    const pre = document.createElement('pre');
+    pre.textContent = new TextDecoder('utf-8').decode(b64ToBytes(b64));
+    pre.addEventListener('click', (e) => e.stopPropagation()); // select text without closing
+    lb.appendChild(pre);
+  }
+  const cap = document.createElement('div');
+  cap.className = 'mail-lb-cap';
+  cap.textContent = a.filename + ' - click outside or Esc to close';
+  lb.appendChild(cap);
+  lb.classList.remove('hidden');
+}
+// Connected terminals, most recently used first - the one you just left is the likely target.
+function mailTerminals() {
+  const rank = (id) => {
+    const i = tabMru.indexOf(id);
+    return i === -1 ? -1 : i;
+  };
+  return [...tabs.values()]
+    .filter((r) => (r.kind === 'ssh' || r.kind === 'local') && r.term && (r.kind === 'local' || r.status === 'connected'))
+    .sort((x, y) => rank(y.id) - rank(x.id));
+}
+function mailPickTerminal(anchor, onPick) {
+  const list = mailTerminals();
+  if (!list.length) return mailToast('Open a terminal first - the file lands in its current directory.', 'err');
+  const pop = mailEl('.mail-pop');
+  const title = (r) => {
+    const t = r.tabEl && r.tabEl.querySelector('.title');
+    return (t && t.textContent) || (r.profile && r.profile.name) || r.kind;
+  };
+  pop.innerHTML =
+    '<div class="mp-cap">Send to which terminal?</div>' +
+    list
+      .map(
+        (r, i) =>
+          `<button class="mp-item${i === 0 ? ' sel' : ''}" data-id="${escapeHtml(r.id)}">${r.kind === 'local' ? '🖥' : '>_'} ${escapeHtml(title(r))}</button>`
+      )
+      .join('');
+  mailShowPop(anchor);
+  pop.onclick = (e) => {
+    const b = e.target.closest('.mp-item');
+    if (!b) return;
+    mailHidePop();
+    const r = tabs.get(b.dataset.id);
+    if (r) onPick(r);
+  };
+}
+async function mailSendToTerminal(target, m, a) {
+  const b64 = await mailAttB64(m, a);
+  if (!b64) return mailToast('Could not fetch ' + a.filename, 'err');
+  const size = mailB64Size(b64);
+  if (size > SEND_MAX_BYTES) {
+    mailToast(a.filename + ' is ' + fmtBytes(size) + ' - too big for a terminal. Use Save instead.', 'err');
+    return;
+  }
+  if (target._grab || target._send) return mailToast('That terminal is busy with another transfer.', 'err');
+  activateTab(target.id); // the [sent ...] line is where the answer is
+  await sendB64InBand(target, { name: mailSafeName(a.filename), size, b64 });
+}
+function mailShowPop(anchor) {
+  const pop = mailEl('.mail-pop');
+  const rec = mailRec();
+  if (!pop || !rec) return;
+  pop.classList.remove('hidden');
+  const pr = rec.paneEl.getBoundingClientRect();
+  const r = anchor.getBoundingClientRect();
+  const left = Math.min(r.left - pr.left, pr.width - pop.offsetWidth - 8);
+  const top = r.bottom - pr.top + 4 + pop.offsetHeight > pr.height ? r.top - pr.top - pop.offsetHeight - 4 : r.bottom - pr.top + 4;
+  pop.style.left = Math.max(8, left) + 'px';
+  pop.style.top = Math.max(8, top) + 'px';
+  setTimeout(() => document.addEventListener('mousedown', mailPopOutside, true), 0);
+}
+function mailPopOutside(e) {
+  const pop = mailEl('.mail-pop');
+  if (pop && pop.contains(e.target)) return;
+  mailHidePop();
+}
+function mailHidePop() {
+  const pop = mailEl('.mail-pop');
+  if (pop) pop.classList.add('hidden');
+  document.removeEventListener('mousedown', mailPopOutside, true);
+}
+
+// ---- triage ----
+function mailTarget() {
+  if (mbox.openId) return mbox.openId;
+  const t = mbox.threads[mbox.sel];
+  return t ? t.id : null;
+}
+// Keep the row, the open thread and the reader's star in step with one label change.
+function mailSetLabelLocal(id, label, on) {
+  const t = mbox.threads.find((x) => x.id === id);
+  if (t) {
+    const ids = new Set(t.labelIds || []);
+    if (on) ids.add(label);
+    else ids.delete(label);
+    t.labelIds = [...ids];
+    if (label === 'UNREAD') t.unread = on;
+    if (label === 'STARRED') t.starred = on;
+  }
+  if (mbox.thread && mbox.thread.id === id) {
+    for (const m of mbox.thread.messages) {
+      const ids = new Set(m.labelIds || []);
+      if (on) ids.add(label);
+      else ids.delete(label);
+      m.labelIds = [...ids];
+    }
+    const sb = mailEl('.mr-starbtn');
+    if (sb && label === 'STARRED') sb.textContent = on ? '★' : '☆';
+  }
+  mailRenderList();
+}
+async function mailSetFlag(id, label, on, quiet) {
+  mailSetLabelLocal(id, label, on);
+  const res = await api.mailModifyThread(id, on ? [label] : [], on ? [] : [label]);
+  if (!res || !res.ok) {
+    mailSetLabelLocal(id, label, !on);
+    if (!quiet) mailToast('Could not update it: ' + ((res && res.error) || 'unknown'), 'err');
+    return false;
+  }
+  if (label === 'UNREAD' || label === 'INBOX') mailBadge(true);
+  return true;
+}
+function mailToggleStar(id) {
+  return mailSetFlag(id, 'STARRED', !mailThreadHas(id, 'STARRED'));
+}
+// Archive or trash. Optimistic: the row goes at once and comes back if the call fails.
+// Archiving outside the inbox views only drops the INBOX label - the thread still
+// belongs where you are looking (Starred, a label, a search), so the row stays.
+async function mailRemove(id, how) {
+  if (how === 'archive' && !mailViewHasInbox()) {
+    if (await mailSetFlag(id, 'INBOX', false)) mailToast('Archived');
+    return;
+  }
+  const idx = mbox.threads.findIndex((t) => t.id === id);
+  const row = idx !== -1 ? mbox.threads[idx] : null;
+  const hadInbox = mailThreadHas(id, 'INBOX');
+  if (idx !== -1) mbox.threads.splice(idx, 1);
+  if (mbox.openId === id) mailCloseReader(true);
+  if (mbox.sel >= mbox.threads.length) mbox.sel = mbox.threads.length - 1;
+  mailRenderList();
+  const putBack = () => {
+    if (!row || mbox.threads.some((t) => t.id === id)) return;
+    mbox.threads.splice(Math.min(idx, mbox.threads.length), 0, row);
+    mbox.sel = Math.min(idx, mbox.threads.length - 1);
+    mailRenderList();
+  };
+  const res = how === 'trash' ? await api.mailTrashThread(id) : await api.mailModifyThread(id, [], ['INBOX']);
+  if (!res || !res.ok) {
+    putBack();
+    mailToast((how === 'trash' ? 'Trash' : 'Archive') + ' failed: ' + ((res && res.error) || 'unknown'), 'err');
+    return;
+  }
+  mailBadge(true);
+  mailToast(how === 'trash' ? 'Moved to Trash' : 'Archived', null, async () => {
+    let r;
+    if (how === 'trash') {
+      r = await api.mailUntrashThread(id);
+      // Untrash does not promise the inbox back; ask for it when it was there.
+      if (r && r.ok && hadInbox) r = await api.mailModifyThread(id, ['INBOX'], []);
+    } else {
+      r = await api.mailModifyThread(id, ['INBOX'], []);
+    }
+    if (r && r.ok) {
+      putBack();
+      mailBadge(true);
+      mailToast('Undone');
+    } else {
+      mailToast('Undo failed: ' + ((r && r.error) || 'unknown'), 'err');
+    }
+  });
+}
+function mailLabelPicker(id, anchor) {
+  const user = mbox.labels.filter((l) => l.type === 'user').sort((a, b) => a.name.localeCompare(b.name));
+  if (!user.length) return mailToast('No labels yet - make one in Gmail first.', 'err');
+  const pop = mailEl('.mail-pop');
+  const render = (filter) => {
+    const f = String(filter || '').toLowerCase();
+    return user
+      .filter((l) => !f || l.name.toLowerCase().includes(f))
+      .map(
+        (l) =>
+          `<button class="mp-item" data-label="${escapeHtml(l.id)}">${mailThreadHas(id, l.id) ? '☑' : '☐'} ${escapeHtml(l.name)}</button>`
+      )
+      .join('');
+  };
+  pop.innerHTML =
+    '<div class="mp-cap">Label</div><input class="mp-filter" type="text" placeholder="Filter…" spellcheck="false" />' +
+    `<div class="mp-list">${render('')}</div>`;
+  mailShowPop(anchor || mailEl('.mr-bar [data-act="label"]') || mailEl('.mail-row.sel') || mailEl('.mail-top'));
+  const input = pop.querySelector('.mp-filter');
+  const list = pop.querySelector('.mp-list');
+  input.addEventListener('input', () => (list.innerHTML = render(input.value)));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      mailHidePop();
+      mailFocus();
+    } else if (e.key === 'Enter') {
+      const first = list.querySelector('.mp-item');
+      if (first) first.click();
+    }
+  });
+  pop.onclick = async (e) => {
+    const b = e.target.closest('[data-label]');
+    if (!b) return;
+    const lid = b.dataset.label;
+    const on = !mailThreadHas(id, lid);
+    mailHidePop();
+    mailFocus();
+    if (await mailSetFlag(id, lid, on)) {
+      const l = mbox.labels.find((x) => x.id === lid);
+      mailToast((on ? 'Labelled ' : 'Removed ') + (l ? l.name : 'label'));
+    }
+  };
+  setTimeout(() => input.focus(), 0);
+}
+function mailToast(text, kind, undo) {
+  const el = mailEl('.mail-toast');
+  if (!el) return;
+  if (mbox.undoSendId) {
+    clearInterval(mailSendTick); // the countdown text is being replaced; the send itself still waits
+    mbox.undoSendId = null;
+  }
+  el.className = 'mail-toast' + (kind === 'err' ? ' err' : '');
+  el.innerHTML = escapeHtml(text) + (undo ? ' <button class="mail-btn" data-act="undo">Undo (z)</button>' : '');
+  mbox.undo = undo || null;
+  clearTimeout(mailToastTimer);
+  mailToastTimer = setTimeout(
+    () => {
+      el.classList.add('hidden');
+      mbox.undo = null;
+    },
+    undo ? 8000 : 4500
+  );
+}
+
+// ---- keyboard ----
+function mailKeydown(e) {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = e.target;
+  const tag = t && t.tagName;
+  // Compose and the pickers own their keys - a focused Send button plus "e" must not archive.
+  if (t && t.closest && t.closest('.mail-compose, .mail-pop, .mail-snips')) return;
+  if (t && (t.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT')) {
+    if (e.key === 'Escape' && t.classList.contains('mail-search')) {
+      e.preventDefault();
+      t.blur();
+      mailFocus();
+    }
+    return;
+  }
+  if (tag === 'BUTTON' && (e.key === 'Enter' || e.key === ' ')) return; // the button's own click
+  if (/^[1-9]$/.test(e.key) && mbox.openId) {
+    e.preventDefault();
+    e.stopPropagation();
+    mailQuickReply(+e.key - 1, false);
+    return;
+  }
+  const act = MAIL_KEYS[e.key];
+  if (!act) return;
+  e.preventDefault();
+  e.stopPropagation();
+  mailDo(act);
+}
+function mailMove(d) {
+  if (!mbox.threads.length) return;
+  const n = mbox.sel + d;
+  if (n >= mbox.threads.length) {
+    if (mbox.next && !mbox.loading) mailLoad(true);
+    return;
+  }
+  mbox.sel = Math.max(0, n);
+  const t = mbox.threads[mbox.sel];
+  // With a conversation open, j/k walk conversations the way Gmail does.
+  if (mbox.openId && t) mailOpenThread(t.id);
+  else mailRenderList();
+}
+async function mailDo(act) {
+  const id = mailTarget();
+  switch (act) {
+    case 'next':
+      return mailMove(1);
+    case 'prev':
+      return mailMove(-1);
+    case 'open': {
+      const t = mbox.threads[mbox.sel];
+      if (t) mailOpenThread(t.id);
+      return;
+    }
+    case 'back':
+      return mailCloseReader(true);
+    case 'escape': {
+      const lb = mailEl('.mail-lightbox');
+      const keys = mailEl('.mail-keys');
+      const pop = mailEl('.mail-pop');
+      if (lb && !lb.classList.contains('hidden')) return lb.classList.add('hidden');
+      if (keys && !keys.classList.contains('hidden')) return keys.classList.add('hidden');
+      if (pop && !pop.classList.contains('hidden')) return mailHidePop();
+      if (mbox.openId) return mailCloseReader(true);
+      return;
+    }
+    case 'archive':
+    case 'trash':
+      if (id) mailRemove(id, act);
+      return;
+    case 'star':
+      if (id) mailToggleStar(id);
+      return;
+    case 'read':
+      if (id) mailSetFlag(id, 'UNREAD', false);
+      return;
+    case 'unread':
+      if (!id) return;
+      mailSetFlag(id, 'UNREAD', true);
+      if (mbox.openId === id) mailCloseReader(true);
+      return;
+    case 'label':
+      if (id) mailLabelPicker(id);
+      return;
+    case 'reply':
+    case 'replyall':
+    case 'forward':
+      if (!id) return;
+      if (!mbox.thread || mbox.thread.id !== id) await mailOpenThread(id);
+      if (mbox.thread && mbox.thread.id === id) mailCompose(mailReplyDraft(mbox.thread, act));
+      return;
+    case 'compose':
+      return mailCompose({});
+    case 'snippets':
+      return mailSnippetManager();
+    case 'dark':
+      return mailToggleDark();
+    case 'refresh':
+      mailLoadLabels();
+      mailBadge(true);
+      return mailLoad();
+    case 'search': {
+      const s = mailEl('.mail-search');
+      if (s) {
+        s.focus();
+        s.select();
+      }
+      return;
+    }
+    case 'help': {
+      const k = mailEl('.mail-keys');
+      if (k) k.classList.toggle('hidden');
+      return;
+    }
+    case 'undo':
+      if (mbox.undo) {
+        const u = mbox.undo;
+        mbox.undo = null;
+        u();
+      }
+      return;
+  }
+}
+
+// ---- compose / reply / forward ----
+function mailSplit(v) {
+  const out = [];
+  let cur = '';
+  let q = false;
+  let ang = false;
+  for (const ch of String(v || '')) {
+    if (ch === '"') q = !q;
+    else if (!q && ch === '<') ang = true;
+    else if (!q && ch === '>') ang = false;
+    if (!q && !ang && (ch === ',' || ch === ';')) {
+      if (cur.trim()) out.push(cur.trim());
+      cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
+function mailHtmlToText(html) {
+  if (!html) return '';
+  const doc = new DOMParser().parseFromString(String(html), 'text/html');
+  doc.querySelectorAll('style,script,head,title').forEach((n) => n.remove());
+  doc.querySelectorAll('br').forEach((n) => n.replaceWith('\n'));
+  doc.querySelectorAll('p,div,tr,li,h1,h2,h3,h4,h5,h6,blockquote,table').forEach((n) => n.append('\n'));
+  return (doc.body ? doc.body.textContent : '')
+    .replace(/[ \t ]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+function mailBodyText(m) {
+  return (m.text || mailHtmlToText(m.html) || mailDecodeEntities(m.snippet) || '').replace(/\r\n/g, '\n').trimEnd();
+}
+function mailWhen(m) {
+  return m.internalDate ? new Date(m.internalDate).toLocaleString() : m.date || '';
+}
+function mailQuote(m) {
+  const lines = mailBodyText(m)
+    .split('\n')
+    .map((l) => '>' + (l ? ' ' + l : ''));
+  return 'On ' + mailWhen(m) + ', ' + (m.from || 'someone') + ' wrote:\n' + lines.join('\n');
+}
+// Who a reply goes to, and the headers that keep it in the thread. Reply-all drops our
+// own address and anyone already in To, and never lists an address twice.
+function mailReplyDraft(thread, mode) {
+  const msgs = thread.messages || [];
+  const last = msgs[msgs.length - 1] || {};
+  const me = String(googleEmail || '').toLowerCase();
+  const addr = (s) => mailAddr(s).toLowerCase();
+  const subj = last.subject || (msgs[0] && msgs[0].subject) || '';
+  if (mode === 'forward') {
+    const head =
+      '---------- Forwarded message ---------\n' +
+      'From: ' + (last.from || '') + '\n' +
+      'Date: ' + mailWhen(last) + '\n' +
+      'Subject: ' + subj + '\n' +
+      'To: ' + (last.to || '') + '\n' +
+      (last.cc ? 'Cc: ' + last.cc + '\n' : '');
+    return {
+      mode,
+      subject: /^fwd?:/i.test(subj) ? subj : 'Fwd: ' + subj,
+      body: '\n\n' + head + '\n' + mailBodyText(last),
+      forwardOf: last,
+    };
+  }
+  const fromMe = !!me && addr(last.from) === me;
+  const to = fromMe ? last.to || '' : last.replyTo || last.from || '';
+  let cc = '';
+  if (mode === 'replyall') {
+    const seen = new Set([me].concat(mailSplit(to).map(addr)));
+    cc = mailSplit([last.to, last.cc].filter(Boolean).join(', '))
+      .filter((x) => {
+        const a = addr(x);
+        if (!a || seen.has(a)) return false;
+        seen.add(a);
+        return true;
+      })
+      .join(', ');
+  }
+  return {
+    mode,
+    to,
+    cc,
+    subject: /^re:/i.test(subj) ? subj : 'Re: ' + subj,
+    threadId: thread.id,
+    inReplyTo: last.messageId || '',
+    references: [last.references, last.messageId].filter(Boolean).join(' ').trim(),
+    body: '\n\n' + mailQuote(last),
+  };
+}
+function mailDraftSnap(d) {
+  return JSON.stringify([d.to, d.cc, d.bcc, d.subject, d.body, d.attachments.length]);
+}
+function mailDraftDirty() {
+  const d = mbox.draft;
+  return !!d && mailDraftSnap(d) !== d.initial;
+}
+const MAIL_MIME = {
+  pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+  svg: 'image/svg+xml', txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', json: 'application/json', html: 'text/html',
+  zip: 'application/zip', gz: 'application/gzip', tar: 'application/x-tar', doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', mp3: 'audio/mpeg', mp4: 'video/mp4',
+};
+function mailGuessMime(name) {
+  const ext = (/\.([a-z0-9]+)$/i.exec(name || '') || [])[1];
+  return (ext && MAIL_MIME[ext.toLowerCase()]) || 'application/octet-stream';
+}
+function mailCompose(init) {
+  if (!mailRec()) createMailTab();
+  if (mbox.draft && mailDraftDirty() && !window.confirm('Discard the message you are writing?')) return;
+  const d = Object.assign({ mode: 'new', to: '', cc: '', bcc: '', subject: '', body: '', attachments: [] }, init || {});
+  d.attachments = [];
+  mbox.draft = d;
+  // Forwarding brings the original's files along; fetch them now, send waits for them.
+  if (d.forwardOf) {
+    const src = d.forwardOf;
+    const files = (src.attachments || []).filter((a) => !a.inline);
+    let total = 0;
+    for (const a of files) {
+      if (total + (a.size || 0) > MAIL_SEND_MAX) break;
+      total += a.size || 0;
+      d.attachments.push({ name: a.filename, mimeType: a.mimeType, size: a.size || 0, b64: null, fwd: true });
+    }
+    d.pending = Promise.all(
+      d.attachments.map(async (att, i) => {
+        att.b64 = await mailAttB64(src, files[i]);
+        att.failed = !att.b64;
+      })
+    ).then(() => mbox.draft === d && mailRenderAtts());
+  }
+  d.initial = mailDraftSnap(d);
+  mailRenderCompose();
+  mailCheckSend();
+  mailLoadContacts(); // cheap: the book is cached in the main process
+}
+function mailRenderCompose() {
+  const d = mbox.draft;
+  const box = mailEl('.mail-compose');
+  if (!box) return;
+  if (!d) {
+    box.classList.add('hidden');
+    box.innerHTML = '';
+    return;
+  }
+  const title = d.mode === 'reply' ? 'Reply' : d.mode === 'replyall' ? 'Reply all' : d.mode === 'forward' ? 'Forward' : 'New message';
+  const showCc = !!(d.cc || d.bcc);
+  box.innerHTML =
+    `<div class="mc-head"><span>${title}</span><span class="mail-spacer"></span>` +
+    '<button class="mail-x" data-act="close" title="Close (Esc)">✕</button></div>' +
+    '<div class="mc-banner hidden">Sending needs one more permission. Reconnect Google in Settings and allow Gmail send - reading keeps working meanwhile. <button class="mail-btn" data-act="settings">Open Settings</button></div>' +
+    '<label class="mc-field"><span>To</span><input data-f="to" type="text" spellcheck="false" />' +
+    `<button class="mail-link${showCc ? ' hidden' : ''}" data-act="cc">Cc / Bcc</button></label>` +
+    `<label class="mc-field${showCc ? '' : ' hidden'}" data-row="cc"><span>Cc</span><input data-f="cc" type="text" spellcheck="false" /></label>` +
+    `<label class="mc-field${showCc ? '' : ' hidden'}" data-row="bcc"><span>Bcc</span><input data-f="bcc" type="text" spellcheck="false" /></label>` +
+    '<label class="mc-field"><span>Subject</span><input data-f="subject" type="text" /></label>' +
+    '<textarea class="mc-body" data-f="body"></textarea>' +
+    '<div class="mc-atts"></div>' +
+    '<div class="mc-foot"><button class="mail-btn mail-primary" data-act="send" title="Send (Ctrl+Enter)">Send</button>' +
+    '<button class="mail-btn" data-act="attach" title="Attach a file">📎 Attach</button>' +
+    '<button class="mail-btn" data-act="snip" title="Insert a snippet (;; or Ctrl+Space)">✂ Snippet</button>' +
+    `<span class="mc-undo" title="Undo send - change it in Settings → Google">${mailUndoSec ? '↶ ' + mailUndoSec + ' s to undo' : ''}</span>` +
+    '<span class="mc-status"></span></div>' +
+    '<div class="mc-suggest hidden"></div>';
+  box.querySelectorAll('[data-f]').forEach((inp) => {
+    inp.value = d[inp.dataset.f] || '';
+    inp.addEventListener('input', () => (d[inp.dataset.f] = inp.value));
+  });
+  box.onclick = (e) => {
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    e.preventDefault();
+    const act = b.dataset.act;
+    if (act === 'close') mailCloseCompose();
+    else if (act === 'send') mailSend();
+    else if (act === 'attach') mailAttach();
+    else if (act === 'snip') mailSnippetPicker(box.querySelector('.mc-body'), 0);
+    else if (act === 'settings') openSettings();
+    else if (act === 'cc') {
+      box.querySelectorAll('[data-row]').forEach((r) => r.classList.remove('hidden'));
+      b.classList.add('hidden');
+      box.querySelector('[data-f="cc"]').focus();
+    } else if (act === 'rm-att') {
+      d.attachments.splice(+b.dataset.i, 1);
+      mailRenderAtts();
+    }
+  };
+  box.onkeydown = (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      e.stopPropagation();
+      mailSend();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      mailCloseCompose();
+    }
+  };
+  box.classList.remove('hidden');
+  mailRenderAtts();
+  mailRenderBanner();
+  const body = box.querySelector('.mc-body');
+  body.addEventListener('keydown', mailBodyKeydown);
+  body.addEventListener('input', mailBodyInput);
+  ['to', 'cc', 'bcc'].forEach((k) => mailWireSuggest(box.querySelector(`[data-f="${k}"]`)));
+  const sug = box.querySelector('.mc-suggest');
+  // mousedown, not click: the field must keep focus, or its blur shuts the list first
+  sug.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const it = e.target.closest('[data-i]');
+    if (it && sug._owner && sug._accept) sug._accept(sug._owner.list[+it.dataset.i]);
+  });
+  if (!d.to) box.querySelector('[data-f="to"]').focus();
+  else {
+    body.focus();
+    const at = Math.min(d.caret || 0, body.value.length); // a quick reply puts it after its text
+    body.setSelectionRange(at, at); // replies start above the quote
+    body.scrollTop = 0;
+  }
+  delete d.caret;
+}
+function mailRenderAtts() {
+  const d = mbox.draft;
+  const box = mailEl('.mc-atts');
+  if (!d || !box) return;
+  box.innerHTML = d.attachments
+    .map(
+      (a, i) =>
+        `<span class="mc-att${a.failed ? ' err' : ''}">📎 ${escapeHtml(a.name)} <span class="mm-att-size">${
+          a.failed ? 'could not fetch' : a.b64 == null ? 'fetching…' : fmtBytes(a.size)
+        }</span><button class="mail-x" data-act="rm-att" data-i="${i}" title="Remove">✕</button></span>`
+    )
+    .join('');
+}
+function mailRenderBanner() {
+  const b = mailEl('.mc-banner');
+  if (b) b.classList.toggle('hidden', mbox.canSend !== false);
+}
+async function mailCheckSend() {
+  if (!googleConnected) return;
+  const r = await api.mailCanSend();
+  if (r && r.ok) mbox.canSend = !!r.canSend;
+  mailRenderBanner();
+}
+function mailCloseCompose() {
+  if (mailDraftDirty() && !window.confirm('Discard the message you are writing?')) return;
+  mbox.draft = null;
+  mailRenderCompose();
+  mailFocus();
+}
+function mailComposeStatus(text, err) {
+  const s = mailEl('.mc-status');
+  if (!s) return;
+  s.textContent = text;
+  s.classList.toggle('err', !!err);
+}
+async function mailAttach() {
+  const d = mbox.draft;
+  if (!d) return;
+  const used = d.attachments.reduce((n, a) => n + (a.size || 0), 0);
+  const picked = await api.pickBase64(MAIL_SEND_MAX - used);
+  if (!picked || picked.canceled) return;
+  if (picked.tooBig) {
+    return mailComposeStatus(picked.name + ' is ' + fmtBytes(picked.size) + ' - Gmail takes ' + fmtBytes(MAIL_SEND_MAX) + ' in all.', true);
+  }
+  if (!picked.ok) return mailComposeStatus('Could not read that file: ' + (picked.error || 'unknown'), true);
+  if (mbox.draft !== d) return;
+  d.attachments.push({ name: picked.name, mimeType: mailGuessMime(picked.name), size: picked.size, b64: picked.b64 });
+  mailRenderAtts();
+  mailComposeStatus('');
+}
+// ---- sending, with undo ----
+// With undo on, the main process holds the message for mailUndoSec and the toast counts
+// down; Undo takes it back into compose untouched. The outcome arrives as an event
+// (onMailSendResult), because it can land long after this function has returned.
+let mailUndoSec = 15; // 0 = send at once
+const mailPendingSends = new Map(); // pending id -> { draft, sendAt, atts }
+let mailSendTick = null;
+function mailSendPayload(d, atts) {
+  return {
+    to: d.to,
+    cc: d.cc,
+    bcc: d.bcc,
+    subject: d.subject,
+    text: d.body,
+    threadId: d.threadId,
+    inReplyTo: d.inReplyTo,
+    references: d.references,
+    attachments: atts.map((a) => ({ name: a.name, mimeType: a.mimeType, b64: a.b64 })),
+  };
+}
+async function mailSend() {
+  const d = mbox.draft;
+  if (!d || d.sending) return;
+  if (!mailSplit([d.to, d.cc, d.bcc].join(',')).length) return mailComposeStatus('Add a recipient first.', true);
+  if (mbox.canSend === false) {
+    mailRenderBanner();
+    return mailComposeStatus('Not allowed to send yet - see above.', true);
+  }
+  d.sending = true;
+  mailComposeStatus('Sending…');
+  if (d.pending) await d.pending;
+  const atts = d.attachments.filter((a) => a.b64);
+  const res = await api.mailSend({ ...mailSendPayload(d, atts), delayMs: Math.max(0, mailUndoSec) * 1000 });
+  d.sending = false;
+  if (!res || !res.ok) {
+    const err = (res && res.error) || 'unknown';
+    if (/insufficient|scope|permission/i.test(err)) {
+      mbox.canSend = false;
+      mailRenderBanner();
+    }
+    return mailComposeStatus('Send failed: ' + err, true);
+  }
+  if (mbox.draft === d) mbox.draft = null;
+  mailRenderCompose();
+  mailFocus();
+  if (res.pending) {
+    mailPendingSends.set(res.pending, { draft: d, sendAt: res.sendAt, atts: atts.length });
+    mailSendToast(res.pending);
+    return;
+  }
+  mailAfterSent(d, res, atts.length);
+}
+function mailAfterSent(d, res, sentAtts) {
+  const missing = d.attachments.length - sentAtts;
+  mailToast('Sent' + (missing > 0 ? ' - without ' + missing + ' file(s) that could not be fetched' : ''));
+  logEvent('mail', {
+    title: 'sent · ' + (d.subject || '(no subject)'),
+    detail: d.to,
+    ref: { type: 'mail', id: res.id, threadId: res.threadId },
+  });
+  if (mbox.openId && res.threadId === mbox.openId) mailOpenThread(mbox.openId);
+}
+// Built once and then only its number changes: repainting the buttons several times a
+// second would swallow a click that lands between mousedown and mouseup.
+function mailSendToast(id) {
+  const el = mailEl('.mail-toast');
+  const p = mailPendingSends.get(id);
+  if (!el || !p) return;
+  clearTimeout(mailToastTimer);
+  clearInterval(mailSendTick);
+  mbox.undo = () => mailUndoSend(id);
+  mbox.undoSendId = id;
+  el.className = 'mail-toast';
+  el.innerHTML =
+    'Sending in <b class="mt-left"></b> s… <button class="mail-btn" data-act="undo">Undo (z)</button>' +
+    '<button class="mail-btn" data-act="send-now">Send now</button>';
+  const left = el.querySelector('.mt-left');
+  const paint = () => {
+    if (!mailPendingSends.has(id)) return clearInterval(mailSendTick);
+    left.textContent = String(Math.max(0, Math.ceil((p.sendAt - Date.now()) / 1000)));
+  };
+  paint();
+  mailSendTick = setInterval(paint, 250);
+}
+function mailClearSendToast(id) {
+  if (mbox.undoSendId !== id) return;
+  clearInterval(mailSendTick);
+  mbox.undoSendId = null;
+  mbox.undo = null;
+}
+async function mailUndoSend(id) {
+  const p = mailPendingSends.get(id);
+  if (!p) return;
+  const r = await api.mailCancelSend(id);
+  if (!r || !r.ok) return mailToast('Too late - it has already gone.', 'err'); // its result is on the way
+  mailPendingSends.delete(id);
+  mailClearSendToast(id);
+  mailRestoreDraft(p.draft, 'Not sent - here it is to edit.', false);
+}
+async function mailSendNowPending() {
+  const id = mbox.undoSendId;
+  if (!id || !mailPendingSends.has(id)) return;
+  mailClearSendToast(id);
+  mailToast('Sending…');
+  await api.mailSendNow(id); // the outcome comes through onMailSendResult like any other
+}
+// Put an unsent message back in compose. A different message being written right now is
+// never thrown away for it: the unsent one waits behind a Reopen button instead.
+function mailRestoreDraft(d, note, err) {
+  if (!mailRec()) createMailTab();
+  d.sending = false;
+  d.initial = ''; // it was never sent, so closing it must ask
+  if (mbox.draft && mbox.draft !== d && mailDraftDirty()) {
+    mbox.reopen = d;
+    mailToast(note + ' It is waiting - finish this one first.', err ? 'err' : null);
+    const el = mailEl('.mail-toast');
+    if (el) el.insertAdjacentHTML('beforeend', ' <button class="mail-btn" data-act="reopen">Reopen it</button>');
+    return;
+  }
+  mbox.draft = d;
+  mailRenderCompose();
+  mailComposeStatus(note, err);
+}
+if (api.onMailSendResult) {
+  api.onMailSendResult((r) => {
+    const p = mailPendingSends.get(r.pending);
+    mailPendingSends.delete(r.pending);
+    mailClearSendToast(r.pending);
+    if (!p) {
+      // The window was reloaded while it waited: no draft to hand back, but say what happened.
+      if (r && !r.ok) mailToast('A queued message could not be sent: ' + (r.error || 'unknown'), 'err');
+      return;
+    }
+    if (r.ok) return mailAfterSent(p.draft, r, p.atts);
+    if (/insufficient|scope|permission/i.test(r.error || '')) mbox.canSend = false;
+    mailRestoreDraft(p.draft, 'Send failed: ' + (r.error || 'unknown'), true);
+    const rec = mailRec();
+    if (document.hidden || !rec || activeTabId !== rec.id) {
+      try {
+        const n = new Notification('📧 A message was not sent', { body: (p.draft.subject || '(no subject)') + ' - ' + (r.error || '') });
+        n.onclick = () => {
+          api.focusWindow();
+          createMailTab();
+        };
+      } catch (_) {
+        /* notifications unavailable */
+      }
+    }
+  });
+}
+
+// ---- snippets + quick replies ----
+// {first} {name} the first recipient · {today} {tomorrow} · {subject} · {project} the running
+// project · {clip} the clipboard · {free} your next free hours, {free@Berlin} in one of the TZ
+// planner's zones · {cursor} where the caret lands.
+const MAIL_SNIPPET_DEFAULTS = [
+  { id: 'thx', name: 'Thanks', key: 'thx', quick: true, text: 'Thanks, {first}!{cursor}' },
+  { id: 'got', name: 'Got it', key: 'got', quick: true, text: 'Got it, thanks {first} - I will take care of it.' },
+  { id: 'later', name: 'Will look tomorrow', key: 'later', quick: true, text: 'Hi {first},\n\nthanks - I will take a look {tomorrow} and get back to you.{cursor}' },
+  { id: 'onit', name: 'On it', key: 'onit', quick: true, text: 'On it.{cursor}' },
+  { id: 'times', name: 'Propose times', key: 'times', quick: false, text: 'Hi {first},\n\nhow about one of these?\n\n{free}\n\n{cursor}' },
+];
+const MAIL_SNIPPET_VARS = ['{first}', '{name}', '{today}', '{tomorrow}', '{subject}', '{project}', '{clip}', '{free}', '{free@Berlin}', '{cursor}'];
+let mailSnippets = null; // null = the examples, until the first edit
+let mailSnipSaveTimer = null;
+let mailInserting = false; // our own insertText must not re-open the picker
+function mailSnippetList() {
+  return mailSnippets || MAIL_SNIPPET_DEFAULTS.map((s) => ({ ...s }));
+}
+// A snippet list from settings, made safe to use (the file can be edited by hand).
+function mailCleanSnippets(list) {
+  if (!Array.isArray(list)) return null;
+  return list
+    .filter((s) => s && typeof s === 'object')
+    .map((s, i) => ({
+      id: String(s.id || 'sn' + i + Date.now().toString(36)),
+      name: String(s.name || '').slice(0, 80),
+      key: String(s.key || '').replace(/[^\w-]/g, '').slice(0, 24),
+      quick: !!s.quick,
+      text: String(s.text || '').slice(0, 20000),
+    }));
+}
+function mailQuickSnippets() {
+  return mailSnippetList()
+    .filter((s) => s.quick && s.text)
+    .slice(0, 9);
+}
+function mailFirstName(field) {
+  const one = mailSplit(field)[0];
+  if (!one) return '';
+  const m = /^\s*"?([^"<]*?)"?\s*<([^>]+)>/.exec(one);
+  let name = m ? m[1].trim() : '';
+  if (name.includes(',')) name = name.split(',')[1].trim(); // "Doe, Jane"
+  if (name) return name.split(/\s+/)[0];
+  const local = (m ? m[2] : one).split('@')[0];
+  if (/^(info|support|hello|hi|team|office|contact|admin|sales|billing|hr|jobs|mail|help|service)$/i.test(local)) return '';
+  const w = local.split(/[._+-]+/)[0].replace(/\d+/g, '');
+  return w.length > 1 ? w[0].toUpperCase() + w.slice(1).toLowerCase() : '';
+}
+function mailFullName(field) {
+  const one = mailSplit(field)[0] || '';
+  const m = /^\s*"?([^"<]*?)"?\s*<[^>]+>/.exec(one);
+  const n = m ? m[1].trim() : '';
+  return n.includes(',') ? n.split(',').reverse().map((x) => x.trim()).join(' ') : n;
+}
+function mailDayName(d) {
+  return d.toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' });
+}
+// First free hour on each of the next working days (9-17, local), one per day so the offer
+// spreads out, at least an hour from now. The calendar here is the next few events Cockpit
+// already has, so it is a suggestion to check, not a booking.
+const MAIL_FREE_FROM = 9;
+const MAIL_FREE_TO = 17;
+function mailFreeSlots(n, now) {
+  now = now || Date.now();
+  const busy = (upcomingEvents || [])
+    .filter((e) => !e.allDay && e.start && e.end)
+    .map((e) => [Date.parse(e.start), Date.parse(e.end)])
+    .filter(([, b]) => b > now);
+  const out = [];
+  const day = new Date(now);
+  day.setHours(0, 0, 0, 0);
+  for (let i = 0; i < 21 && out.length < n; i++, day.setDate(day.getDate() + 1)) {
+    if (day.getDay() === 0 || day.getDay() === 6) continue;
+    for (let h = MAIL_FREE_FROM * 2; h + 2 <= MAIL_FREE_TO * 2; h++) {
+      const a = new Date(day);
+      a.setHours(Math.floor(h / 2), (h % 2) * 30, 0, 0);
+      const s = a.getTime();
+      const e = s + 3600000;
+      if (s < now + 3600000) continue;
+      if (busy.some(([bs, be]) => bs < e && be > s)) continue;
+      out.push([s, e]);
+      break;
+    }
+  }
+  return out;
+}
+function mailFreeText(where) {
+  let zone;
+  let label = '';
+  if (where) {
+    const w = String(where).trim().toLowerCase();
+    const hit = (tzList || []).find((t) => (t.label || '').toLowerCase() === w || (t.zone || '').toLowerCase() === w) ||
+      (tzList || []).find((t) => (t.label || '').toLowerCase().includes(w) || (t.zone || '').toLowerCase().includes(w));
+    if (hit) {
+      zone = hit.zone;
+      label = hit.label || hit.zone;
+    } else if (typeof tzValidZone === 'function' && tzValidZone(where)) {
+      zone = where;
+      label = where;
+    }
+  }
+  const slots = mailFreeSlots(3);
+  if (!slots.length) return '(no free hour found in the next three weeks)';
+  const opt = (o) => Object.assign(o, zone ? { timeZone: zone } : {});
+  const tzName = (ms) => {
+    try {
+      const p = new Intl.DateTimeFormat([], opt({ timeZoneName: 'short' })).formatToParts(new Date(ms));
+      return (p.find((x) => x.type === 'timeZoneName') || {}).value || '';
+    } catch (_) {
+      return '';
+    }
+  };
+  return slots
+    .map(([a, b]) => {
+      const d = new Date(a).toLocaleString([], opt({ weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false }));
+      const t = new Date(b).toLocaleTimeString([], opt({ hour: '2-digit', minute: '2-digit', hour12: false }));
+      return '- ' + d + '-' + t + ' ' + (label ? label + ' time' : tzName(a));
+    })
+    .join('\n')
+    .replace(/ +$/gm, '');
+}
+function mailExpandSnippet(text, ctx) {
+  ctx = ctx || {};
+  let s = String(text || '');
+  const first = mailFirstName(ctx.to || '');
+  // No name to put there: take the comma and space that led up to it as well, so
+  // "Thanks, {first}!" becomes "Thanks!" rather than "Thanks, !".
+  if (!first) s = s.replace(/,?[ \t]*\{first\}/g, '');
+  const cur = typeof paProject === 'function' ? paProject(paCurrentId) : null;
+  const vars = {
+    first,
+    name: mailFullName(ctx.to || '') || first,
+    today: mailDayName(new Date()),
+    tomorrow: mailDayName(new Date(Date.now() + 86400000)),
+    subject: String(ctx.subject || '').replace(/^\s*((re|fwd?|aw|wg):\s*)+/i, ''),
+    project: (cur && cur.name) || '',
+    clip: /\{clip\}/.test(s) ? api.clipboardRead() || '' : '',
+  };
+  s = s.replace(/\{free(?:@([^{}]+))?\}/g, (_, where) => mailFreeText(where));
+  s = s.replace(/\{(first|name|today|tomorrow|subject|project|clip)\}/g, (_, k) => vars[k]);
+  const caret = s.indexOf('{cursor}');
+  s = s.split('{cursor}').join('');
+  return { text: s, caret: caret === -1 ? s.length : caret };
+}
+function mailDraftCtx() {
+  const d = mbox.draft || {};
+  return { to: d.to || '', subject: d.subject || '' };
+}
+// insertText keeps the textarea's own undo (Ctrl+Z takes the snippet back out).
+function mailInsertAt(el, start, end, text, caretInText) {
+  el.focus();
+  el.setSelectionRange(start, end);
+  mailInserting = true;
+  let ok = false;
+  try {
+    ok = document.execCommand('insertText', false, text);
+  } catch (_) {
+    ok = false;
+  }
+  mailInserting = false;
+  if (!ok) {
+    el.setRangeText(text, start, end, 'end');
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  const at = start + (caretInText == null ? text.length : caretInText);
+  el.setSelectionRange(at, at);
+}
+// `;key` then Space or Tab expands in place; Ctrl+Space opens the picker.
+function mailBodyKeydown(e) {
+  const ta = e.target;
+  if (e.key === ' ' && e.ctrlKey && !e.altKey && !e.metaKey) {
+    e.preventDefault();
+    e.stopPropagation();
+    return mailSnippetPicker(ta, 0);
+  }
+  if ((e.key !== ' ' && e.key !== 'Tab') || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+  const pos = ta.selectionStart;
+  if (pos !== ta.selectionEnd) return;
+  const m = /(^|\s);([\w-]+)$/.exec(ta.value.slice(0, pos));
+  if (!m) return;
+  const snip = mailSnippetList().find((s) => s.key && s.key.toLowerCase() === m[2].toLowerCase());
+  if (!snip) return;
+  e.preventDefault();
+  const hasCursor = snip.text.includes('{cursor}');
+  const x = mailExpandSnippet(snip.text, mailDraftCtx());
+  const text = x.text + (e.key === ' ' && !hasCursor && !/\s$/.test(x.text) ? ' ' : '');
+  mailInsertAt(ta, pos - m[2].length - 1, pos, text, hasCursor ? x.caret : null);
+}
+function mailBodyInput(e) {
+  if (mailInserting) return;
+  const ta = e.target;
+  const pos = ta.selectionStart;
+  if (e.inputType === 'insertText' && pos >= 2 && ta.value.slice(pos - 2, pos) === ';;') mailSnippetPicker(ta, 2);
+}
+function mailSnippetPicker(ta, trigger) {
+  const pop = mailEl('.mail-pop');
+  if (!pop || !ta) return;
+  const pos = ta.selectionStart;
+  const end = ta.selectionEnd;
+  const list = mailSnippetList();
+  let shown = list;
+  let sel = 0;
+  pop.innerHTML =
+    '<div class="mp-cap">Insert a snippet - ↑↓ and Enter</div><input class="mp-filter" type="text" placeholder="Filter…" spellcheck="false" />' +
+    '<div class="mp-list"></div><button class="mp-item mp-manage" data-manage="1">✂ Manage snippets…</button>';
+  const input = pop.querySelector('.mp-filter');
+  const listEl = pop.querySelector('.mp-list');
+  const draw = () => {
+    const q = input.value.trim().toLowerCase();
+    shown = list.filter((s) => !q || s.name.toLowerCase().includes(q) || (s.key || '').toLowerCase().startsWith(q) || s.text.toLowerCase().includes(q));
+    sel = Math.min(sel, Math.max(0, shown.length - 1));
+    listEl.innerHTML =
+      shown
+        .map(
+          (s, i) =>
+            `<button class="mp-item mp-snip${i === sel ? ' sel' : ''}" data-i="${i}"><b>${escapeHtml(s.name || '(unnamed)')}</b>` +
+            (s.key ? ` <span class="mp-key">;${escapeHtml(s.key)}</span>` : '') +
+            `<span class="mp-prev">${escapeHtml(s.text.replace(/\s+/g, ' ').slice(0, 80))}</span></button>`
+        )
+        .join('') || '<div class="mp-cap">No snippet matches.</div>';
+    const cur = listEl.querySelector('.sel');
+    if (cur) cur.scrollIntoView({ block: 'nearest' });
+  };
+  draw();
+  mailShowPop(ta);
+  const back = () => {
+    ta.focus();
+    ta.setSelectionRange(pos, end);
+  };
+  const pick = (s) => {
+    mailHidePop();
+    if (!s) return back();
+    const x = mailExpandSnippet(s.text, mailDraftCtx());
+    mailInsertAt(ta, pos - trigger, end, x.text, x.caret);
+  };
+  input.addEventListener('input', () => {
+    sel = 0;
+    draw();
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (shown.length) sel = (sel + (e.key === 'ArrowDown' ? 1 : -1) + shown.length) % shown.length;
+      draw();
+    } else if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault();
+      pick(shown[sel]);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      mailHidePop();
+      back();
+    }
+  });
+  pop.onclick = (e) => {
+    if (e.target.closest('[data-manage]')) {
+      mailHidePop();
+      return mailSnippetManager();
+    }
+    const b = e.target.closest('[data-i]');
+    if (b) pick(shown[+b.dataset.i]);
+  };
+  setTimeout(() => input.focus(), 0);
+}
+function mailQuickRowHtml() {
+  const q = mailQuickSnippets();
+  return (
+    '<div class="mr-quick"><span class="mr-quick-cap">Quick reply</span>' +
+    q
+      .map(
+        (s, i) =>
+          `<button class="mail-chip mr-qr" data-qr="${i}" title="${escapeHtml(s.text)}\n\nClick or press ${i + 1}: reply with this. Ctrl+click: send it now (Undo still works).">` +
+          `<span class="mr-qr-n">${i + 1}</span> ${escapeHtml(s.name)}</button>`
+      )
+      .join('') +
+    '<button class="mail-link" data-snips="1" title="Edit snippets and quick replies">✂ Snippets…</button></div>'
+  );
+}
+async function mailQuickReply(i, now) {
+  const s = mailQuickSnippets()[i];
+  const id = mailTarget();
+  if (!s || !id) return;
+  if (!mbox.thread || mbox.thread.id !== id) await mailOpenThread(id);
+  if (!mbox.thread || mbox.thread.id !== id) return;
+  const d = mailReplyDraft(mbox.thread, 'reply');
+  const x = mailExpandSnippet(s.text, { to: d.to, subject: d.subject });
+  d.body = x.text + d.body;
+  d.caret = x.caret;
+  mailCompose(d);
+  if (now && mbox.draft) mailSend();
+}
+// The editor: a list on the left, the chosen snippet on the right, saved as you type.
+function mailSnippetManager() {
+  const box = mailEl('.mail-snips');
+  if (!box) return;
+  if (!mailSnippets) mailSnippets = mailSnippetList();
+  let cur = 0;
+  const save = () => {
+    clearTimeout(mailSnipSaveTimer);
+    mailSnipSaveTimer = setTimeout(() => api.saveSettings({ mailSnippets }), 300);
+  };
+  const itemLabel = (s) =>
+    (s.quick ? '⚡ ' : '') + escapeHtml(s.name || '(unnamed)') + (s.key ? ` <span class="mp-key">;${escapeHtml(s.key)}</span>` : '');
+  const draw = (focusSel) => {
+    cur = Math.max(0, Math.min(cur, mailSnippets.length - 1));
+    const s = mailSnippets[cur];
+    box.innerHTML =
+      '<div class="ms-card"><div class="ms-head"><b>✂ Snippets &amp; quick replies</b><span class="mail-spacer"></span>' +
+      '<button class="mail-x" data-act="close" title="Close (Esc)">✕</button></div><div class="ms-body"><div class="ms-list">' +
+      mailSnippets.map((x, i) => `<button class="mp-item${i === cur ? ' sel' : ''}" data-i="${i}">${itemLabel(x)}</button>`).join('') +
+      '<button class="mail-btn ms-add" data-act="add">＋ New snippet</button></div><div class="ms-edit">' +
+      (s
+        ? '<label class="ms-row"><span>Name</span><input data-k="name" type="text" /></label>' +
+          '<label class="ms-row"><span>Shortcut</span><span class="ms-semi">;</span><input data-k="key" type="text" spellcheck="false" placeholder="thx" /></label>' +
+          '<div class="ms-warn hidden"></div>' +
+          '<label class="ms-check"><input data-k="quick" type="checkbox" /> Quick reply - a button under every open mail (keys 1-9)</label>' +
+          '<textarea data-k="text" class="ms-text" spellcheck="true"></textarea>' +
+          '<div class="ms-vars">' + MAIL_SNIPPET_VARS.map((v) => `<button class="mail-chip" data-var="${escapeHtml(v)}">${escapeHtml(v)}</button>`).join('') + '</div>' +
+          '<div class="ms-foot"><button class="mail-btn" data-act="del">🗑 Delete</button><span class="ms-preview-cap">Preview</span></div>' +
+          '<pre class="ms-preview"></pre>'
+        : '<div class="mail-note">No snippets. ＋ New snippet makes one.</div>') +
+      '</div></div><div class="ms-help">In a message: type <kbd>;shortcut</kbd> then Space or Tab, or <kbd>;;</kbd> / <kbd>Ctrl+Space</kbd> to pick. ' +
+      '<b>{free}</b> offers your next free hours from the calendar; <b>{free@Berlin}</b> gives them in a TZ planner zone.</div></div>';
+    if (!s) return;
+    const f = (k) => box.querySelector(`[data-k="${k}"]`);
+    f('name').value = s.name;
+    f('key').value = s.key;
+    f('quick').checked = !!s.quick;
+    f('text').value = s.text;
+    const preview = () => {
+      box.querySelector('.ms-preview').textContent = mailExpandSnippet(s.text, { to: 'Jane Doe <jane@example.com>', subject: 'Re: Plan' }).text;
+      const dup = s.key && mailSnippets.some((x) => x !== s && x.key && x.key.toLowerCase() === s.key.toLowerCase());
+      const w = box.querySelector('.ms-warn');
+      w.textContent = dup ? ';' + s.key + ' is already used by another snippet - only the first one will expand.' : '';
+      w.classList.toggle('hidden', !dup);
+      const li = box.querySelector(`.ms-list [data-i="${cur}"]`);
+      if (li) li.innerHTML = itemLabel(s);
+    };
+    ['name', 'key', 'text'].forEach((k) =>
+      f(k).addEventListener('input', () => {
+        if (k === 'key') {
+          const clean = f('key').value.replace(/[^\w-]/g, '');
+          if (clean !== f('key').value) f('key').value = clean;
+        }
+        s[k] = f(k).value;
+        preview();
+        save();
+      })
+    );
+    f('quick').addEventListener('change', () => {
+      s.quick = f('quick').checked;
+      preview();
+      save();
+    });
+    preview();
+    if (focusSel) f(focusSel).focus();
+  };
+  box.onclick = (e) => {
+    const t = e.target;
+    const item = t.closest('.ms-list [data-i]');
+    if (item) {
+      cur = +item.dataset.i;
+      return draw();
+    }
+    const v = t.closest('[data-var]');
+    if (v) {
+      const ta = box.querySelector('[data-k="text"]');
+      if (ta) mailInsertAt(ta, ta.selectionStart, ta.selectionEnd, v.dataset.var, null);
+      return;
+    }
+    const b = t.closest('[data-act]');
+    if (!b) {
+      if (t === box) mailCloseSnippets(); // a click on the dimmed backdrop
+      return;
+    }
+    if (b.dataset.act === 'close') mailCloseSnippets();
+    else if (b.dataset.act === 'add') {
+      mailSnippets.push({ id: 'sn' + Date.now().toString(36), name: 'New snippet', key: '', quick: false, text: '' });
+      cur = mailSnippets.length - 1;
+      save();
+      draw('name');
+      const n = box.querySelector('[data-k="name"]');
+      if (n) n.select();
+    } else if (b.dataset.act === 'del') {
+      const s = mailSnippets[cur];
+      if (s && (!s.text || window.confirm('Delete the snippet "' + (s.name || 'unnamed') + '"?'))) {
+        mailSnippets.splice(cur, 1);
+        save();
+        draw();
+      }
+    }
+  };
+  box.onkeydown = (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      mailCloseSnippets();
+    }
+  };
+  box.classList.remove('hidden');
+  draw('name');
+}
+function mailCloseSnippets() {
+  const box = mailEl('.mail-snips');
+  if (!box) return;
+  clearTimeout(mailSnipSaveTimer);
+  if (mailSnippets) api.saveSettings({ mailSnippets });
+  box.classList.add('hidden');
+  box.innerHTML = '';
+  if (mbox.thread) mailRefreshQuickRow(); // new or renamed quick replies show at once
+  const body = mailEl('.mc-body');
+  if (body && mbox.draft) body.focus();
+  else mailFocus();
+}
+function mailRefreshQuickRow() {
+  const row = mailEl('.mr-quick');
+  if (row) row.outerHTML = mailQuickRowHtml();
+}
+
+// ---- address suggestions ----
+// The book is built in the main process from your own mail (see google-manager.js); here it
+// is only ranked. Typing matches the start of an address, of any word of a name, of any
+// part of the local part (j.smith -> "smith"), or of the domain.
+let mailBook = [];
+async function mailLoadContacts(refresh) {
+  if (!googleConnected || !api.mailContacts) return;
+  const r = await api.mailContacts({ refresh: !!refresh });
+  if (r && r.ok && Array.isArray(r.contacts)) mailBook = r.contacts;
+}
+if (api.onMailContacts) {
+  api.onMailContacts((p) => {
+    if (p && Array.isArray(p.contacts)) mailBook = p.contacts;
+  });
+}
+function mailContactWeight(c, now) {
+  const age = now - (c.last || 0);
+  return (c.sent || 0) * 4 + (c.recv || 0) + (age < 30 * 86400000 ? 6 : age < 180 * 86400000 ? 2 : 0);
+}
+function mailSuggest(token, exclude, max) {
+  const q = String(token || '').trim().replace(/^["'<]+/, '').toLowerCase();
+  const now = Date.now();
+  const out = [];
+  for (const c of mailBook) {
+    if (!c || !c.email || (exclude && exclude.has(c.email))) continue;
+    let rank = 0;
+    if (!q) rank = 1;
+    else {
+      const name = String(c.name || '').toLowerCase();
+      const at = c.email.indexOf('@');
+      const local = c.email.slice(0, at);
+      const domain = c.email.slice(at + 1);
+      const words = name.split(/[\s,.'"()-]+/).filter(Boolean);
+      if (c.email.startsWith(q) || (name && name.startsWith(q))) rank = 4;
+      else if (words.length && q.split(/\s+/).every((w) => words.some((n) => n.startsWith(w)))) rank = 3;
+      else if (local.split(/[._+-]+/).some((p) => p && p.startsWith(q))) rank = 2;
+      else if (q.replace(/^@/, '') && domain.startsWith(q.replace(/^@/, ''))) rank = 1;
+    }
+    if (rank) out.push({ c, rank, w: mailContactWeight(c, now) });
+  }
+  out.sort((a, b) => b.rank - a.rank || b.w - a.w);
+  return out.slice(0, max || 8).map((x) => x.c);
+}
+// The entry the caret is in: from the last separator outside quotes/brackets before the
+// caret to the next separator after it.
+function mailTokenAt(value, caret) {
+  let start = 0;
+  let q = false;
+  let ang = false;
+  for (let i = 0; i < caret; i++) {
+    const ch = value[i];
+    if (ch === '"') q = !q;
+    else if (!q && ch === '<') ang = true;
+    else if (!q && ch === '>') ang = false;
+    else if (!q && !ang && (ch === ',' || ch === ';')) start = i + 1;
+  }
+  let end = value.length;
+  for (let i = caret; i < value.length; i++) {
+    if (value[i] === ',' || value[i] === ';') {
+      end = i;
+      break;
+    }
+  }
+  return { start, end, text: value.slice(start, caret) };
+}
+function mailFormatAddress(c) {
+  if (!c.name) return c.email;
+  const n = /[(),:;<>@[\]".\\]/.test(c.name) ? '"' + c.name.replace(/["\\]/g, '') + '"' : c.name;
+  return n + ' <' + c.email + '>';
+}
+// Everyone already on the message, so nobody is offered twice.
+function mailRecipientSet() {
+  const d = mbox.draft || {};
+  const set = new Set();
+  for (const f of ['to', 'cc', 'bcc']) for (const a of mailSplit(d[f])) set.add(mailAddr(a).toLowerCase());
+  return set;
+}
+function mailWireSuggest(inp) {
+  const box = mailEl('.mc-suggest');
+  if (!box) return;
+  const st = { list: [], sel: 0, open: false, tok: null };
+  const close = () => {
+    st.open = false;
+    if (box._owner === st) box.classList.add('hidden');
+  };
+  const draw = () => {
+    box.innerHTML = st.list
+      .map(
+        (c, i) =>
+          `<div class="mcs-item${i === st.sel ? ' sel' : ''}" data-i="${i}"><span class="mcs-name">${escapeHtml(c.name || c.email)}</span>` +
+          (c.name ? `<span class="mcs-mail">${escapeHtml(c.email)}</span>` : '') +
+          '</div>'
+      )
+      .join('');
+    const cur = box.querySelector('.sel');
+    if (cur) cur.scrollIntoView({ block: 'nearest' });
+  };
+  const show = (force) => {
+    const tok = mailTokenAt(inp.value, inp.selectionStart);
+    if (!tok.text.trim() && !force) return close();
+    const mine = mailRecipientSet();
+    const typed = mailAddr(tok.text).toLowerCase();
+    mine.delete(typed); // the entry being typed is not "already on the message"
+    st.list = mailSuggest(tok.text, mine, 8);
+    if (!st.list.length) return close();
+    st.sel = 0;
+    st.tok = tok;
+    st.open = true;
+    box._owner = st;
+    box._accept = accept;
+    draw();
+    const field = inp.closest('.mc-field') || inp;
+    box.style.top = field.offsetTop + field.offsetHeight + 'px';
+    box.style.left = inp.offsetLeft + 'px';
+    box.classList.remove('hidden');
+  };
+  const accept = (c) => {
+    if (!c) return close();
+    const tok = mailTokenAt(inp.value, inp.selectionStart);
+    let end = tok.end;
+    const sep = /^[,;]\s*/.exec(inp.value.slice(end));
+    if (sep) end += sep[0].length;
+    const text = (tok.start > 0 ? ' ' : '') + mailFormatAddress(c) + ', ';
+    close();
+    mailInsertAt(inp, tok.start, end, text, null);
+  };
+  inp.addEventListener('input', () => {
+    if (!mailInserting) show(false);
+  });
+  inp.addEventListener('keydown', (e) => {
+    if (!st.open) {
+      if (e.key === 'ArrowDown' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        show(true); // an empty field: your most frequent people
+        if (st.open) e.preventDefault();
+      }
+      return;
+    }
+    const n = st.list.length;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      e.stopPropagation();
+      st.sel = (st.sel + (e.key === 'ArrowDown' ? 1 : -1) + n) % n;
+      draw();
+    } else if ((e.key === 'Enter' && !e.ctrlKey && !e.metaKey) || (e.key === 'Tab' && !e.shiftKey)) {
+      e.preventDefault();
+      e.stopPropagation();
+      accept(st.list[st.sel]);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation(); // closes the list, not the whole message
+      close();
+    }
+  });
+  inp.addEventListener('blur', () => setTimeout(close, 150));
+}
+
+// ---- unread badge + quiet during focus ----
+// Quiet = a focus session, or a Time Relax work phase that is actually running. While
+// quiet, the unread badge, the Inbox board and the list hold still; what arrives is
+// collected and summarised once, when quiet ends (the break, or the session's end).
+function mailQuiet() {
+  if (!mailQuietFocus) return false;
+  if (focusSession) return true;
+  return !!(relax && relax.running && relax.phase === 'work');
+}
+function mailShowBadge(n, capped) {
+  const rec = mailRec();
+  if (!rec || !rec.unreadEl) return;
+  rec.unread = n || 0;
+  rec.unreadEl.textContent = capped || n > 999 ? '999+' : n ? String(n) : '';
+  rec.unreadEl.classList.toggle('show', n > 0);
+}
+// `asked`: the user just did something (archive, read, refresh) and expects the number
+// to follow - that is not new mail arriving, so quiet does not hold it.
+async function mailBadge(asked) {
+  if (!googleConnected) {
+    mbox.unread = null;
+    mailShowBadge(0);
+    return;
+  }
+  if (!asked && mailQuiet() && mbox.unread != null) return;
+  const q = mailInboxQuery();
+  const r = await api.mailUnreadCount(q ? 'in:inbox is:unread ' + q : undefined);
+  if (!r || !r.ok) return;
+  if (q !== mailInboxQuery()) return; // the filter changed while this was on its way
+  mbox.unread = r.threads;
+  mailShowBadge(r.threads, r.capped);
+}
+// Riding the 2-minute Gmail poll (refreshGmail), after its own quiet check.
+function mailTick() {
+  mailBadge();
+  if (mailRec() && mbox.view !== 'SEARCH' && !mbox.loading) mailLoad(false, true);
+}
+function mailHeldSummary(held) {
+  const names = [...new Set(held.map((h) => h.from).filter(Boolean))];
+  const shown = names.slice(0, 3).join(', ') + (names.length > 3 ? ' +' + (names.length - 3) : '');
+  return {
+    title: '📧 ' + held.length + ' new while you worked',
+    body: shown ? 'from ' + shown : '',
+  };
+}
+function mailQuietCheck() {
+  const q = mailQuiet();
+  if (q === mbox.quietWas) return;
+  mbox.quietWas = q;
+  if (q) return; // going quiet: the gates hold from here on
+  const held = mbox.held;
+  mbox.held = [];
+  if (!googleConnected) return;
+  refreshGmail(); // repaints the board and runs mailTick
+  if (!held.length) return;
+  const s = mailHeldSummary(held);
+  try {
+    const n = new Notification(s.title, { body: s.body, silent: true });
+    n.onclick = () => {
+      api.focusWindow();
+      createMailTab();
+    };
+  } catch (_) {
+    /* notifications unavailable */
+  }
+}
+setInterval(mailQuietCheck, 2000);
+
+// The Black Box only knows the message; ask for its thread when that is all there is.
+async function mailJump(ref) {
+  let tid = ref.threadId;
+  if (!tid && ref.id) {
+    const r = await api.mailThreadOf(ref.id);
+    tid = r && r.ok ? r.threadId : null;
+  }
+  createMailTab(tid ? { threadId: tid } : undefined);
 }
 
 async function refreshEvents() {
@@ -10660,6 +13773,12 @@ els.setGoogleConnect.addEventListener('click', async () => {
   googleEmail = res.email;
   updateGoogleStatusUI(res.email);
   startGoogleFeeds();
+  mbox.canSend = null;
+  mailCheckSend(); // a reconnect is how sending gets allowed
+  if (mailRec()) {
+    mailLoad();
+    mailLoadLabels();
+  }
 });
 
 els.setGoogleForget.addEventListener('click', async () => {
@@ -10668,12 +13787,18 @@ els.setGoogleForget.addEventListener('click', async () => {
   upcomingEvents = [];
   updateGoogleStatusUI();
   stopGoogleFeeds();
+  mbox.canSend = null;
+  mailBadge();
+  if (mailRec()) {
+    mailCloseReader();
+    mailLoad();
+  }
 });
 
 els.gmailRefresh.addEventListener('click', async () => {
   els.gmailRefresh.disabled = true;
   els.gmailRefresh.textContent = '…';
-  await refreshGmail();
+  await refreshGmail(true);
   els.gmailRefresh.textContent = '⟳';
   els.gmailRefresh.disabled = false;
 });
@@ -11009,8 +14134,8 @@ function buildMeadow(group, opts) {
 }
 
 function exposeKind(rec) {
-  const colors = { ssh: '#4ea1ff', local: '#7ee787', slack: '#c285e0', web: '#3bbf9f', notes: '#f0c674' };
-  const glyphs = { ssh: '>_', local: '🖥', slack: '#', web: '🌐', notes: '📝' };
+  const colors = { ssh: '#4ea1ff', local: '#7ee787', slack: '#c285e0', web: '#3bbf9f', notes: '#f0c674', mail: '#ea8a5c' };
+  const glyphs = { ssh: '>_', local: '🖥', slack: '#', web: '🌐', notes: '📝', mail: '📧' };
   return { color: colors[rec.kind] || '#8a8f94', glyph: glyphs[rec.kind] || '?' };
 }
 function exposeTitle(rec) {
@@ -11125,7 +14250,8 @@ async function openExpose() {
   const R = Math.max(1100, CARD_SX / STEP); // cylinder radius
 
   recs.forEach((rec, i) => {
-    const live = rec.kind !== 'web' && !!rec.paneEl;
+    // Mail is a snapshot too: moving an iframe in the DOM reloads it.
+    const live = rec.kind !== 'web' && rec.kind !== 'mail' && !!rec.paneEl;
     moved.push({ rec, parent: rec.paneEl.parentNode, cls: rec.paneEl.className, live });
     if (live) {
       rec.paneEl.classList.add('active'); // force it visible inside the card
@@ -12819,7 +15945,11 @@ function deckGreeting() {
 function deckUnread() {
   let slack = 0;
   for (const r of tabs.values()) if (r.kind === 'slack') slack += r.unread || 0;
-  const mail = googleConnected ? gmailLastMessages.filter((m) => m.unread).length : null;
+  const mail = googleConnected
+    ? mbox.unread != null
+      ? mbox.unread
+      : gmailLastMessages.filter((m) => m.unread).length
+    : null;
   const wa = whatsappConnected ? whatsappFeedData.filter((m) => !m.fromMe).length : null;
   return { slack, mail, wa };
 }
@@ -12890,6 +16020,7 @@ function renderDeck(rec) {
     ['local', '🖥 Local'],
     ['web', '🌐 Web'],
     ['notes', '📝 Notes'],
+    ['mail', '📧 Mail'],
     ['code', '🧑‍💻 VS Code'],
     ['slack', '＃ Slack'],
     ['expose', '🧊 3D'],
@@ -12927,6 +16058,7 @@ function deckAction(act, mtg) {
     case 'local': createLocalTab({ cwd: terminalCwd || undefined }); break;
     case 'web': click('web-btn'); break;
     case 'notes': createNotesTab(); break;
+    case 'mail': createMailTab(); break;
     case 'code': click('code-btn'); break;
     case 'slack': click('slack-btn'); break;
     case 'expose': click('expose-btn'); break;
@@ -13025,6 +16157,8 @@ els.notesBtn.addEventListener('click', () => createNotesTab());
 {
   const deckBtn = document.getElementById('deck-btn');
   if (deckBtn) deckBtn.addEventListener('click', () => createDeckTab());
+  const mailBtn = document.getElementById('mail-btn');
+  if (mailBtn) mailBtn.addEventListener('click', () => createMailTab());
   const bcBtn = document.getElementById('broadcast-btn');
   if (bcBtn) bcBtn.addEventListener('click', toggleBroadcast);
   const slBtn = document.getElementById('smartlinks-btn');
@@ -13080,7 +16214,7 @@ els.notesBtn.addEventListener('click', () => createNotesTab());
   // can switch auto-start off - or retune the durations - and just close the dialog.
   // Before this, only the Start button persisted anything, which meant the one way to
   // turn auto-start off was to start a cycle.
-  ['rx-work', 'rx-break', 'rx-long', 'rx-every', 'rx-bell', 'rx-bell-vol', 'rx-bell-sound', 'rx-notify', 'rx-link', 'rx-auto', 'rx-autostart', 'rx-breathe-on', 'rx-breathe-pattern', 'rx-tips', 'rx-nudge', 'rx-evening', 'rx-evening-from', 'rx-evening-min', 'rx-evening-max'].forEach(
+  ['rx-work', 'rx-break', 'rx-long', 'rx-every', 'rx-bell', 'rx-bell-vol', 'rx-bell-sound', 'rx-notify', 'rx-link', 'rx-auto', 'rx-autostart', 'rx-breathe-on', 'rx-breathe-pattern', 'rx-music', 'rx-music-kind', 'rx-music-vol', 'rx-tips', 'rx-nudge', 'rx-evening', 'rx-evening-from', 'rx-evening-min', 'rx-evening-max'].forEach(
     (fid) => {
       const el = document.getElementById(fid);
       if (el) el.addEventListener('change', relaxApplyDialog);
@@ -13136,6 +16270,35 @@ els.notesBtn.addEventListener('click', () => createNotesTab());
   });
   const evStop = document.getElementById('ev-stop');
   if (evStop) evStop.addEventListener('click', eveningStop);
+  // Changing the piece or the level previews it; ticking the box just applies.
+  const rxMusicVol = document.getElementById('rx-music-vol');
+  if (rxMusicVol) rxMusicVol.addEventListener('input', relaxRenderMusic);
+  ['rx-music-kind', 'rx-music-vol'].forEach((fid) => {
+    const el = document.getElementById(fid);
+    if (el) el.addEventListener('change', relaxPreviewMusic);
+  });
+  const rxMusic = document.getElementById('rx-music');
+  if (rxMusic) {
+    rxMusic.addEventListener('change', () => {
+      relaxRenderMusic();
+      if (rxMusic.checked) relaxPreviewMusic();
+      else {
+        clearTimeout(musicPreviewTimer);
+        musicStop();
+      }
+    });
+  }
+  const rxMusicTest = document.getElementById('rx-music-test');
+  if (rxMusicTest) rxMusicTest.addEventListener('click', relaxPreviewMusic);
+  const thKeys = document.getElementById('th-keys-btn');
+  if (thKeys) {
+    thKeys.addEventListener('click', (e) => {
+      e.stopPropagation(); // the sheet closes on outside clicks
+      tabHelpKeys = !tabHelpKeys;
+      applyTabHelpKeys();
+      api.saveSettings({ tabHelpKeys });
+    });
+  }
   const rxTest = document.getElementById('rx-bell-test');
   if (rxTest) rxTest.addEventListener('click', relaxPreviewBell);
   document.getElementById('rx-start').addEventListener('click', () => {
@@ -13443,6 +16606,14 @@ setInterval(() => {
     if (vitInt) vitInt.value = String(vitalsIntervalSec);
   }
   if (settings && typeof settings.meetingChime === 'boolean') meetingChime = settings.meetingChime;
+  if (settings && typeof settings.mailQuietFocus === 'boolean') mailQuietFocus = settings.mailQuietFocus;
+  if (settings && typeof settings.mailDarkRead === 'boolean') mailDarkRead = settings.mailDarkRead;
+  if (settings && Number.isFinite(settings.mailListW) && settings.mailListW >= MAIL_LIST_MIN) mailListW = Math.round(settings.mailListW);
+  if (settings && Number.isFinite(settings.mailUndoSec)) mailUndoSec = Math.max(0, Math.min(60, settings.mailUndoSec));
+  if (settings && settings.mailSnippets) mailSnippets = mailCleanSnippets(settings.mailSnippets);
+  if (settings && Array.isArray(settings.mailCategories)) {
+    mailCategories = settings.mailCategories.filter((k) => MAIL_CATEGORIES.some((c) => c.key === k));
+  }
   if (settings && typeof settings.cmdDoneNotify === 'boolean') cmdDoneNotify = settings.cmdDoneNotify;
   if (settings && typeof settings.pipEnabled === 'boolean') pipEnabled = settings.pipEnabled;
   if (settings && typeof settings.exposeGrass === 'boolean') exposeGrass = settings.exposeGrass;
@@ -13466,6 +16637,7 @@ setInterval(() => {
     if (typeof settings.relaxLinkProject === 'boolean') relaxLinkProject = settings.relaxLinkProject;
     if (typeof settings.relaxAutoNext === 'boolean') relaxAutoNext = settings.relaxAutoNext;
     if (typeof settings.relaxAutoStart === 'boolean') relaxAutoStart = settings.relaxAutoStart;
+    if (typeof settings.relaxWasRunning === 'boolean') relaxWasRunning = settings.relaxWasRunning;
     if (typeof settings.relaxBreathe === 'boolean') relaxBreathe = settings.relaxBreathe;
     if (typeof settings.relaxTips === 'boolean') relaxTips = settings.relaxTips;
     if (typeof settings.relaxParkNudge === 'boolean') relaxParkNudge = settings.relaxParkNudge;
@@ -13477,6 +16649,10 @@ setInterval(() => {
       relaxEveningOffUntil = settings.relaxEveningOffUntil;
     relaxTipIdx = numIf(settings.relaxTipIdx, 0, 9972, relaxTipIdx);
     if (BREATHE_PATTERNS[settings.relaxBreathePattern]) relaxBreathePattern = settings.relaxBreathePattern;
+    if (typeof settings.relaxMusicOn === 'boolean') relaxMusicOn = settings.relaxMusicOn;
+    if (RELAX_MUSIC[settings.relaxMusic]) relaxMusic = settings.relaxMusic;
+    if (typeof settings.relaxMusicVol === 'number' && Number.isFinite(settings.relaxMusicVol))
+      relaxMusicVol = Math.max(0.02, Math.min(1, settings.relaxMusicVol));
     const hp = settings.relaxHudPos;
     if (hp && typeof hp.x === 'number' && typeof hp.y === 'number' && Number.isFinite(hp.x) && Number.isFinite(hp.y))
       relaxHudPos = { x: hp.x, y: hp.y };
@@ -13497,6 +16673,8 @@ setInterval(() => {
   // hour, not the phase. One timer from here on, re-arming itself.
   eveningRender();
   eveningSchedule();
+  if (settings && typeof settings.tabHelpKeys === 'boolean') tabHelpKeys = settings.tabHelpKeys;
+  if (settings && typeof settings.copyJoinWraps === 'boolean') copyJoinWraps = settings.copyJoinWraps;
   if (settings && settings.wheelKeys) wheelKeys = settings.wheelKeys;
   if (settings && settings.tmuxPrefix) tmuxPrefix = settings.tmuxPrefix;
   if (settings && typeof settings.tmuxAutoExit === 'boolean') tmuxAutoExit = settings.tmuxAutoExit;
@@ -13600,6 +16778,7 @@ setInterval(() => {
       else if (t.kind === 'local') created = !!createLocalTab({ cwd: t.cwd || undefined, title: t.title });
       else if (t.kind === 'notes') created = !!createNotesTab();
       else if (t.kind === 'deck') created = !!createDeckTab();
+      else if (t.kind === 'mail') created = !!createMailTab();
       else if (t.kind === 'slack' && slackReady && t.channel) created = !!createSlackTab(t.channel);
       // Each create activates the new tab — reapply a manual rename to it.
       if (created && t.title && activeTabId) applyRestoredTitle(activeTabId, t.title);
