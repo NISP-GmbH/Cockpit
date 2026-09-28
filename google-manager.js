@@ -363,7 +363,106 @@ function b64url(s) {
 // back a data URL. Only public http(s) hosts, only images, and capped - a mail must not be
 // able to make Cockpit poke at the local network.
 const PRIVATE_HOST = /^(localhost|127\.|10\.|192\.168\.|169\.254\.|0\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?$|\[?f[cd][0-9a-f]{2}:)/i;
-async function fetchImageDataUrl(url, maxBytes) {
+// Redirects are followed HERE, one hop at a time, so every hop gets the public-host check:
+// fetch's own redirect:'follow' would go wherever a Location header says - 127.0.0.1
+// included. Node's fetch has no cookie jar and sends no referrer, so nothing identifies you
+// beyond the request itself. `opts.isPrivate` exists for the harness.
+const FETCH_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
+async function fetchFollow(url, opts = {}) {
+  const isPrivate = opts.isPrivate || ((h) => PRIVATE_HOST.test(h));
+  const maxHops = opts.maxHops || 8;
+  const hops = [];
+  let cur = String(url);
+  for (let i = 0; i <= maxHops; i++) {
+    let u;
+    try {
+      u = new URL(cur);
+    } catch (_) {
+      throw new Error('not a URL');
+    }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return { res: null, url: u.toString(), hops, stopped: 'not http' };
+    if (isPrivate(u.hostname)) throw new Error('not a public host');
+    hops.push(u.toString());
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), opts.timeoutMs || 8000);
+    let res;
+    try {
+      res = await fetch(u.toString(), {
+        method: 'GET',
+        redirect: 'manual',
+        signal: ctl.signal,
+        headers: { 'user-agent': FETCH_UA, accept: opts.accept || '*/*' },
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    const loc = res.headers.get('location');
+    if (res.status >= 300 && res.status < 400 && loc) {
+      try {
+        if (res.body) await res.body.cancel();
+      } catch (_) {
+        /* nothing to drain */
+      }
+      cur = new URL(loc, u).toString();
+      continue;
+    }
+    return { res, url: u.toString(), hops };
+  }
+  throw new Error('too many redirects');
+}
+async function readCapped(res, cap) {
+  if (!res.body) return Buffer.alloc(0);
+  const reader = res.body.getReader();
+  const parts = [];
+  let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(Buffer.from(value));
+    n += value.length;
+    if (n >= cap) {
+      try {
+        await reader.cancel();
+      } catch (_) {
+        /* already closed */
+      }
+      break;
+    }
+  }
+  return Buffer.concat(parts).slice(0, cap);
+}
+// "Where does it go?" for a tracking link: follow it WITHOUT opening it. HTTP redirects,
+// then the two ways tracker pages bounce you on - a meta refresh, or a one-line script on a
+// tiny page. The sender may still count this as a click; the renderer only asks on request.
+async function resolveRedirects(url, opts = {}) {
+  const all = [];
+  let cur = String(url);
+  for (let round = 0; round < 4; round++) {
+    const r = await fetchFollow(cur, { ...opts, accept: 'text/html,*/*' });
+    all.push(...r.hops);
+    if (!r.res) return { final: r.url, hops: all.concat(r.url) };
+    const type = r.res.headers.get('content-type') || '';
+    if (!/html/i.test(type)) {
+      try {
+        if (r.res.body) await r.res.body.cancel();
+      } catch (_) {
+        /* fine */
+      }
+      return { final: r.url, hops: all, status: r.res.status };
+    }
+    const text = (await readCapped(r.res, 65536)).toString('utf8');
+    const meta =
+      /<meta[^>]+http-equiv=["']?refresh["']?[^>]*content=["']?\s*\d+\s*;\s*url=([^"'>\s]+)/i.exec(text) ||
+      /<meta[^>]+content=["']?\s*\d+\s*;\s*url=([^"'>\s]+)[^>]*http-equiv=["']?refresh/i.exec(text);
+    // a script redirect only counts on a small page: a real page full of scripts is a destination
+    const js = text.length < 8192 ? /(?:window\.|document\.)?location(?:\.href)?\s*=\s*["']([^"']+)["']|location\.replace\(\s*["']([^"']+)["']\s*\)/.exec(text) : null;
+    const next = meta ? meta[1] : js ? js[1] || js[2] : null;
+    if (!next) return { final: r.url, hops: all, status: r.res.status };
+    cur = new URL(next.replace(/&amp;/g, '&').replace(/\\\//g, '/'), r.url).toString();
+  }
+  return { final: cur, hops: all };
+}
+async function fetchImageDataUrl(url, maxBytes, opts = {}) {
   const cap = maxBytes || 5 * 1024 * 1024;
   let u;
   try {
@@ -372,8 +471,9 @@ async function fetchImageDataUrl(url, maxBytes) {
     throw new Error('not a URL');
   }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('only http(s) images');
-  if (PRIVATE_HOST.test(u.hostname)) throw new Error('not a public host');
-  const res = await fetch(u.toString(), { redirect: 'follow' });
+  const followed = await fetchFollow(u.toString(), { ...opts, accept: 'image/*' });
+  if (!followed.res) throw new Error('only http(s) images');
+  const res = followed.res;
   if (!res.ok) throw new Error('HTTP ' + res.status);
   const type = (res.headers.get('content-type') || '').split(';')[0].trim();
   if (!/^image\//i.test(type)) throw new Error('not an image');
@@ -912,5 +1012,5 @@ class GoogleManager {
 module.exports = {
   GoogleManager,
   // Exported for the scratch harnesses; nothing else needs them.
-  _mail: { parseAddress, NOT_A_PERSON, buildMime, encodeHeader, splitAddresses, encodeAddress, walkPayload, parseMessage, summarizeThread, mapLimit, b64url, fetchImageDataUrl, PRIVATE_HOST },
+  _mail: { resolveRedirects, fetchFollow, parseAddress, NOT_A_PERSON, buildMime, encodeHeader, splitAddresses, encodeAddress, walkPayload, parseMessage, summarizeThread, mapLimit, b64url, fetchImageDataUrl, PRIVATE_HOST },
 };

@@ -183,6 +183,7 @@ contextBridge.exposeInMainWorld('sshApi', {
   mailThreadOf: (id) => ipcRenderer.invoke('mail:threadOf', { id }),
   mailSend: (o) => ipcRenderer.invoke('mail:send', o),
   mailFetchImage: (url) => ipcRenderer.invoke('mail:fetchImage', { url }),
+  mailResolveUrl: (url) => ipcRenderer.invoke('mail:resolveUrl', { url }),
   mailCancelSend: (id) => ipcRenderer.invoke('mail:cancelSend', { id }),
   mailSendNow: (id) => ipcRenderer.invoke('mail:sendNow', { id }),
   mailContacts: (o) => ipcRenderer.invoke('mail:contacts', o || {}),

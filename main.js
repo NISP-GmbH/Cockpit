@@ -1117,6 +1117,14 @@ app.whenReady().then(() => {
     'mail:contacts',
     mailCall((o) => googleMgr.contacts(o, (list) => send('mail:contacts', { contacts: list })))
   );
+  // Where a tracking link really goes - followed hop by hop, public hosts only, never opened.
+  ipcMain.handle('mail:resolveUrl', async (_e, { url }) => {
+    try {
+      return { ok: true, ...(await mailUtil.resolveRedirects(url)) };
+    } catch (err) {
+      return { ok: false, error: err.message || String(err) };
+    }
+  });
   ipcMain.handle(
     'mail:fetchImage',
     mailCall(async ({ url }) => ({ dataUrl: await mailUtil.fetchImageDataUrl(url) }))

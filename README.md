@@ -61,7 +61,7 @@ Everything lives in one tabbed window (`Ctrl+Shift+T` new · `Ctrl+Shift+W` clos
 - **Grab / preview a file from here** (tab hover cheat-sheet → 📥 Get a file) - reaches a file straight through the current terminal session, so it works even inside a **nested `ssh`**, `sudo`, `tmux`, or a container where SFTP can't reach. Two options: **👁 Preview** shows the contents in a scrollable viewer (`.json` pretty-prints; **`.log`/`.out`/`.err` jump to the end** so you see the newest lines; binary files are declined), and **📥 Download** saves it. The transfer is hidden from the terminal (a short `[sending file …]` note stands in for the base64), leaving no clutter. The host also reports the file size, and a transfer that arrives a different size is **refused rather than saved** - a long stream can be mangled by anything that redraws the terminal instead of passing bytes through (tmux, screen), and a silently corrupt file is worse than none. Best for small and medium files; use 📁 Files (SFTP) for large ones.
 - **Port forwarding** (tab hover cheat-sheet → 🔀 Port forwarding) - a visual SSH tunnel manager for the active connection. Port forwarding is confusing because it's hard to picture *who listens* and *which way traffic flows*, so each tunnel is drawn as a **three-node diagram** - your PC, the SSH host, the target - with a 📡 LISTENS pin and directional arrows, plus a plain-English sentence, and a live preview updates as you fill the form. Supports **Local (`-L`)** (reach an internal service from your machine), **Remote (`-R`)** (expose something of yours on the server), and **Dynamic (`-D`)** (a built-in SOCKS5 proxy). Each active tunnel shows a status dot, live connection count and bytes up/down, with a Stop button. Optionally **remember** a tunnel per host so it **auto-starts on connect**. An "allow other devices (0.0.0.0)" toggle exposes a local tunnel to your LAN. The panel is **draggable** by its header (double-click the header to re-center).
 - **Host vitals** (Terminal ▾ → 📈 Host vitals, opt-in) - a tiny live CPU / MEM / DISK sparkline strip in the **status bar**, next to the active SSH shell's name, so you can eyeball a box's health without opening `htop`. Each host is polled over a **separate exec channel** (default every 15 s, selectable 5/15/30/60 s in the same menu), so it never disturbs your interactive shell. CPU is load1 ÷ cores; colours go green → amber → red as a metric climbs. **Hover** the strip for absolute figures (e.g. `MEM 29% of 33 GB (9.6 GB used)`, `DISK 82% of 500 GB`, plus load and core count). Linux-oriented (reads `/proc` + `df`); unavailable values show `n/a`.
-- **Smart output** (Terminal ▾ → 🔎 Smart output, on by default) - makes things in the terminal scrollback clickable: click an **IP** (with optional `:port`) to open a pre-filled SSH connection, a **file path** to grab it through the current session, or a **JSON** object/array to pretty-print it in a copyable pop-up - this works on both compact single-line JSON and pretty-printed **multi-line** blocks (e.g. `cat file.json`), where clicking any line pops the enclosing object/array. URLs keep opening in an in-app web tab. IPs inside URLs are left alone; only text that actually parses as JSON gets a link. A `.json` file (a path, or a filename in an `ls -l` row) **previews structured** immediately (fetched in-band, with a Save button in the viewer). Filenames in an `ls -l` listing are grabbable too.
+- **Smart output** (Terminal ▾ → 🔎 Smart output, on by default) - makes things in the terminal scrollback clickable: click an **IP** (with optional `:port`) to open a pre-filled SSH connection, a **file path** to grab it through the current session, or a **JSON** object/array to pretty-print it in a copyable pop-up - this works on both compact single-line JSON and pretty-printed **multi-line** blocks (e.g. `cat file.json`), where clicking any line pops the enclosing object/array. URLs keep opening in an in-app web tab. IPs inside URLs are left alone; only text that actually parses as JSON gets a link. A `.json` file (a path, or a filename in an `ls -l` row) **previews structured** immediately (fetched in-band, with a Save button in the viewer). Filenames in an `ls -l` listing are grabbable too - including names with spaces, quotes or umlauts, which `ls` prints quoted (`'Price List 2026.pdf'`): the real name is used, not the quoted one. The Get-a-file dialog accepts a pasted quoted name or `My\ Docs/a.pdf` the same way.
 - **Actionable output** (part of Smart output) - Cockpit also recognises **things you act on** in terminal output and gives them a verb menu on click: a **PID** (in `ps aux`/`ps -ef`) → info / tree / lsof / renice / kill; a **container id** (in `docker ps`) → logs / inspect / stats / exec / stop / restart; a **systemd unit** (anything ending `.service` / `.socket` / `.timer` / `.target` / `.mount`) → status / journal / restart / stop / start. **Read-only** verbs (green) run immediately; **mutating** verbs are typed at your prompt so you review and press Enter.
 
 **Command Deck (🏠 Home)** - a live dashboard tab (**＋ New → Home**): greeting + clock, the **next meeting** with a one-click **Join**, **today's project time** (start/pause + Projects shortcut), **open/overdue tasks**, unread **Slack/WhatsApp/Mail** counts, and a **quick-launch** row for every tab type. Refreshes every second.
@@ -201,6 +201,13 @@ macOS notes:
   enable the automation port; normal use needs nothing special.
 - The dock icon is the default Electron icon when running from source; it becomes the custom
   icon only in a packaged build.
+- **Local terminal says `posix_spawnp failed`?** That was node-pty 1.1.0 shipping its macOS
+  helper (`spawn-helper`) without the executable bit. Cockpit now repairs it by itself before the
+  first local shell starts (and `npm install` does too), so a `git pull` and a restart are
+  enough. If your install is read-only and it still fails, the message says what to run; by
+  hand it is `chmod +x node_modules/node-pty/prebuilds/darwin-*/spawn-helper`.
+- A local shell starts in your home folder when the one it remembers no longer exists, and falls
+  back to `/bin/zsh` if `$SHELL` points at a shell that was uninstalled.
 
 ### Linux (run from source)
 Same three steps - install Node LTS via your package manager (or nodejs.org), then
@@ -268,21 +275,38 @@ it. The compose panel says so when it is missing.
 ### 📧 The Mail tab
 **＋ New ▾ → 📧 Mail** (or the Home deck, or click a mail on the Inbox board) opens Gmail in
 a tab: search, Inbox / Unread / Starred / Sent / All mail, your labels, a thread list and a
-reader. The tab badge is the **real** inbox unread count, and the tab comes back on restart.
+reader. The tab comes back on restart. An unread count on the tab itself is off by default
+(Settings → Google turns it on); Home always shows the real inbox count.
 
 - **Inbox categories** - the row under the toolbar picks which of Gmail's categories you see:
-  **Primary** only, or any mix (Primary + Updates, say). **All** turns the filter off. It is
+  click **Primary** (or Updates, ...) to see just that one, like Gmail's tabs; **Ctrl+click** to
+  combine several (Primary + Updates, say). **All** turns the filter off. It is
   remembered, and it decides what "inbox" means everywhere: the Inbox / Unread views, the tab
   badge, the Inbox board (its header names the filter) and the Home count. Starred, Sent,
   labels and search always show everything.
 - **Keyboard triage** (while the tab has focus, never inside a text field): `j`/`k` next /
   previous, `Enter`/`o` open, `u`/`Esc` back, `e` archive, `#` trash, `s` star,
   `Shift+I`/`Shift+U` read / unread, `l` label, `r`/`a`/`f` reply / reply all / forward,
-  `c` compose, `/` search, `z` undo, `1`-`9` quick replies, `d` dark reading, `?` the list. `Ctrl+Enter` sends.
+  `c` compose, `/` search, `z` undo, `1`-`9` quick replies, `d` reading mode, `?` the list. `Ctrl+Enter` sends.
   Archive and trash act at once and can be undone for 8 s.
 - **Reading safely** - HTML mail is shown in a sandboxed frame that cannot run scripts, and
   remote images stay blocked (they tell a sender you opened the mail). **Load images** fetches
   them for that one message. Links open in a Cockpit web tab; `mailto:` links open compose.
+- **Links show where they really go** - hover a link for a card with its real destination.
+  Wrapped links (Google and Outlook SafeLinks redirects, Facebook, Slack, URL Defense and the
+  usual `click.…/track?url=…` redirectors) are opened up on the spot, without asking anyone;
+  `utm_…`, `fbclid`, `gclid`, `mc_eid` and similar tracking parameters are dropped; and a link
+  whose text shows one site but goes to another (`www.paypal.com` pointing elsewhere) gets a
+  ⚠ warning. Clicking opens the clean destination, not the tracker. For a click counter that
+  hides its destination (newsletters, shorteners) the card offers **🔍 Where does it go?**,
+  which follows it without opening it - the sender may count that as a click, so it only happens
+  when you ask. Share buttons stay share buttons. Settings → Google turns the clean opening off.
+- **Signatures per recipient type** - Settings → Google holds a **short** signature for
+  colleagues and a **full** one for everyone else. Colleagues are the domains you list (or, with
+  none listed, your own domain - unless that is gmail.com or another public provider). The
+  short one is used only when every recipient is a colleague: one outsider on Cc and the full one
+  goes in. It sits above the quoted original after the standard `-- ` line, follows the
+  recipients while you type them, and is left alone once you edit it.
 - **Reply, reply all, forward** - plain text with the original quoted, kept in the same Gmail
   thread; reply all leaves you out. Forward brings the attachments along; 📎 adds your own.
 - **Address suggestions** - start typing in To / Cc / Bcc and the people you mail pop up
@@ -295,13 +319,23 @@ reader. The tab badge is the **real** inbox unread count, and the tab comes back
   and `{name}` of the recipient, `{today}`, `{tomorrow}`, `{subject}`, `{project}`, `{clip}`,
   `{cursor}`, and **`{free}`** - your next free hours from the calendar (`{free@Berlin}` gives
   them in one of your TZ planner zones). Edit them with **✂** in the Mail toolbar.
+- **Snippet from a highlight** - highlight text in a message you are writing or reading and a
+  **✂ Save as snippet** pill appears next to it: one click opens the editor with that text, a
+  name and a free shortcut already filled in (in your own message the recipient's first name
+  becomes `{first}`).
+- **Snippets that learn** (opt-in, Settings → Google) - after the third time you send nearly the
+  same reply, the Sent toast offers to keep it as a snippet; **Not this** means never again for
+  that one. It remembers your last 40 short replies on this computer only, and forgets them
+  when you switch it off or disconnect Google.
 - **Quick replies** - snippets marked ⚡ show as buttons under every open conversation: click
   (or press `1`-`9`) to start a reply with it, Ctrl+click to send it straight away.
 - **Undo send** - every message waits 15 s with **Undo** / **Send now** in the toast (`z` undoes);
   undone, it comes back exactly as written. Quitting Cockpit sends what is waiting rather than
   dropping it. Settings → Google sets the time (or off).
-- **Dark reading** - 🌙 in the reader bar (or `d`) shows every mail white on black, even the
-  ones that fix their own colours; photos and logos keep theirs. Remembered for all mail.
+- **Reading modes** - the reader-bar button (or `d`) cycles **☀ as sent → 🌙 white on black →
+  📟 green on black**. White on black inverts the mail, so even mails that fix their own
+  colours turn dark and brand colours stay recognisable; green on black recolours everything to
+  a terminal screen. Pictures keep their own colours in both. Remembered for all mail.
 - **Resizable list** - drag the divider between the list and the reader; double-click it for
   the default width. The width is remembered.
 - **Attachments** - preview images and text, **👁 View** a PDF in its own viewer window (opened

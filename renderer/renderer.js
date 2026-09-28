@@ -221,6 +221,12 @@ const els = {
   setGoogleConnect: document.getElementById('set-google-connect'),
   setMailQuiet: document.getElementById('set-mail-quiet'),
   setMailUndo: document.getElementById('set-mail-undo'),
+  setMailBadge: document.getElementById('set-mail-badge'),
+  setMailLearn: document.getElementById('set-mail-learn'),
+  setMailCleanLinks: document.getElementById('set-mail-clean-links'),
+  setMailSigInt: document.getElementById('set-mail-sig-int'),
+  setMailSigExt: document.getElementById('set-mail-sig-ext'),
+  setMailIntDomains: document.getElementById('set-mail-int-domains'),
   setGoogleForget: document.getElementById('set-google-forget'),
   settingsGoogleError: document.getElementById('settings-google-error'),
   setClaudeWatch: document.getElementById('set-claude-watch'),
@@ -909,6 +915,87 @@ const RE_IPV4 =
 // Absolute unix path (/a/b or ~/a/b), at least one segment. Lookbehind keeps it from
 // matching the "//" inside a URL like http://host/path.
 const RE_PATH = /(?<![\w/])(~?(?:\/[\w.+@%\-]+)+\/?)/g;
+// A quoted path in output - what ls (and most tools) print for a path with a space in it.
+const RE_QPATH = /(^|\s)('(?:~|\.{0,2}\/)[^']*'|"(?:~|\.{0,2}\/)[^"]*")(?=\s|$)/g;
+// Undo shell quoting the way GNU ls writes it (QUOTING_STYLE=shell-escape, its default on a
+// terminal): 'a b', "it's", a\ b, and $'\n' / $'\303\251' for control or raw bytes.
+// Returns the real name, or null when the quoting does not close (then it is not quoting).
+// The name was being used AS PRINTED, quotes included, so a file with a space in its name
+// asked the shell for a file whose name starts and ends with ' - which does not exist.
+function shUnquote(str) {
+  const s = String(str);
+  const enc = new TextEncoder();
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === "'") {
+      const j = s.indexOf("'", i + 1);
+      if (j < 0) return null;
+      out += s.slice(i + 1, j);
+      i = j + 1;
+    } else if (c === '$' && s[i + 1] === "'") {
+      // ANSI-C quoting: escapes can be raw bytes, so collect bytes and decode as UTF-8.
+      const bytes = [];
+      i += 2;
+      while (i < s.length && s[i] !== "'") {
+        if (s[i] === '\\' && i + 1 < s.length) {
+          const e = s[i + 1];
+          const oct = /^[0-7]{1,3}/.exec(s.slice(i + 1));
+          const hex = e === 'x' ? /^[0-9a-fA-F]{1,2}/.exec(s.slice(i + 2)) : null;
+          const simple = { n: 10, t: 9, r: 13, a: 7, b: 8, f: 12, v: 11, e: 27, E: 27, '\\': 92, "'": 39, '"': 34, '?': 63 };
+          if (oct) {
+            bytes.push(parseInt(oct[0], 8) & 255);
+            i += 1 + oct[0].length;
+          } else if (hex) {
+            bytes.push(parseInt(hex[0], 16));
+            i += 2 + hex[0].length;
+          } else if (simple[e] != null) {
+            bytes.push(simple[e]);
+            i += 2;
+          } else {
+            bytes.push(...enc.encode('\\' + e));
+            i += 2;
+          }
+        } else {
+          bytes.push(...enc.encode(s[i]));
+          i++;
+        }
+      }
+      if (s[i] !== "'") return null;
+      i++;
+      out += new TextDecoder('utf-8').decode(new Uint8Array(bytes));
+    } else if (c === '"') {
+      i++;
+      while (i < s.length && s[i] !== '"') {
+        if (s[i] === '\\' && /["\\$`]/.test(s[i + 1] || '')) {
+          out += s[i + 1];
+          i += 2;
+        } else out += s[i++];
+      }
+      if (s[i] !== '"') return null;
+      i++;
+    } else if (c === '\\' && i + 1 < s.length) {
+      out += s[i + 1];
+      i += 2;
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;
+}
+// A name or path as a person pastes or ls prints it: unquote only when it is visibly shell
+// quoting - it starts with a quote, or has a backslash-escaped space. A Windows path
+// (C:\Users\...) has backslashes too, and must come through untouched.
+function grabNormPath(v) {
+  const t = String(v || '').trim();
+  if (/^(['"]|\$')/.test(t) || /\\ /.test(t)) {
+    const u = shUnquote(t);
+    if (u != null && u !== '') return u;
+  }
+  return t;
+}
 // An `ls -l` / `ll` row: a permission mode string, then the usual columns, then the name.
 // Type char is captured so we can link only regular files (-) and symlinks (l), not dirs.
 const RE_LSL = /^\s*([-dlbcpsD])[-rwxsStT]{9}[.+@]?\s+\d+\s+\S+\s+\S+\s+\S+\s+\w{3}\s+\d+\s+[\d:]{4,5}\s+(.+)$/;
@@ -931,8 +1018,20 @@ function smartFindLinks(text) {
     const port = m[1] ? Number(m[1]) : 22;
     out.push({ start: idx, len: m[0].length, kind: 'ip', text: m[0], host, port });
   }
+  const quoted = [];
+  RE_QPATH.lastIndex = 0;
+  while ((m = RE_QPATH.exec(text))) {
+    const raw = m[2];
+    const real = shUnquote(raw);
+    if (!real || !real.includes('/')) continue;
+    const at = m.index + m[1].length;
+    quoted.push([at, at + raw.length]);
+    out.push({ start: at, len: raw.length, kind: 'path', text: real });
+  }
+  const inQuoted = (i) => quoted.some(([a, b]) => i >= a && i < b);
   RE_PATH.lastIndex = 0;
   while ((m = RE_PATH.exec(text))) {
+    if (inQuoted(m.index)) continue;
     const p = m[1];
     if (p.length < 3 || !p.includes('/')) continue; // need a real path, not a lone "/"
     // A path written at the end of a sentence picks up the full stop, which then
@@ -946,9 +1045,10 @@ function smartFindLinks(text) {
   // relative to the shell's cwd - link it for regular files and symlinks.
   const ls = text.match(RE_LSL);
   if (ls && (ls[1] === '-' || ls[1] === 'l')) {
-    const nm = ls[2].split(' -> ')[0].replace(/\s+$/, ''); // symlink: link the entry, not target
+    const shown = ls[2].split(' -> ')[0].replace(/\s+$/, ''); // symlink: link the entry, not target
+    const nm = grabNormPath(shown); // ls quotes a name with a space: 'a b.pdf'
     if (nm && nm !== '.' && nm !== '..' && !nm.includes('/')) {
-      out.push({ start: text.length - ls[2].length, len: nm.length, kind: 'path', text: nm });
+      out.push({ start: text.length - ls[2].length, len: shown.length, kind: 'path', text: nm });
     }
   }
   // Actionable entities: systemd units, a PID (ps output), a container id (docker ps).
@@ -3975,7 +4075,7 @@ function grabSetStatus(msg, kind) {
 }
 function startGrab() {
   const rec = tabs.get(grabTargetId);
-  const filePath = els.grabPath.value.trim();
+  const filePath = grabNormPath(els.grabPath.value);
   beginGrab(rec, filePath, { onStatus: grabSetStatus });
 }
 
@@ -4258,7 +4358,7 @@ function looksPreviewable(name) {
 }
 function startGrabPreview() {
   const rec = tabs.get(grabTargetId);
-  const filePath = els.grabPath.value.trim();
+  const filePath = grabNormPath(els.grabPath.value);
   beginGrab(rec, filePath, { preview: true, onStatus: grabSetStatus });
 }
 if (els.grabPreview) els.grabPreview.addEventListener('click', startGrabPreview);
@@ -7161,6 +7261,15 @@ async function openSettings() {
   els.setClaudeWatch.checked = claudeWatch;
   els.setMeetingChime.checked = meetingChime;
   els.setMailQuiet.checked = mailQuietFocus;
+  els.setMailBadge.checked = mailTabBadge;
+  els.setMailLearn.checked = mailLearnSnippets;
+  els.setMailCleanLinks.checked = mailCleanLinks;
+  els.setMailSigInt.value = mailSigInternal;
+  els.setMailSigExt.value = mailSigExternal;
+  els.setMailIntDomains.value = mailInternalDomains;
+  els.setMailIntDomains.placeholder = mailInternalList().length && !mailInternalDomains
+    ? 'your own domain: ' + mailInternalList()[0]
+    : 'e.g. company.com, company.de';
   els.setMailUndo.value = String(mailUndoSec);
   if (els.setMailUndo.value !== String(mailUndoSec)) els.setMailUndo.value = '15';
   els.setCmdDone.checked = cmdDoneNotify;
@@ -7264,6 +7373,41 @@ els.quickCmdsSave.addEventListener('click', () => {
 els.setClaudeWatch.addEventListener('change', () => {
   claudeWatch = els.setClaudeWatch.checked;
   api.saveSettings({ claudeWatch });
+});
+
+els.setMailCleanLinks.addEventListener('change', () => {
+  mailCleanLinks = els.setMailCleanLinks.checked;
+  api.saveSettings({ mailCleanLinks });
+});
+{
+  // saved as you type (after a short pause) and when the field is left
+  const sigSaver = (el, set) => {
+    let t = null;
+    const save = () => {
+      clearTimeout(t);
+      set(el.value);
+    };
+    el.addEventListener('input', () => {
+      clearTimeout(t);
+      t = setTimeout(save, 400);
+    });
+    el.addEventListener('change', save);
+  };
+  sigSaver(els.setMailSigInt, (v) => api.saveSettings({ mailSigInternal: (mailSigInternal = v) }));
+  sigSaver(els.setMailSigExt, (v) => api.saveSettings({ mailSigExternal: (mailSigExternal = v) }));
+  sigSaver(els.setMailIntDomains, (v) => api.saveSettings({ mailInternalDomains: (mailInternalDomains = v) }));
+}
+
+els.setMailLearn.addEventListener('change', () => {
+  mailLearnSnippets = els.setMailLearn.checked;
+  api.saveSettings({ mailLearnSnippets });
+  if (!mailLearnSnippets) mailForgetLearning(); // off means nothing is kept, not just not offered
+});
+
+els.setMailBadge.addEventListener('change', () => {
+  mailTabBadge = els.setMailBadge.checked;
+  api.saveSettings({ mailTabBadge });
+  mailShowBadge(mbox.unread || 0);
 });
 
 els.setMailUndo.addEventListener('change', () => {
@@ -11186,7 +11330,7 @@ const MAIL_KEY_HELP = [
   ['c', 'compose'],
   ['/', 'search'],
   ['z', 'undo'],
-  ['d', 'dark reading on / off (remembered)'],
+  ['d', 'reading: as sent / white on black / green on black'],
   ['Ctrl+Enter', 'send (while writing)'],
   ['?', 'this list'],
 ];
@@ -11255,6 +11399,8 @@ function createMailTab(opts) {
     '<div class="mail-pop hidden"></div>' +
     '<div class="mail-compose hidden"></div>' +
     '<div class="mail-snips hidden"></div>' +
+    '<button class="mail-selpill hidden" title="Save the highlighted text as a snippet">✂ Save as snippet</button>' +
+    '<div class="mail-linkcard hidden"></div>' +
     '<div class="mail-lightbox hidden"></div>';
   const rec = {
     id,
@@ -11268,6 +11414,8 @@ function createMailTab(opts) {
   tabs.set(id, rec);
   mailWire(rec);
   mailWireSplit(rec);
+  mailWireSelPill(rec);
+  mailWireLinkCard(rec);
   mailApplyListW(rec);
   mailRenderViews();
   mailCloseReader();
@@ -11318,7 +11466,7 @@ function mailWire(rec) {
   p.querySelector('.mail-cats').addEventListener('click', (e) => {
     const b = e.target.closest('[data-cat]');
     if (!b) return;
-    mailToggleCategory(b.dataset.cat);
+    mailToggleCategory(b.dataset.cat, e.ctrlKey || e.metaKey || e.shiftKey);
     mailFocus();
   });
   p.querySelector('.mail-list').addEventListener('click', (e) => {
@@ -11353,6 +11501,8 @@ function mailWire(rec) {
   p.querySelector('.mail-toast').addEventListener('click', (e) => {
     if (e.target.closest('[data-act="undo"]')) mailDo('undo');
     else if (e.target.closest('[data-act="send-now"]')) mailSendNowPending();
+    else if (e.target.closest('[data-act="learn-save"]')) mailLearnAnswer(true);
+    else if (e.target.closest('[data-act="learn-no"]')) mailLearnAnswer(false);
     else if (e.target.closest('[data-act="reopen"]') && mbox.reopen) {
       const d = mbox.reopen;
       if (mailDraftDirty() && !window.confirm('Discard the message you are writing and reopen the unsent one?')) return;
@@ -11460,8 +11610,12 @@ function mailViewQuery() {
 function mailInboxQuery() {
   return mailCategoryQuery(mailCategories);
 }
-function mailToggleCategory(key) {
+// A click shows that one category, the way Gmail's tabs do; Ctrl/Shift+click adds or removes
+// it to combine several. (Plain clicks used to add, so after Primary a click on Updates showed
+// both, and getting to "just Updates" took clicking Primary off again.)
+function mailToggleCategory(key, combine) {
   if (key === 'all') mailCategories = [];
+  else if (!combine) mailCategories = [key];
   else if (mailCategories.includes(key)) mailCategories = mailCategories.filter((k) => k !== key);
   else mailCategories = mailCategories.concat(key);
   if (mailCategories.length === MAIL_CATEGORIES.length) mailCategories = []; // all of them is "all"
@@ -11477,11 +11631,11 @@ function mailRenderCats() {
   box.classList.toggle('hidden', !mailViewHasInbox());
   const all = !mailCategories.length;
   box.innerHTML =
-    '<span class="mail-cats-cap" title="Which inbox categories to show - also what the badge and the Inbox board count">Categories</span>' +
+    '<span class="mail-cats-cap" title="Which inbox categories to show - also what the badge and the Inbox board count. Ctrl+click to combine several.">Categories</span>' +
     `<button class="mail-chip mail-cat${all ? ' sel' : ''}" data-cat="all">All</button>` +
     MAIL_CATEGORIES.map(
       (c) =>
-        `<button class="mail-chip mail-cat${mailCategories.includes(c.key) ? ' sel' : ''}" data-cat="${c.key}" title="Click to add or remove ${c.label}">${c.label}</button>`
+        `<button class="mail-chip mail-cat${mailCategories.includes(c.key) ? ' sel' : ''}" data-cat="${c.key}" title="Show ${c.label} · Ctrl+click to add it to or remove it from the others">${c.label}</button>`
     ).join('');
 }
 function mailViewHasInbox() {
@@ -11689,6 +11843,7 @@ function mailRenderThread() {
     `<div class="mr-subject">${escapeHtml(subj)}</div>` +
     '<div class="mr-msgs"></div>';
   mailPaintDarkBtn(reader.querySelector('.mr-darkbtn'));
+  reader.classList.toggle('read-green', mailReadMode === 'green');
   const box = reader.querySelector('.mr-msgs');
   const last = t.messages.length - 1;
   t.messages.forEach((m, i) => box.appendChild(mailMessageEl(m, i === last || (m.labelIds || []).includes('UNREAD'))));
@@ -11750,7 +11905,8 @@ function mailFillBody(el, m) {
       body.appendChild(bar);
     }
     const ifr = document.createElement('iframe');
-    ifr.className = 'mm-frame' + (mailDarkRead ? ' dark' : '');
+    ifr.className = 'mm-frame';
+    mailFrameModeClass(ifr);
     // No allow-scripts: the mail can never run code. allow-same-origin only lets US reach
     // in, to catch link clicks and size the frame. The CSP in the srcdoc (and the page's
     // own, which a srcdoc inherits) keeps every remote request out until asked.
@@ -11826,44 +11982,76 @@ function mailSanitize(html) {
 // Images, video and background images are inverted a second time so photos and logos look
 // like themselves (a little dimmed - the two inversions do not cancel exactly, which suits
 // a dark page). The mail itself never runs code, so this is plain CSS injected by us.
-let mailDarkRead = false;
-const MAIL_DARK_ID = 'cockpit-dark-read';
+// Three reading modes, cycled by the reader button and `d`, saved as mailReadMode.
+const MAIL_READ_MODES = ['off', 'dark', 'green'];
+const MAIL_READ_LABEL = {
+  off: ['☀', 'as the sender made it'],
+  dark: ['🌙', 'white on black'],
+  green: ['📟', 'green on black'],
+};
+let mailReadMode = 'off';
+const MAIL_DARK_ID = 'cockpit-dark-read'; // the one <style> we put in a mail, whatever the mode
 const MAIL_DARK_CSS =
   'html{filter:invert(.88) hue-rotate(180deg)}' +
   'img,video,picture,canvas,svg image,[background],[style*="background-image"],[style*="background:url"],[style*="background: url"]' +
   '{filter:invert(1) hue-rotate(180deg)}';
-function mailApplyDark(doc, on) {
-  if (!doc || !doc.documentElement) return;
-  const have = doc.getElementById(MAIL_DARK_ID);
-  if (on && !have) {
-    const st = doc.createElement('style');
-    st.id = MAIL_DARK_ID;
-    st.textContent = MAIL_DARK_CSS;
-    (doc.head || doc.documentElement).appendChild(st);
-  } else if (!on && have) {
-    have.remove();
-  }
+// Green on black: a terminal screen. Here the colours are REPLACED, not inverted - an
+// inversion keeps the sender's palette, and the point of this mode is one colour. A
+// stylesheet !important beats the inline colours mail is full of (only an inline
+// !important would win, and mail almost never uses one). Background COLOURS go, background
+// IMAGES and pictures stay as they are, so a logo is still a logo.
+const MAIL_GREEN_CSS =
+  'html,body{background:#000 !important}' +
+  '*,*::before,*::after{color:#33ff66 !important;background-color:transparent !important;' +
+  'border-color:#1e5a31 !important;text-shadow:none !important;box-shadow:none !important}' +
+  'a,a *{color:#9dffbf !important}' +
+  'hr{border-color:#1e5a31 !important}';
+function mailReadCss(mode) {
+  return mode === 'dark' ? MAIL_DARK_CSS : mode === 'green' ? MAIL_GREEN_CSS : '';
 }
-// Flip it for every mail on screen now and every mail from here on (it is saved).
-function mailToggleDark(on) {
-  mailDarkRead = on == null ? !mailDarkRead : !!on;
-  api.saveSettings({ mailDarkRead });
-  const rec = mailRec();
-  if (rec) {
-    rec.paneEl.querySelectorAll('iframe.mm-frame').forEach((f) => {
-      f.classList.toggle('dark', mailDarkRead);
-      mailApplyDark(f.contentDocument, mailDarkRead);
-    });
-    const b = rec.paneEl.querySelector('.mr-darkbtn');
-    if (b) mailPaintDarkBtn(b);
+function mailApplyReadMode(doc, mode) {
+  if (!doc || !doc.documentElement) return;
+  let st = doc.getElementById(MAIL_DARK_ID);
+  const css = mailReadCss(mode);
+  if (!css) {
+    if (st) st.remove();
+    return;
   }
+  if (!st) {
+    st = doc.createElement('style');
+    st.id = MAIL_DARK_ID;
+    (doc.head || doc.documentElement).appendChild(st);
+  }
+  st.textContent = css;
+  st.dataset.mode = mode;
+}
+// The frame's own background, so nothing shows white before the document paints.
+function mailFrameModeClass(f) {
+  f.classList.toggle('dark', mailReadMode === 'dark');
+  f.classList.toggle('green', mailReadMode === 'green');
+}
+// Next mode (no argument), or a given one - for every mail on screen now and from here on.
+function mailSetReadMode(mode) {
+  mailReadMode = MAIL_READ_MODES.includes(mode)
+    ? mode
+    : MAIL_READ_MODES[(MAIL_READ_MODES.indexOf(mailReadMode) + 1) % MAIL_READ_MODES.length];
+  api.saveSettings({ mailReadMode });
+  const rec = mailRec();
+  if (!rec) return;
+  rec.paneEl.querySelectorAll('iframe.mm-frame').forEach((f) => {
+    mailFrameModeClass(f);
+    mailApplyReadMode(f.contentDocument, mailReadMode);
+  });
+  const reader = rec.paneEl.querySelector('.mail-reader');
+  if (reader) reader.classList.toggle('read-green', mailReadMode === 'green'); // plain-text mail too
+  mailPaintDarkBtn(rec.paneEl.querySelector('.mr-darkbtn'));
 }
 function mailPaintDarkBtn(b) {
-  b.textContent = mailDarkRead ? '☀' : '🌙';
-  b.title = mailDarkRead
-    ? 'Show mail as the sender made it (d) - remembered for every mail'
-    : 'Show mail white on black (d) - remembered for every mail';
-  b.classList.toggle('on', mailDarkRead);
+  if (!b) return;
+  const next = MAIL_READ_MODES[(MAIL_READ_MODES.indexOf(mailReadMode) + 1) % MAIL_READ_MODES.length];
+  b.textContent = MAIL_READ_LABEL[mailReadMode][0];
+  b.title = 'Reading: ' + MAIL_READ_LABEL[mailReadMode][1] + ' · click (or d) for ' + MAIL_READ_LABEL[next][1] + ' - remembered for every mail';
+  b.classList.toggle('on', mailReadMode !== 'off');
 }
 function mailSrcdoc(clean) {
   return (
@@ -11873,14 +12061,14 @@ function mailSrcdoc(clean) {
     '<style>html,body{margin:0}body{padding:12px 14px;font:14px/1.45 "Segoe UI",system-ui,sans-serif;' +
     'color:#202124;background:#fff;overflow-wrap:anywhere}img{max-width:100%;height:auto}a{color:#1a5fb4}' +
     'blockquote{margin:0 0 0 .5em;padding-left:.8em;border-left:3px solid #ddd;color:#555}pre{white-space:pre-wrap}</style>' +
-    (mailDarkRead ? '<style id="' + MAIL_DARK_ID + '">' + MAIL_DARK_CSS + '</style>' : '') +
+    (mailReadCss(mailReadMode) ? '<style id="' + MAIL_DARK_ID + '" data-mode="' + mailReadMode + '">' + mailReadCss(mailReadMode) + '</style>' : '') +
     '</head><body' + clean.bodyAttrs + '>' + clean.html + '</body></html>'
   );
 }
 function mailFrameReady(ifr, m) {
   const doc = ifr.contentDocument;
   if (!doc || !doc.documentElement) return;
-  mailApplyDark(doc, mailDarkRead);
+  mailApplyReadMode(doc, mailReadMode);
   const fit = () => {
     ifr.style.height = Math.min(40000, doc.documentElement.scrollHeight + 2) + 'px';
   };
@@ -11899,6 +12087,25 @@ function mailFrameReady(ifr, m) {
   });
   // Keys typed while the mail itself has focus still drive the tab.
   doc.addEventListener('keydown', mailKeydown);
+  // Hovering a link shows where it really goes.
+  doc.addEventListener('mouseover', (e) => {
+    const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a) return;
+    const fr = ifr.getBoundingClientRect();
+    const r = a.getBoundingClientRect();
+    mailLinkHover(a.getAttribute('href'), a.textContent, { left: fr.left + r.left, top: fr.top + r.top, bottom: fr.top + r.bottom });
+  });
+  doc.addEventListener('mouseout', (e) => {
+    if (e.target && e.target.closest && e.target.closest('a[href]')) mailLinkLeave();
+  });
+  // Highlighting a passage offers it as a snippet (the frame's coordinates are its own).
+  doc.addEventListener('mousedown', mailHideSelPill);
+  doc.addEventListener('mouseup', (e) => {
+    setTimeout(() => {
+      const r = ifr.getBoundingClientRect();
+      mailSelCheck(r.left + e.clientX, r.top + e.clientY, String(doc.getSelection ? doc.getSelection() : ''), '');
+    }, 0);
+  });
   mailResolveCids(doc, m).then(fit);
   ifr._fit = fit;
 }
@@ -11961,11 +12168,246 @@ function mailTextHtml(text) {
     })
     .join('\n');
 }
+// ---- links: where they really go ----
+// Mail links are often wrapped: a Google or Outlook redirect, a newsletter click counter, a
+// share of utm_ parameters. Hovering one shows the real destination; clicking opens THAT,
+// cleaned, instead of the tracker (Settings -> Google, on by default). Wrappers that carry
+// the destination in the URL are opened up here, offline - nothing is asked of anyone.
+// Opaque trackers (the destination is only on their server) get a "Where does it go?"
+// button, which follows the redirects in the main process without opening the page.
+let mailCleanLinks = true;
+const MAIL_TRACK_PARAM =
+  /^(utm_[a-z0-9_]+|fbclid|gclid|gbraid|wbraid|dclid|msclkid|yclid|twclid|ttclid|li_fat_id|igshid|mc_cid|mc_eid|_hsenc|_hsmi|__hstc|__hssc|__hsfp|hsctatracking|mkt_tok|oly_enc_id|oly_anon_id|vero_id|vero_conv|elqtrackid|elqtrack|_openstat|s_cid|ef_id|ml_subscriber|ml_subscriber_hash)$/i;
+// Wrappers that name the destination themselves: host, optional path, the parameter.
+const MAIL_WRAPPERS = [
+  { host: /(^|\.)google\.[a-z.]+$/, path: /^\/url$/, param: ['q', 'url'] },
+  { host: /\.safelinks\.protection\.outlook\.com$/, param: ['url'] },
+  { host: /^(l|lm)\.facebook\.com$/, param: ['u'] },
+  { host: /^l\.instagram\.com$/, param: ['u'] },
+  { host: /^(www\.)?youtube\.com$/, path: /^\/redirect$/, param: ['q'] },
+  { host: /^slack-redir\.net$/, param: ['url'] },
+  { host: /^(www\.)?linkedin\.com$/, path: /^\/redir\//, param: ['url'] },
+  { host: /^t\.umblr\.com$/, param: ['z'] },
+  { host: /^urldefense\.proofpoint\.com$/, param: ['u'], decode: (v) => v.replace(/-/g, '%').replace(/_/g, '/') },
+];
+// Any other link counts as a redirector only if it LOOKS like one - and a share button is
+// not a redirector: "Share on X" with ?url= must stay a share, not jump to the article.
+const MAIL_REDIRECT_PARAMS = ['url', 'u', 'q', 'target', 'dest', 'destination', 'redirect', 'redirect_url', 'redirecturl', 'link', 'r', 'to', 'goto', 'out', 'href', 'l'];
+const MAIL_REDIRECTOR_PATH = /\/(click|clicks|track|tracking|trk|redirect|redir|out|outbound|link|links|goto|away|r|l|c)(\/|$)/i;
+const MAIL_REDIRECTOR_HOST = /^(click|clicks|links?|email|e|trk|track|tracking|go|r|t|l|url\d*|em|mail\d*)\./i;
+const MAIL_SHARE_PATH = /\/(share|sharer|sharing|intent|submit|shareArticle)(\/|\.php|$)/i;
+// Known click counters and shorteners whose destination is not in the URL at all.
+const MAIL_OPAQUE_HOST =
+  /(^|\.)(list-manage\.com|ct\.sendgrid\.net|mailchi\.mp|hubspotlinks\.com|hs-sites\.com|mandrillapp\.com|mailgun\.org|exacttarget\.com|mktoedge\.com|mjt\.lu|rs6\.net|createsend\d*\.com|cmail\d+\.com|bit\.ly|t\.co|lnkd\.in|ow\.ly|tinyurl\.com|rebrand\.ly|buff\.ly|goo\.gl|amzn\.to|is\.gd|cutt\.ly|shorturl\.at)$/i;
+const mailResolved = new Map(); // original href -> { url, hops, stripped, via } once asked
+
+// A query value that is a URL: plain, percent-encoded, or base64 ("aHR0c" is "http").
+function mailAsUrl(v) {
+  if (!v) return null;
+  let s = String(v).trim();
+  if (/^aHR0c/.test(s)) {
+    try {
+      s = atob(s.replace(/-/g, '+').replace(/_/g, '/'));
+    } catch (_) {
+      return null;
+    }
+  }
+  if (/^https?%3A/i.test(s)) {
+    try {
+      s = decodeURIComponent(s);
+    } catch (_) {
+      /* leave it */
+    }
+  }
+  if (!/^https?:\/\//i.test(s)) return null;
+  try {
+    return new URL(s).toString();
+  } catch (_) {
+    return null;
+  }
+}
+function mailUnwrapOnce(u) {
+  for (const w of MAIL_WRAPPERS) {
+    if (!w.host.test(u.hostname) || (w.path && !w.path.test(u.pathname))) continue;
+    for (const p of w.param) {
+      const raw = u.searchParams.get(p);
+      const url = mailAsUrl(w.decode && raw ? w.decode(raw) : raw);
+      if (url) return { url, via: u.hostname };
+    }
+  }
+  if (MAIL_SHARE_PATH.test(u.pathname)) return null;
+  if (!MAIL_REDIRECTOR_PATH.test(u.pathname) && !MAIL_REDIRECTOR_HOST.test(u.hostname)) return null;
+  for (const [k, v] of u.searchParams) {
+    if (!MAIL_REDIRECT_PARAMS.includes(k.toLowerCase())) continue;
+    const url = mailAsUrl(v);
+    if (url) return { url, via: u.hostname };
+  }
+  return null;
+}
+// { original, url (the clean destination), via [wrapper hosts], stripped [params], opaque }
+function mailCleanUrl(href) {
+  const out = { original: String(href || ''), url: String(href || ''), via: [], stripped: [], opaque: false };
+  let u;
+  try {
+    u = new URL(out.original);
+  } catch (_) {
+    return out;
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return out;
+  for (let i = 0; i < 5; i++) {
+    const w = mailUnwrapOnce(u); // wrappers can be nested: SafeLinks around a Google redirect
+    if (!w) break;
+    out.via.push(w.via);
+    u = new URL(w.url);
+  }
+  const drop = [...new Set([...u.searchParams.keys()].filter((k) => MAIL_TRACK_PARAM.test(k)))];
+  drop.forEach((k) => u.searchParams.delete(k));
+  out.stripped = drop;
+  out.url = u.toString();
+  out.opaque =
+    !out.via.length &&
+    (MAIL_OPAQUE_HOST.test(u.hostname) || (MAIL_REDIRECTOR_PATH.test(u.pathname) && MAIL_REDIRECTOR_HOST.test(u.hostname)));
+  return out;
+}
+// The part of a host that says whose site it is: mail.google.com -> google.com, a.b.co.uk -> b.co.uk.
+function mailSiteOf(host) {
+  const h = String(host || '').toLowerCase().replace(/^www\d*\./, '').replace(/\.$/, '');
+  const p = h.split('.');
+  if (p.length <= 2) return h;
+  if (p[p.length - 1].length === 2 && /^(co|com|org|net|ac|gov|edu|ne|or|go)$/.test(p[p.length - 2])) return p.slice(-3).join('.');
+  return p.slice(-2).join('.');
+}
+// Link text that is itself an address ("paypal.com", "https://paypal.com/login").
+function mailTextDomain(text) {
+  const m = /^\s*(?:https?:\/\/)?((?:[a-z0-9-]+\.)+[a-z]{2,})(?:[/?#:]\S*)?\s*$/i.exec(String(text || ''));
+  return m ? m[1] : null;
+}
+// The phishing tell: the text shows one site, the link goes to another.
+function mailLinkMismatch(text, dest) {
+  const shown = mailTextDomain(text);
+  if (!shown) return null;
+  let host;
+  try {
+    host = new URL(dest).hostname;
+  } catch (_) {
+    return null;
+  }
+  const a = mailSiteOf(shown);
+  const b = mailSiteOf(host);
+  return a !== b ? { shown: a, real: b } : null;
+}
+function mailLinkInfo(href, text) {
+  const c = mailCleanUrl(href);
+  const r = mailResolved.get(c.original) || null;
+  const dest = r ? r.url : c.url;
+  // An unresolved tracker's host says nothing about where it goes - no warning from that.
+  const warn = c.opaque && !r ? null : mailLinkMismatch(text, dest);
+  return { c, r, dest, warn };
+}
+// What a click opens: the clean destination, unless the setting is off.
+function mailLinkTarget(href) {
+  if (!mailCleanLinks) return String(href || '');
+  return mailLinkInfo(href, '').dest;
+}
+
+let mailLinkHideTimer = null;
+function mailLinkCardHtml(info) {
+  const { c, r, dest, warn } = info;
+  let host = '';
+  let rest = dest;
+  try {
+    const u = new URL(dest);
+    host = u.hostname.replace(/^www\./, '');
+    rest = u.pathname + u.search + u.hash;
+  } catch (_) {
+    /* show as is */
+  }
+  if (rest.length > 90) rest = rest.slice(0, 89) + '…';
+  const notes = [];
+  if (c.via.length) notes.push('↪ unwrapped from ' + c.via.map(mailSiteOf).join(' → ') + (c.via.length > 1 ? ' redirects' : ' redirect'));
+  if (r) notes.push('🔍 followed ' + Math.max(0, r.hops) + ' redirect' + (r.hops === 1 ? '' : 's') + ' to get here');
+  const stripped = [...new Set(c.stripped.concat(r ? r.stripped : []))];
+  if (stripped.length) notes.push('✂ tracking removed: ' + stripped.slice(0, 5).join(', ') + (stripped.length > 5 ? ' +' + (stripped.length - 5) : ''));
+  if (!mailCleanLinks && (c.via.length || stripped.length || r)) notes.push('(clicking opens the original link - Settings → Google)');
+  return (
+    `<div class="lc-dest"><span class="lc-host">${escapeHtml(host || dest)}</span><span class="lc-path">${escapeHtml(host ? rest : '')}</span></div>` +
+    notes.map((n) => `<div class="lc-note">${escapeHtml(n)}</div>`).join('') +
+    (warn ? `<div class="lc-warn">⚠ The text says ${escapeHtml(warn.shown)}, but this goes to ${escapeHtml(warn.real)}</div>` : '') +
+    (c.opaque && !r
+      ? '<div class="lc-note">A tracking link: where it goes is only known to its server.</div>' +
+        '<button class="mail-btn lc-resolve" title="Asks the link where it goes, without opening it. The sender may count that as a click.">🔍 Where does it go?</button>'
+      : '')
+  );
+}
+// rect: the link's box in viewport coordinates (a frame's own coordinates already added).
+function mailLinkHover(href, text, rect) {
+  const card = mailEl('.mail-linkcard');
+  const rec = mailRec();
+  if (!card || !rec || !/^https?:\/\//i.test(String(href || '').trim())) return;
+  clearTimeout(mailLinkHideTimer);
+  const info = mailLinkInfo(href, text);
+  card._href = href;
+  card._text = text;
+  card.innerHTML = mailLinkCardHtml(info);
+  card.classList.remove('hidden');
+  const pr = rec.paneEl.getBoundingClientRect();
+  const below = rect.bottom - pr.top + 6;
+  const top = below + card.offsetHeight > pr.height - 6 ? rect.top - pr.top - card.offsetHeight - 6 : below;
+  card.style.top = Math.max(6, top) + 'px';
+  card.style.left = Math.max(6, Math.min(pr.width - card.offsetWidth - 6, rect.left - pr.left)) + 'px';
+}
+function mailLinkLeave() {
+  clearTimeout(mailLinkHideTimer);
+  mailLinkHideTimer = setTimeout(() => {
+    const card = mailEl('.mail-linkcard');
+    if (card) card.classList.add('hidden');
+  }, 350); // time to move onto the card and press its button
+}
+async function mailResolveLink(card) {
+  const href = card._href;
+  const btn = card.querySelector('.lc-resolve');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '🔍 Following…';
+  }
+  const r = await api.mailResolveUrl(href);
+  if (!r || !r.ok) {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '🔍 Could not follow it: ' + ((r && r.error) || 'unknown');
+    }
+    return;
+  }
+  const cc = mailCleanUrl(r.final); // the destination can carry utm_ too
+  mailResolved.set(mailCleanUrl(href).original, { url: cc.url, hops: Math.max(0, (r.hops || []).length - 1), stripped: cc.stripped, via: cc.via });
+  if (card._href === href && !card.classList.contains('hidden')) card.innerHTML = mailLinkCardHtml(mailLinkInfo(href, card._text));
+}
+function mailWireLinkCard(rec) {
+  const card = rec.paneEl.querySelector('.mail-linkcard');
+  card.addEventListener('mouseenter', () => clearTimeout(mailLinkHideTimer));
+  card.addEventListener('mouseleave', mailLinkLeave);
+  card.addEventListener('click', (e) => {
+    if (e.target.closest('.lc-resolve')) mailResolveLink(card);
+  });
+  const reader = rec.paneEl.querySelector('.mail-reader');
+  reader.addEventListener('mouseover', (e) => {
+    const a = e.target.closest('.mm-text a[href]');
+    if (a) mailLinkHover(a.getAttribute('href'), a.textContent, a.getBoundingClientRect());
+  });
+  reader.addEventListener('mouseout', (e) => {
+    if (e.target.closest('.mm-text a[href]')) mailLinkLeave();
+  });
+  reader.addEventListener('scroll', () => {
+    const c = mailEl('.mail-linkcard');
+    if (c) c.classList.add('hidden');
+  });
+}
+
 function mailFollowLink(href, background) {
   const u = String(href || '').trim();
   if (/^mailto:/i.test(u)) return mailComposeFromMailto(u);
   if (/^tel:/i.test(u)) return api.openExternal(u);
-  if (/^https?:\/\//i.test(u)) return openLinkInTab(u, background);
+  if (/^https?:\/\//i.test(u)) return openLinkInTab(mailLinkTarget(u), background); // the destination, not the tracker
 }
 function mailComposeFromMailto(u) {
   let to = '';
@@ -12414,7 +12856,7 @@ async function mailDo(act) {
     case 'snippets':
       return mailSnippetManager();
     case 'dark':
-      return mailToggleDark();
+      return mailSetReadMode();
     case 'refresh':
       mailLoadLabels();
       mailBadge(true);
@@ -12575,6 +13017,12 @@ function mailCompose(init) {
       })
     ).then(() => mbox.draft === d && mailRenderAtts());
   }
+  if (!d.noSig) {
+    const kind = mailSigKind(d);
+    const block = mailSigBlock(kind);
+    if (block) d.body = mailInsertSig(d.body, block);
+    d.sig = { kind, block };
+  }
   d.initial = mailDraftSnap(d);
   mailRenderCompose();
   mailCheckSend();
@@ -12610,7 +13058,10 @@ function mailRenderCompose() {
     '<div class="mc-suggest hidden"></div>';
   box.querySelectorAll('[data-f]').forEach((inp) => {
     inp.value = d[inp.dataset.f] || '';
-    inp.addEventListener('input', () => (d[inp.dataset.f] = inp.value));
+    inp.addEventListener('input', () => {
+      d[inp.dataset.f] = inp.value;
+      if (/^(to|cc|bcc)$/.test(inp.dataset.f)) mailSigRefresh(); // colleague or not decides the signature
+    });
   });
   box.onclick = (e) => {
     const b = e.target.closest('[data-act]');
@@ -12648,6 +13099,7 @@ function mailRenderCompose() {
   const body = box.querySelector('.mc-body');
   body.addEventListener('keydown', mailBodyKeydown);
   body.addEventListener('input', mailBodyInput);
+  mailWireBodySel(body);
   ['to', 'cc', 'bcc'].forEach((k) => mailWireSuggest(box.querySelector(`[data-f="${k}"]`)));
   const sug = box.querySelector('.mc-suggest');
   // mousedown, not click: the field must keep focus, or its blur shuts the list first
@@ -12770,6 +13222,8 @@ async function mailSend() {
 function mailAfterSent(d, res, sentAtts) {
   const missing = d.attachments.length - sentAtts;
   mailToast('Sent' + (missing > 0 ? ' - without ' + missing + ' file(s) that could not be fetched' : ''));
+  const offer = mailLearnFromSent(d);
+  if (offer && missing <= 0) mailOfferLearn(offer); // a missing-file warning is more important
   logEvent('mail', {
     title: 'sent · ' + (d.subject || '(no subject)'),
     detail: d.to,
@@ -13158,7 +13612,8 @@ async function mailQuickReply(i, now) {
   if (now && mbox.draft) mailSend();
 }
 // The editor: a list on the left, the chosen snippet on the right, saved as you type.
-function mailSnippetManager() {
+// `prefill` ({ name, key, text, quick }) adds a new snippet and opens the editor on it.
+function mailSnippetManager(prefill) {
   const box = mailEl('.mail-snips');
   if (!box) return;
   if (!mailSnippets) mailSnippets = mailSnippetList();
@@ -13167,6 +13622,11 @@ function mailSnippetManager() {
     clearTimeout(mailSnipSaveTimer);
     mailSnipSaveTimer = setTimeout(() => api.saveSettings({ mailSnippets }), 300);
   };
+  if (prefill && prefill.text) {
+    mailSnippets.push({ id: 'sn' + Date.now().toString(36), name: '', key: '', quick: false, ...prefill });
+    cur = mailSnippets.length - 1;
+    save();
+  }
   const itemLabel = (s) =>
     (s.quick ? '⚡ ' : '') + escapeHtml(s.name || '(unnamed)') + (s.key ? ` <span class="mp-key">;${escapeHtml(s.key)}</span>` : '');
   const draw = (focusSel) => {
@@ -13267,6 +13727,10 @@ function mailSnippetManager() {
   };
   box.classList.remove('hidden');
   draw('name');
+  if (prefill) {
+    const n = box.querySelector('[data-k="name"]');
+    if (n) n.select(); // the suggested name is a guess - one keystroke replaces it
+  }
 }
 function mailCloseSnippets() {
   const box = mailEl('.mail-snips');
@@ -13283,6 +13747,268 @@ function mailCloseSnippets() {
 function mailRefreshQuickRow() {
   const row = mailEl('.mr-quick');
   if (row) row.outerHTML = mailQuickRowHtml();
+}
+
+// ---- snippets from a selection, and snippets that learn ----
+// Highlight text in a message you are writing or reading and a "Save as snippet" pill
+// appears by it. And after each send, what you wrote (never the quoted original) is compared
+// with your recent replies: the third near-identical one is offered as a snippet. The
+// memory is the last MAIL_MEMORY_MAX short replies, on this computer only, forgotten when
+// Google is disconnected. Learning is OPT-IN (Settings -> Google): it keeps what you wrote,
+// so it stays off until you ask for it. Snippets from a selection need no setting.
+let mailLearnSnippets = false;
+let mailSentMemory = []; // [{ t: text with {first}, n: normalised, at }]
+let mailLearnDismissed = []; // normalised texts you said "Not this" to
+const MAIL_MEMORY_MAX = 40;
+const MAIL_LEARN_AT = 3; // offer on the third time
+const MAIL_SIMILAR = 0.82; // bigram similarity that counts as "the same reply"
+const MAIL_SEL_MIN = 3;
+// Case, punctuation and spacing do not make a reply different.
+function mailNorm(t) {
+  return String(t || '')
+    .replace(/\{cursor\}/g, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}{}]+/gu, ' ')
+    .trim();
+}
+// Sorensen-Dice over character bigrams: cheap, and forgiving of a changed word or two.
+function mailSimilar(a, b) {
+  if (a === b) return 1;
+  if (a.length < 2 || b.length < 2) return 0;
+  if (Math.min(a.length, b.length) / Math.max(a.length, b.length) < 0.6) return 0;
+  const grams = (s) => {
+    const m = new Map();
+    for (let i = 0; i < s.length - 1; i++) {
+      const g = s.slice(i, i + 2);
+      m.set(g, (m.get(g) || 0) + 1);
+    }
+    return m;
+  };
+  const A = grams(a);
+  const B = grams(b);
+  let inter = 0;
+  for (const [g, n] of A) inter += Math.min(n, B.get(g) || 0);
+  return (2 * inter) / (a.length - 1 + (b.length - 1));
+}
+// "Thanks Ann" and "Thanks Bob" are the same reply: the recipient's first name becomes {first}.
+function mailGeneralize(text, to) {
+  const first = mailFirstName(to || '');
+  if (!first || first.length < 2) return String(text || '');
+  const esc = first.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return String(text || '').replace(new RegExp('(^|[^\\p{L}])' + esc + '(?![\\p{L}])', 'gu'), '$1{first}');
+}
+// What you typed: the body above the quoted original or the forwarded block.
+function mailOwnText(body) {
+  const b = String(body || '').replace(/\r\n/g, '\n');
+  const cut = b.search(/^(-- |On .+ wrote:|---------- Forwarded message ---------)$/m);
+  return (cut === -1 ? b : b.slice(0, cut)).trim();
+}
+function mailSuggestName(text) {
+  const w = String(text || '')
+    .replace(/\{\w+\}/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/ ([,.;:!?])/g, '$1') // "Thanks {first}, ..." -> "Thanks, ..." not "Thanks , ..."
+    .trim()
+    .split(' ');
+  let n = w.slice(0, 5).join(' ').replace(/[,.;:!?-]+$/, '');
+  if (n.length > 40) n = n.slice(0, 39).trim() + '…';
+  return n || 'New snippet';
+}
+// Initials of the first words ("will look tomorrow" -> ;wlt), never a shortcut already taken.
+function mailSuggestKey(text) {
+  const words = mailNorm(String(text || '').replace(/\{\w+\}/g, ' '))
+    .split(/\s+/)
+    .map((w) => w.replace(/[^a-z0-9]/g, ''))
+    .filter(Boolean);
+  let base = words.slice(0, 4).map((w) => w[0]).join('');
+  if (base.length < 2) base = (words[0] || 'snip').slice(0, 5);
+  const used = new Set(mailSnippetList().map((s) => String(s.key || '').toLowerCase()));
+  let k = base;
+  for (let i = 2; used.has(k); i++) k = base + i;
+  return k;
+}
+function mailNewSnippetFrom(text, to) {
+  let t = String(text || '').replace(/\r\n/g, '\n').trim();
+  if (!t) return;
+  if (to) t = mailGeneralize(t, to);
+  mailHideSelPill();
+  mailSnippetManager({ name: mailSuggestName(t), key: mailSuggestKey(t), text: t, quick: false });
+}
+// Called with every message that really went. Returns an offer, or null.
+function mailLearnFromSent(d) {
+  if (!mailLearnSnippets || !d) return null;
+  const own = mailOwnText(d.body);
+  if (own.length < 5 || own.length > 600) return null; // a whole letter is not a snippet
+  const t = mailGeneralize(own, d.to);
+  const n = mailNorm(t);
+  if (!n) return null;
+  const same = mailSentMemory.filter((m) => mailSimilar(m.n, n) >= MAIL_SIMILAR).length;
+  mailSentMemory.push({ t, n, at: Date.now() });
+  if (mailSentMemory.length > MAIL_MEMORY_MAX) mailSentMemory = mailSentMemory.slice(-MAIL_MEMORY_MAX);
+  api.saveSettings({ mailSentMemory });
+  if (same + 1 < MAIL_LEARN_AT) return null;
+  if (mailSnippetList().some((s) => mailSimilar(mailNorm(s.text), n) >= MAIL_SIMILAR)) return null; // you have it
+  if (mailLearnDismissed.some((x) => mailSimilar(x, n) >= MAIL_SIMILAR)) return null; // you said no
+  return { t, n, count: same + 1 };
+}
+function mailOfferLearn(o) {
+  const el = mailEl('.mail-toast');
+  if (!el || !o) return;
+  mbox.learnOffer = o;
+  el.className = 'mail-toast';
+  el.innerHTML =
+    'Sent. You have written this reply ' + o.count + ' times now - keep it as a snippet? ' +
+    '<button class="mail-btn mail-primary" data-act="learn-save">✂ Save as snippet</button>' +
+    '<button class="mail-btn" data-act="learn-no">Not this</button>';
+  clearTimeout(mailToastTimer);
+  mailToastTimer = setTimeout(() => {
+    el.classList.add('hidden');
+    mbox.learnOffer = null;
+  }, 15000);
+}
+function mailLearnAnswer(save) {
+  const o = mbox.learnOffer;
+  if (!o) return;
+  mbox.learnOffer = null;
+  if (save) return mailNewSnippetFrom(o.t);
+  mailLearnDismissed.push(o.n);
+  if (mailLearnDismissed.length > 100) mailLearnDismissed = mailLearnDismissed.slice(-100);
+  api.saveSettings({ mailLearnDismissed });
+  mailToast('OK - that one will not be offered again.');
+}
+function mailForgetLearning() {
+  mailSentMemory = [];
+  mailLearnDismissed = [];
+  api.saveSettings({ mailSentMemory, mailLearnDismissed });
+}
+
+// The pill. The text is taken when the pill is SHOWN: clicking it moves focus, and a
+// selection inside a mail frame or the textarea may be gone by the time the click lands.
+function mailHideSelPill() {
+  const p = mailEl('.mail-selpill');
+  if (p) p.classList.add('hidden');
+}
+function mailSelCheck(x, y, text, to) {
+  const pill = mailEl('.mail-selpill');
+  const rec = mailRec();
+  const t = String(text || '').trim();
+  if (!pill || !rec) return;
+  if (t.length < MAIL_SEL_MIN) return mailHideSelPill();
+  pill._text = t;
+  pill._to = to || '';
+  pill.classList.remove('hidden');
+  const pr = rec.paneEl.getBoundingClientRect();
+  pill.style.left = Math.max(6, Math.min(pr.width - pill.offsetWidth - 6, x - pr.left + 8)) + 'px';
+  pill.style.top = Math.max(6, Math.min(pr.height - pill.offsetHeight - 6, y - pr.top + 14)) + 'px';
+}
+function mailWireSelPill(rec) {
+  const p = rec.paneEl;
+  const pill = p.querySelector('.mail-selpill');
+  pill.addEventListener('mousedown', (e) => {
+    e.preventDefault(); // keep the selection and the focus where they are
+    e.stopPropagation();
+  });
+  pill.addEventListener('click', () => mailNewSnippetFrom(pill._text, pill._to));
+  // anywhere else: the pill goes (a new selection brings it back)
+  p.addEventListener('mousedown', (e) => {
+    if (!pill.contains(e.target)) mailHideSelPill();
+  }, true);
+  const reader = p.querySelector('.mail-reader');
+  reader.addEventListener('scroll', mailHideSelPill);
+  reader.addEventListener('mouseup', (e) => {
+    if (!e.target.closest('.mm-text')) return;
+    setTimeout(() => mailSelCheck(e.clientX, e.clientY, String(window.getSelection() || ''), ''), 0);
+  });
+}
+// The compose body: your own words, so the recipient's name is generalised.
+function mailWireBodySel(body) {
+  const check = (x, y) => mailSelCheck(x, y, body.value.slice(body.selectionStart, body.selectionEnd), (mbox.draft || {}).to);
+  body.addEventListener('mouseup', (e) => setTimeout(() => check(e.clientX, e.clientY), 0));
+  body.addEventListener('keyup', (e) => {
+    if (!e.shiftKey) return;
+    const r = body.getBoundingClientRect();
+    check(r.left + 24, r.top + 10);
+  });
+}
+
+// ---- signatures per recipient type ----
+// A short one for colleagues, a full one for everyone else, told apart by domain. The
+// colleague domains are yours to list (Settings -> Google); with none listed it is your own
+// domain - unless that is a public mail provider, where "same domain" means nothing.
+// The short one is used only when EVERY recipient is a colleague: one outsider on Cc and
+// the full one goes in. It sits above the quoted original, behind the standard "-- " line,
+// and follows the recipients as you type them - unless you have edited it by hand.
+let mailSigInternal = '';
+let mailSigExternal = '';
+let mailInternalDomains = '';
+const MAIL_PUBLIC_DOMAINS =
+  /^(gmail\.com|googlemail\.com|outlook\.[a-z.]+|hotmail\.[a-z.]+|live\.[a-z.]+|msn\.com|yahoo\.[a-z.]+|ymail\.com|icloud\.com|me\.com|mac\.com|aol\.com|gmx\.[a-z.]+|web\.de|t-online\.de|freenet\.de|posteo\.[a-z]+|mailbox\.org|proton\.me|protonmail\.com|pm\.me|mail\.ru|yandex\.[a-z.]+|zoho\.com|fastmail\.com)$/i;
+const MAIL_SIG_SEP = '-- '; // RFC 3676: dash dash space, on its own line
+function mailInternalList() {
+  const listed = String(mailInternalDomains || '')
+    .toLowerCase()
+    .split(/[\s,;]+/)
+    .map((d) => d.replace(/^@/, '').replace(/\.$/, '').trim())
+    .filter(Boolean);
+  if (listed.length) return listed;
+  const e = String(googleEmail || '').toLowerCase();
+  const own = e.includes('@') ? e.split('@')[1] : '';
+  return own && !MAIL_PUBLIC_DOMAINS.test(own) ? [own] : [];
+}
+function mailIsInternal(addr, list) {
+  const a = mailAddr(addr).toLowerCase();
+  const at = a.lastIndexOf('@');
+  if (at < 0) return false;
+  const dom = a.slice(at + 1);
+  return list.some((d) => dom === d || dom.endsWith('.' + d)); // sub.company.com is still company.com
+}
+function mailSigKind(d) {
+  const all = mailSplit([d.to, d.cc, d.bcc].filter(Boolean).join(','));
+  const list = mailInternalList();
+  if (!all.length || !list.length) return 'external';
+  return all.every((x) => mailIsInternal(x, list)) ? 'internal' : 'external';
+}
+// No short one written: colleagues get the full one rather than nothing.
+function mailSigBlock(kind) {
+  const pick = kind === 'internal' ? mailSigInternal || mailSigExternal : mailSigExternal;
+  const t = String(pick || '').replace(/\r\n/g, '\n').replace(/\s+$/, '');
+  return t.trim() ? MAIL_SIG_SEP + '\n' + t : '';
+}
+function mailInsertSig(body, block) {
+  const b = String(body || '');
+  if (!block) return b;
+  const i = b.search(/^(On .+ wrote:|---------- Forwarded message ---------)$/m);
+  if (i === -1) return b.replace(/\s+$/, '') + '\n\n' + block;
+  return b.slice(0, i).replace(/\n+$/, '') + '\n\n' + block + '\n\n' + b.slice(i);
+}
+// Recipients changed: swap the signature if it is still the one we put there.
+function mailSigRefresh() {
+  const d = mbox.draft;
+  if (!d || !d.sig) return;
+  const kind = mailSigKind(d);
+  if (kind === d.sig.kind) return;
+  const next = mailSigBlock(kind);
+  let body = d.body;
+  if (d.sig.block) {
+    if (!body.includes(d.sig.block)) {
+      d.sig = { kind, block: d.sig.block, edited: true }; // yours now: never touched again
+      return;
+    }
+    if (d.sig.edited) return;
+    body = next ? body.replace(d.sig.block, next) : body.replace('\n\n' + d.sig.block, '').replace(d.sig.block, '');
+  } else if (next) {
+    if (/(^|\n)-- \n/.test(body)) return; // you wrote a signature of your own
+    body = mailInsertSig(body, next);
+  }
+  d.sig = { kind, block: next };
+  if (body === d.body) return;
+  const ta = mailEl('.mc-body');
+  const pos = ta ? ta.selectionStart : 0; // this runs while you type in To/Cc; the body caret stays put
+  d.body = body;
+  if (ta) {
+    ta.value = body;
+    ta.setSelectionRange(Math.min(pos, body.length), Math.min(pos, body.length));
+  }
 }
 
 // ---- address suggestions ----
@@ -13450,12 +14176,16 @@ function mailQuiet() {
   if (focusSession) return true;
   return !!(relax && relax.running && relax.phase === 'work');
 }
+// The number on the Mail tab itself. Off by default (a count in the tab strip is a pull
+// towards the inbox); the count is still kept, so Home and the Settings switch use it at once.
+let mailTabBadge = false;
 function mailShowBadge(n, capped) {
   const rec = mailRec();
   if (!rec || !rec.unreadEl) return;
   rec.unread = n || 0;
-  rec.unreadEl.textContent = capped || n > 999 ? '999+' : n ? String(n) : '';
-  rec.unreadEl.classList.toggle('show', n > 0);
+  const show = mailTabBadge && n > 0;
+  rec.unreadEl.textContent = show ? (capped || n > 999 ? '999+' : String(n)) : '';
+  rec.unreadEl.classList.toggle('show', show);
 }
 // `asked`: the user just did something (archive, read, refresh) and expects the number
 // to follow - that is not new mail arriving, so quiet does not hold it.
@@ -13788,6 +14518,7 @@ els.setGoogleForget.addEventListener('click', async () => {
   updateGoogleStatusUI();
   stopGoogleFeeds();
   mbox.canSend = null;
+  mailForgetLearning(); // like the address book: disconnecting forgets what you wrote
   mailBadge();
   if (mailRec()) {
     mailCloseReader();
@@ -16607,7 +17338,23 @@ setInterval(() => {
   }
   if (settings && typeof settings.meetingChime === 'boolean') meetingChime = settings.meetingChime;
   if (settings && typeof settings.mailQuietFocus === 'boolean') mailQuietFocus = settings.mailQuietFocus;
-  if (settings && typeof settings.mailDarkRead === 'boolean') mailDarkRead = settings.mailDarkRead;
+  // mailReadMode replaced the old on/off mailDarkRead; an install that had dark on keeps it.
+  if (settings && MAIL_READ_MODES.includes(settings.mailReadMode)) mailReadMode = settings.mailReadMode;
+  else if (settings && settings.mailDarkRead === true) mailReadMode = 'dark';
+  if (settings && typeof settings.mailTabBadge === 'boolean') mailTabBadge = settings.mailTabBadge;
+  if (settings && typeof settings.mailLearnSnippets === 'boolean') mailLearnSnippets = settings.mailLearnSnippets;
+  if (settings && typeof settings.mailCleanLinks === 'boolean') mailCleanLinks = settings.mailCleanLinks;
+  if (settings && typeof settings.mailSigInternal === 'string') mailSigInternal = settings.mailSigInternal.slice(0, 4000);
+  if (settings && typeof settings.mailSigExternal === 'string') mailSigExternal = settings.mailSigExternal.slice(0, 4000);
+  if (settings && typeof settings.mailInternalDomains === 'string') mailInternalDomains = settings.mailInternalDomains.slice(0, 1000);
+  if (settings && Array.isArray(settings.mailSentMemory)) {
+    mailSentMemory = settings.mailSentMemory
+      .filter((m) => m && typeof m.t === 'string' && typeof m.n === 'string')
+      .slice(-MAIL_MEMORY_MAX);
+  }
+  if (settings && Array.isArray(settings.mailLearnDismissed)) {
+    mailLearnDismissed = settings.mailLearnDismissed.filter((x) => typeof x === 'string').slice(-100);
+  }
   if (settings && Number.isFinite(settings.mailListW) && settings.mailListW >= MAIL_LIST_MIN) mailListW = Math.round(settings.mailListW);
   if (settings && Number.isFinite(settings.mailUndoSec)) mailUndoSec = Math.max(0, Math.min(60, settings.mailUndoSec));
   if (settings && settings.mailSnippets) mailSnippets = mailCleanSnippets(settings.mailSnippets);

@@ -7291,6 +7291,102 @@ body.privacy .ms-text {
 .mail-btn.mr-darkbtn.on {
   border-color: #ea8a5c;
 }
+/* green on black: the frame behind the page, and plain-text mail (not in a frame) */
+.mm-frame.green {
+  background: #000;
+}
+.mail-reader.read-green .mm-text {
+  background: #000;
+  color: #33ff66;
+}
+.mail-reader.read-green .mm-text a {
+  color: #9dffbf;
+}
+.mail-reader.read-green .mm-q {
+  color: #1faa4a;
+}
+/* Mail: "Save as snippet" next to highlighted text */
+.mail-selpill {
+  position: absolute;
+  z-index: 32;
+  padding: 3px 10px;
+  border-radius: 12px;
+  border: 1px solid #ea8a5c;
+  background: #2b2520;
+  color: #f3b58f;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+.mail-selpill:hover {
+  background: #ea8a5c;
+  color: #1b1204;
+}
+/* Mail: where a link really goes */
+.mail-linkcard {
+  position: absolute;
+  z-index: 33;
+  max-width: min(520px, calc(100% - 12px));
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-alt);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.lc-dest {
+  overflow-wrap: anywhere;
+}
+.lc-host {
+  color: #fff;
+  font-weight: 600;
+}
+.lc-path {
+  color: var(--fg-dim);
+}
+.lc-note {
+  color: var(--fg-dim);
+}
+.lc-warn {
+  margin-top: 3px;
+  color: #ffb3ad;
+  font-weight: 600;
+}
+.lc-resolve {
+  margin-top: 5px;
+}
+/* Settings: the two signatures */
+.settings-mailsig {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.settings-mailsig-cap {
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+.settings-mailsig label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+}
+.settings-mailsig input,
+.settings-mailsig textarea {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 5px 7px;
+  font: 12.5px/1.45 "Segoe UI", system-ui, sans-serif;
+  resize: vertical;
+}
+body.privacy .mail-linkcard {
+  filter: blur(6px);
+}
 /* Privacy Curtain: the whole mail surface, plus the sidebar hover preview. */
 body.privacy .mail-list,
 body.privacy .mail-reader,
