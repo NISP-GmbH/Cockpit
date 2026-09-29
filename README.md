@@ -56,6 +56,20 @@ Everything lives in one tabbed window (`Ctrl+Shift+T` new · `Ctrl+Shift+W` clos
   with the whole exchange swallowed, so the terminal looks untouched. It runs once after connecting,
   when you switch to a tab, and on demand. It never types into a full-screen program: on the alternate
   screen the probe is skipped, so `vim`, tmux copy-mode and Claude are safe.
+- **🪟 tmux sessions** - when an SSH tab connects to a host that has tmux sessions, a small card
+  in the corner offers them (windows, whether they are open elsewhere, when last active): one
+  click attaches, or start a named new one. It asks only when the shell is idle at a prompt and
+  you have not started typing, never inside tmux, and typing puts it away; **Do not ask on this
+  host** is remembered (Settings resets it, or turns the whole thing off). The tab hover sheet's
+  **🪟 tmux sessions** (or the command palette) opens it on any tab at any depth - inside tmux it
+  switches sessions instead of nesting one.
+- **📋 Clipboard history** (`Ctrl+Shift+H`, the 📋 in the status bar, or the command palette) -
+  the last 50 things you copied, in Cockpit or any other app, **kept in memory only** (gone when
+  Cockpit quits). Enter or a click pastes into where you were - the terminal, or the text field
+  you had open; Shift+Enter only copies. Anything that looks like a **secret** - a password
+  manager's copy, a private key, an API or access token, a JWT, `password=...`, a password-like
+  string - is shown masked, never matched by the filter, and **removed after a minute**; if it
+  is still on the clipboard then, the clipboard is cleared too (Settings can leave it there).
 - **Send a file here** (tab hover cheat-sheet → 📤) - the mirror of the grab below: pushes a file **into the shell this terminal is in right now**, so on a multi-hop `ssh` it lands on the **last** hop, not the first - and it reaches inside `sudo` or a container too. The bytes are base64 and typed through the terminal in chunks, with the whole exchange hidden, and the size is checked on arrival. Small files only (1 MB cap); use **📁 Files** for anything larger.
 - **📁 Files (SFTP)** (the 📁 button on the top bar, the tab hover cheat-sheet, or ＋ New ▾ → 📁 Files) - browse the host you connected to: **📤 Upload**, download, and move around. You can also **drag files onto the terminal**. SFTP is attached to the first hop, so it does not follow further `ssh` hops - that is what Send a file here is for.
 - **Grab / preview a file from here** (tab hover cheat-sheet → 📥 Get a file) - reaches a file straight through the current terminal session, so it works even inside a **nested `ssh`**, `sudo`, `tmux`, or a container where SFTP can't reach. Two options: **👁 Preview** shows the contents in a scrollable viewer (`.json` pretty-prints; **`.log`/`.out`/`.err` jump to the end** so you see the newest lines; binary files are declined), and **📥 Download** saves it. The transfer is hidden from the terminal (a short `[sending file …]` note stands in for the base64), leaving no clutter. The host also reports the file size, and a transfer that arrives a different size is **refused rather than saved** - a long stream can be mangled by anything that redraws the terminal instead of passing bytes through (tmux, screen), and a silently corrupt file is worse than none. Best for small and medium files; use 📁 Files (SFTP) for large ones.
@@ -69,7 +83,11 @@ Everything lives in one tabbed window (`Ctrl+Shift+T` new · `Ctrl+Shift+W` clos
 **Tabs & window**
 - Drag to **reorder**, **double-click a tab title to rename**; tabs persist and reopen in place across restarts. **Empty start** with quick actions instead of a forced dialog. **Command palette** (`Ctrl+L`, fuzzy jump/run). Resizable **right sidebar** (drag the dividers).
 
-**Web browser** - `<webview>` tabs with bookmarks, back/forward/reload (**Alt+←/→** too, like Chrome - they work whether focus is in the page or the URL bar), **Ctrl/Cmd+wheel zoom**, **find in page** (`Ctrl/Cmd+F`), open-in-external, DevTools (`F12`), and unpacked Chromium **extensions**. Links that ask for a new window (`target="_blank"`, `window.open`) open as **a new Cockpit tab** instead; **Ctrl/middle-click** puts it in the background without stealing focus, and **Shift+click** still gets a real separate window. Sized popups (OAuth consent, payment flows) keep getting a window too, since that is what they need. Right-click selected page text → **capture to a note**.
+**Web browser** - `<webview>` tabs with bookmarks, back/forward/reload (**Alt+←/→** too, like Chrome - they work whether focus is in the page or the URL bar), **Ctrl/Cmd+wheel zoom**, **find in page** (`Ctrl/Cmd+F`), open-in-external, DevTools (`F12`), and unpacked Chromium **extensions**. Links that ask for a new window (`target="_blank"`, `window.open`) open as **a new Cockpit tab** instead; **Ctrl/middle-click** puts it in the background without stealing focus, and **Shift+click** still gets a real separate window. Sized popups (OAuth consent, payment flows) keep getting a window too, since that is what they need. **Right-click menu** in pages: on an **image** - *Save image as…*
+(the Save dialog starts in your Downloads folder), *Copy image*, *Copy image address*, *Open image in new tab*,
+*Search image with Google Lens*; on a **link** - open in a new tab, copy the address, save it; on **selected
+text** - copy, **📝 save as a sticky note**, search Google; in a **text field** - spelling suggestions, cut / copy /
+paste / select all; anywhere else - back / forward / reload; and always *Inspect*.
 
 **VS Code** - launch a full **[code-server](https://github.com/coder/code-server)** VS Code in a tab; auto-installs on first use (macOS/Linux) and relaunches a restored VS Code tab on startup.
 
@@ -272,7 +290,8 @@ click to acknowledge**), plus the **📧 Mail tab** below. One-time Google setup
    **Client ID** and **Client secret**.
 5. In the app: **⚙ Settings → Google** → paste Client ID + secret → **Connect & sign in** →
    a browser opens; approve the scopes (Gmail **modify** - read, label, archive, Trash -
-   Gmail **send**, and Calendar read-only).
+   Gmail **send**, Calendar read-only, and Calendar **events**, which lets the Mail tab answer
+   invitations on your calendar).
 
 Tokens (client id/secret + refresh token) are stored encrypted via `safeStorage`; the app
 reconnects silently on later launches. Gmail refreshes every 2 min, Calendar every 5 min.
@@ -284,7 +303,9 @@ it. The compose panel says so when it is missing.
 ### 📧 The Mail tab
 **＋ New ▾ → 📧 Mail** (or the Home deck, or click a mail on the Inbox board) opens Gmail in
 a tab: search, Inbox / Unread / Starred / Sent / All mail, your labels, a thread list and a
-reader. The tab comes back on restart. An unread count on the tab itself is off by default
+reader. The list loads more **by itself as you scroll** - the next page is already fetched in
+the background, so it appears at once - and **emptying the search box** (or its ✕) puts back
+the list you were in before the search. The tab comes back on restart. An unread count on the tab itself is off by default
 (Settings → Google turns it on); Home always shows the real inbox count.
 
 - **Inbox categories** - the row under the toolbar picks which of Gmail's categories you see:
@@ -294,10 +315,14 @@ reader. The tab comes back on restart. An unread count on the tab itself is off 
   badge, the Inbox board (its header names the filter) and the Home count. Starred, Sent,
   labels and search always show everything.
 - **Keyboard triage** (while the tab has focus, never inside a text field): `j`/`k` next /
-  previous, `Enter`/`o` open, `u`/`Esc` back, `e` archive, `#` trash, `s` star,
-  `Shift+I`/`Shift+U` read / unread, `l` label, `r`/`a`/`f` reply / reply all / forward,
+  previous, `Enter`/`o` open, `Esc` back, `e` archive, `#` trash, `s` star,
+  `Shift+I` read, `u`, `Shift+U` or `Ctrl+U` unread (`u` is not Gmail's "back" here - that is `Esc`), `l` label, `r`/`a`/`f` reply / reply all / forward,
   `c` compose, `/` search, `z` undo, `1`-`9` quick replies, `d` reading mode, `?` the list. `Ctrl+Enter` sends.
-  Archive and trash act at once and can be undone for 8 s.
+  More of Gmail's own: `[`/`]` archive and open the previous / next conversation, `!` report spam,
+  `+`/`-` important / not important, `n`/`p` next / previous message in the conversation,
+  `;`/`:` expand / collapse them all, `Shift+N` refresh, and `g` then `i` `u` `s` `t` `a` `d` to go to
+  Inbox, Unread, Starred, Sent, All mail or Drafts (`g` `l` picks a label). `Shift+D` asks the agent
+  for a reply when it is set up. Archive, trash and spam act at once and can be undone for 8 s.
 - **Reading safely** - HTML mail is shown in a sandboxed frame that cannot run scripts, and
   remote images stay blocked (they tell a sender you opened the mail). **Load images** fetches
   them for that one message. Links open in a Cockpit web tab; `mailto:` links open compose.
@@ -318,6 +343,18 @@ reader. The tab comes back on restart. An unread count on the tab itself is off 
   recipients while you type them, and is left alone once you edit it.
 - **Reply, reply all, forward** - plain text with the original quoted, kept in the same Gmail
   thread; reply all leaves you out. Forward brings the attachments along; 📎 adds your own.
+- **📎 From a terminal** (in compose) - pick a terminal and browse the folder its shell is in
+  (sizes shown, folders open in place, or type a path); the chosen file comes through the shell
+  itself, like *Get a file*, so it works **at any ssh depth**, inside `sudo`, `tmux` or a
+  container. The shell is never moved (`cd`) and nothing is typed while a full-screen program
+  has it. The message will not send while a file is still on its way.
+- **📅 Invitations** - a mail carrying a calendar invitation shows a card: what, when (in your
+  time zone - Outlook's Windows zone names included), where, who organises, whether it
+  **clashes** with something in your calendar, and **Accept / Maybe / Decline**. The answer is
+  recorded on your Google Calendar copy (which tells the organizer) when Cockpit has the
+  calendar-events permission - press **Connect & sign in** in Settings once more to grant it;
+  until then, or for an invitation that is not in your calendar, it goes to the organizer as a
+  standard calendar reply by mail. Cancellations and other people's answers show as such.
 - **Address suggestions** - start typing in To / Cc / Bcc and the people you mail pop up
   (by name, surname, address or domain); ↑↓ to choose, Enter or Tab to take one, Esc to close
   the list. ↓ in an empty field lists the people you write to most. The list is built from your
@@ -348,9 +385,39 @@ reader. The tab comes back on restart. An unread count on the tab itself is off 
 - **Resizable list** - drag the divider between the list and the reader; double-click it for
   the default width. The width is remembered.
 - **Attachments** - preview images and text, **👁 View** a PDF in its own viewer window (opened
-  over Cockpit, on the same screen), **💾 Save**, or **⤴ Terminal**: pick a terminal
-  and the file lands in that shell's current directory, **at any ssh depth** (the same in-band
-  path as *Send a file here*, up to 1 MB).
+  over Cockpit, on the same screen), **💾 Save**, or **📂 To a server**: pick a terminal, browse the folders of
+  the shell it is in, and choose where the file goes (and its name - a name that is taken asks
+  *Replace* or *Keep both*). It is typed through that shell, so it lands **at any ssh depth** (the
+  same in-band path as *Send a file here*, up to 1 MB); you stay in the mail and get a confirmation.
+- **🤖 Agent reply** (optional) - hand a mail to an agent service of your own that writes a
+  **draft** reply inside the thread; nothing is sent, you review the draft and send it yourself.
+  The 🤖 is in the reader bar (next to the reading-mode button) and on each Inbox board mail. A
+  small dialog takes your guidance for the reply (up to 4,000 characters), a model (the list
+  comes from the service) and a *dry run* switch; Ctrl+Enter starts it. The reader then shows
+  queued / running / done with the service's one-line summary, and reloads the thread so the
+  draft is right there; a notification tells you when it finishes while you are elsewhere. Jobs
+  still running when Cockpit restarts are picked up again. Set it up in **Settings → 🤖 Agent
+  reply**: the service address, its API key, and optionally a default model and who signs the
+  drafts. They are stored **encrypted on this computer only** and the key is never shown again;
+  nothing about the service is in Cockpit's code. Without them the buttons do not appear.
+  The service contract: `POST` a JSON request (`gmail_id`, `thread_id`, `message_id`, the
+  headers, `hint`, `model`, `operator`, `dry_run`) -> `{ ok, job_id }`; `GET ?job=<id>` ->
+  `{ ok, status, summary, ... }` until the status is `done`, `dry-run`, `failed`, `timeout`
+  or `lock-timeout`; `GET ?models=1` -> `{ ok, default, models: { name: id } }`. The key goes
+  in an `X-Api-Key` header, and only over https.
+- **✏ Review a draft in Cockpit** - a finished agent job has **✏ Review** (the notification
+  opens it too), and any draft in a thread has **✏ Edit draft**. It opens in compose with its
+  recipients, subject, text and files; send it with the usual undo-send, and the Gmail draft
+  is removed once the mail has really gone (an undone send keeps it). Left untouched it goes
+  with its original formatting; once you edit the text it is sent as plain text, and compose
+  says which. **💾 Save draft** (Ctrl+S) writes your changes back to Gmail and closes the editor, 🗑 deletes it, and
+  closing with unsaved changes asks first - the Gmail draft stays as it was. No extra Google
+  permission is needed. Reply and Reply all skip a draft at the end of a thread.
+- **🗑 One message out of a thread** - hover a message's header in the reader for its own 🗑:
+  just that message goes to Trash, with the usual 8 s Undo (which also puts it back in the
+  inbox if it was there). The last message left takes the whole thread with it, as in Gmail. On
+  a draft the 🗑 deletes the draft, after asking - Gmail cannot undo that. Messages trashed out
+  of a thread stay hidden when it is opened again.
 - **Quiet during focus** - during a focus session or a Time Relax work phase the badge, the
   Inbox board and the Home count hold still. At the break you get one silent summary
   ("📧 4 new while you worked - from ..."). Settings → Google to turn it off.
@@ -436,7 +503,7 @@ Saved sessions, settings, notes, project times, and encrypted tokens live in the
 Older installs used an `ssh-gui` folder; on first launch Cockpit **migrates it automatically**
 (copies it to the new location), so nothing is lost.
 
-Secrets (Slack/Google tokens) are encrypted at rest via Electron `safeStorage` - DPAPI on
+Secrets (Slack/Google tokens, the agent reply service address and key) are encrypted at rest via Electron `safeStorage` - DPAPI on
 Windows, Keychain on macOS, the OS secret service (e.g. libsecret/kwallet) on Linux.
 
 ## Packaging

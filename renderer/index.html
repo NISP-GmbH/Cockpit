@@ -230,6 +230,7 @@
       <!-- Status bar -->
       <div id="statusbar">
         <span id="status-text">Ready</span>
+        <button id="clip-btn" title="Clipboard history - the last 50 copies, this session only (Ctrl+Shift+H)">📋</button>
         <div id="project-widget" title="Project time - click to open">
           <span class="pw-icon">🗂</span>
           <span id="pw-name">No project</span>
@@ -671,6 +672,29 @@
         </div>
 
         <div class="settings-section" style="margin-top: 14px">
+          <h3>🤖 Agent reply</h3>
+          <div id="set-agent-status" class="settings-status">Not set up</div>
+          <div class="settings-status">
+            Hands a mail to your own agent service, which writes a <b>draft</b> reply inside the
+            thread (nothing is sent). The address and the key are yours: they are stored encrypted
+            on this computer and never shown again here.
+          </div>
+          <label for="set-agent-endpoint">Service address (https)</label>
+          <input id="set-agent-endpoint" type="url" autocomplete="off" spellcheck="false" placeholder="https://…" />
+          <label for="set-agent-key">API key</label>
+          <input id="set-agent-key" type="password" autocomplete="off" placeholder="API key" />
+          <label for="set-agent-model">Default model (optional - a name the service lists)</label>
+          <input id="set-agent-model" type="text" autocomplete="off" spellcheck="false" placeholder="the service default" />
+          <label for="set-agent-operator">Sign drafts as (optional email)</label>
+          <input id="set-agent-operator" type="email" autocomplete="off" spellcheck="false" placeholder="the service default" />
+          <div class="settings-row">
+            <button id="set-agent-save" type="button" class="primary">Save</button>
+            <button id="set-agent-test" type="button">Save &amp; test</button>
+            <button id="set-agent-forget" type="button">Forget</button>
+          </div>
+        </div>
+
+        <div class="settings-section" style="margin-top: 14px">
           <h3>Terminal alerts</h3>
           <label class="settings-check">
             <input type="checkbox" id="set-claude-watch" />
@@ -679,6 +703,19 @@
           <label class="settings-check" style="margin-top: 6px">
             <input type="checkbox" id="set-meeting-chime" />
             Play a chime 3 minutes before a meeting
+          </label>
+          <label class="settings-check" style="margin-top: 6px">
+            <input type="checkbox" id="set-tmux-offer" />
+            Offer tmux sessions when an SSH tab connects
+            <a href="#" id="set-tmux-reset" class="hidden"></a>
+          </label>
+          <label class="settings-check" style="margin-top: 6px">
+            <input type="checkbox" id="set-clip-on" />
+            Clipboard history (Ctrl+Shift+H) - the last 50 copies, kept in memory only
+          </label>
+          <label class="settings-check" style="margin-top: 6px">
+            <input type="checkbox" id="set-clip-secrets" />
+            When a copied secret expires (60 s), clear it from the clipboard too
           </label>
           <label class="settings-check" style="margin-top: 6px">
             <input type="checkbox" id="set-cmd-done" />
@@ -937,6 +974,15 @@
     </div>
 
     <!-- xterm + addons (UMD globals) -->
+    <!-- Clipboard history (Ctrl+Shift+H): must come BEFORE the scripts, which wire it at load -->
+    <div id="clip-panel" class="hidden">
+    <div class="clip-card">
+      <div class="clip-head">📋 Clipboard <span class="clip-meta">last 50 copies, this session only · secrets vanish after a minute</span></div>
+      <input id="clip-filter" type="text" spellcheck="false" placeholder="Filter - ↑↓ to choose, Enter pastes, Shift+Enter copies only, Esc closes" />
+      <div id="clip-list"></div>
+      <div class="clip-foot"><button class="mail-btn" data-clear="1">Forget all</button></div>
+    </div>
+  </div>
     <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
     <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
     <script src="../node_modules/@xterm/addon-web-links/lib/addon-web-links.js"></script>
@@ -946,5 +992,5 @@
     <script src="../node_modules/chart.js/dist/chart.umd.js"></script>
     <script src="emoji-map.js"></script>
     <script src="renderer.js"></script>
-  </body>
+</body>
 </html>

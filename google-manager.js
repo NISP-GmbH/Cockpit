@@ -7,6 +7,7 @@ const { URL } = require('url');
 const { google } = require('googleapis');
 
 const GMAIL_SEND_SCOPE = 'https://www.googleapis.com/auth/gmail.send';
+const CALENDAR_EVENTS_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
 const SCOPES = [
   // modify allows reading, labelling, archiving and moving to Trash (not permanent delete)
   'https://www.googleapis.com/auth/gmail.modify',
@@ -14,6 +15,9 @@ const SCOPES = [
   // the tab asks for a reconnect before sending while reading and triage keep working
   GMAIL_SEND_SCOPE,
   'https://www.googleapis.com/auth/calendar.readonly',
+  // answering invitations from the Mail tab changes YOUR copy of the event; like send, a
+  // token from before this existed lacks it, and invites are then answered by email instead
+  CALENDAR_EVENTS_SCOPE,
 ];
 
 function decodeB64(data) {
@@ -102,6 +106,7 @@ function headerValue(headers, name) {
 function walkPayload(payload) {
   let text = '';
   let html = '';
+  let calendar = ''; // an inline text/calendar part: an invitation
   const attachments = [];
   const cids = {};
   const seen = new Set();
@@ -114,6 +119,7 @@ function walkPayload(payload) {
     if (!isFile && body.data) {
       if (p.mimeType === 'text/plain' && !text) text = decodeB64(body.data);
       else if (p.mimeType === 'text/html' && !html) html = decodeB64(body.data);
+      else if (p.mimeType === 'text/calendar' && !calendar) calendar = decodeB64(body.data); // an invitation
     }
     if (isFile) {
       const key = body.attachmentId || 'inline:' + attachments.length;
@@ -137,7 +143,7 @@ function walkPayload(payload) {
     }
     if (p.parts) stack.push(...p.parts);
   }
-  return { text, html, attachments, cids };
+  return { text, html, attachments, cids, calendar };
 }
 
 function parseMessage(m) {
@@ -152,15 +158,18 @@ function parseMessage(m) {
     from: headerValue(headers, 'From'),
     to: headerValue(headers, 'To'),
     cc: headerValue(headers, 'Cc'),
+    bcc: headerValue(headers, 'Bcc'), // only a draft or a sent copy carries one
     replyTo: headerValue(headers, 'Reply-To'),
     date: headerValue(headers, 'Date'),
     subject: headerValue(headers, 'Subject'),
     messageId: headerValue(headers, 'Message-ID'),
+    inReplyTo: headerValue(headers, 'In-Reply-To'),
     references: headerValue(headers, 'References'),
     text: w.text,
     html: w.html,
     attachments: w.attachments,
     cids: w.cids,
+    calendar: w.calendar,
   };
 }
 
@@ -277,6 +286,9 @@ function fileParams(name) {
  * safe; text+html becomes multipart/alternative; attachments wrap it in multipart/mixed.
  * No Date or Message-ID: Gmail stamps both on send.
  */
+const DRAFT_ID = /^[A-Za-z0-9_-]{1,100}$/;
+const GONE_DRAFT = 'that draft is gone - it was sent or deleted';
+
 function buildMime(o) {
   const CRLF = '\r\n';
   const headers = [];
@@ -296,19 +308,22 @@ function buildMime(o) {
   const leaf = (type, content) =>
     ['Content-Type: ' + type + '; charset=UTF-8', 'Content-Transfer-Encoding: base64', '', b64Lines(Buffer.from(content || '', 'utf8'))].join(CRLF);
 
-  let body = leaf('text/plain', o.text || '');
-  if (o.html) {
+  // Alternatives of the same message: text, then html, then (an invitation answer) the
+  // iTIP calendar part - text/calendar with its METHOD, which is what calendars act on.
+  const alts = [leaf('text/plain', o.text || '')];
+  if (o.html) alts.push(leaf('text/html', o.html));
+  if (o.calendar && o.calendar.ics) {
+    const method = String(o.calendar.method || 'REQUEST').toUpperCase().replace(/[^A-Z]/g, '');
+    alts.push(
+      ['Content-Type: text/calendar; charset=UTF-8; method=' + method, 'Content-Transfer-Encoding: base64', '', b64Lines(Buffer.from(o.calendar.ics, 'utf8'))].join(CRLF)
+    );
+  }
+  let body = alts[0];
+  if (alts.length > 1) {
     const b = mimeBoundary('alt');
-    body = [
-      'Content-Type: multipart/alternative; boundary="' + b + '"',
-      '',
-      '--' + b,
-      leaf('text/plain', o.text || ''),
-      '--' + b,
-      leaf('text/html', o.html),
-      '--' + b + '--',
-      '',
-    ].join(CRLF);
+    const parts = [];
+    for (const a of alts) parts.push('--' + b, a);
+    body = ['Content-Type: multipart/alternative; boundary="' + b + '"', '', ...parts, '--' + b + '--', ''].join(CRLF);
   }
 
   const atts = (o.attachments || []).filter((a) => a && a.b64);
@@ -761,6 +776,13 @@ class GoogleManager {
   }
 
   /** The undo for a trash - Trash is 30 days, not gone. */
+  /** Undo trashMessage. Untrash does not promise the inbox back, so ask for it when it had it. */
+  async untrashMessage(id, addInbox) {
+    const messages = this._gmail().users.messages;
+    await messages.untrash({ userId: 'me', id });
+    if (addInbox) await messages.modify({ userId: 'me', id, requestBody: { addLabelIds: ['INBOX'] } });
+    return true;
+  }
   async untrashThread(id) {
     await this._gmail().users.threads.untrash({ userId: 'me', id });
     return true;
@@ -828,7 +850,75 @@ class GoogleManager {
     this._bookLoad();
     ['to', 'cc', 'bcc'].forEach((k) => this._bookAdd(o && o[k], 'sent', Date.now()));
     this._bookSaveSoon();
-    return { id: res.data.id, threadId: res.data.threadId };
+    // Sent from a Gmail draft (an agent's, say): the draft goes now that the mail has, or it
+    // would sit in the thread as a second copy. HERE, after the send, so undo-send and the
+    // flush on quit do it too - and a failed send leaves the draft alone.
+    let draftDeleted = false;
+    if (o && o.draftId) draftDeleted = await this.deleteDraft(o.draftId).catch(() => false);
+    return { id: res.data.id, threadId: res.data.threadId, ...(o && o.draftId ? { draftDeleted } : {}) };
+  }
+
+  // ---- Gmail drafts (gmail.modify covers them: no new permission) ----
+  /** One draft in full, by its draft id or by the id of the message it holds. */
+  async getDraft({ draftId, messageId } = {}) {
+    let id = draftId;
+    if (!id && messageId) id = await this.draftIdOf(messageId);
+    if (!id || !DRAFT_ID.test(String(id))) throw new Error(GONE_DRAFT);
+    let res;
+    try {
+      res = await this._gmail().users.drafts.get({ userId: 'me', id, format: 'full' });
+    } catch (err) {
+      if (err && (err.code === 404 || err.status === 404)) throw new Error(GONE_DRAFT);
+      throw err;
+    }
+    return { draftId: res.data.id, message: parseMessage(res.data.message || {}) };
+  }
+  /** A thread only shows a draft as a MESSAGE; the draft id comes from the draft list. */
+  async draftIdOf(messageId) {
+    let pageToken;
+    for (let page = 0; page < 5; page++) {
+      const res = await this._gmail().users.drafts.list({
+        userId: 'me',
+        maxResults: 500,
+        pageToken,
+        fields: 'drafts(id,message/id),nextPageToken',
+      });
+      const hit = (res.data.drafts || []).find((d) => d.message && d.message.id === messageId);
+      if (hit) return hit.id;
+      pageToken = res.data.nextPageToken;
+      if (!pageToken) break;
+    }
+    return null;
+  }
+  /** Write compose back into the draft; a draft deleted meanwhile is created again. */
+  async saveDraft(o) {
+    const mime = buildMime(o || {});
+    const message = {};
+    if (o && o.threadId) message.threadId = o.threadId;
+    const big = Buffer.byteLength(mime) > SEND_RAW_MAX;
+    if (!big) message.raw = b64url(mime);
+    const media = big ? { media: { mimeType: 'message/rfc822', body: mime } } : {};
+    const drafts = this._gmail().users.drafts;
+    let res = null;
+    if (o && o.draftId && DRAFT_ID.test(String(o.draftId))) {
+      try {
+        res = await drafts.update({ userId: 'me', id: o.draftId, requestBody: { id: o.draftId, message }, ...media });
+      } catch (err) {
+        if (!(err && (err.code === 404 || err.status === 404))) throw err;
+      }
+    }
+    if (!res) res = await drafts.create({ userId: 'me', requestBody: { message }, ...media });
+    return { draftId: res.data.id, messageId: (res.data.message && res.data.message.id) || '' };
+  }
+  /** true once it is gone - including when it already was. */
+  async deleteDraft(id) {
+    if (!id || !DRAFT_ID.test(String(id))) return false;
+    try {
+      await this._gmail().users.drafts.delete({ userId: 'me', id });
+    } catch (err) {
+      if (!(err && (err.code === 404 || err.status === 404))) throw err;
+    }
+    return true;
   }
 
   // ---- undo send ----
@@ -974,6 +1064,73 @@ class GoogleManager {
         .finally(() => (this._building = null));
     }
     return { contacts: this._bookList(), builtAt: this.bookBuiltAt, building: !!this._building };
+  }
+
+  // ---- invitations ----
+  async canRespond() {
+    try {
+      return (await this.grantedScopes()).includes(CALENDAR_EVENTS_SCOPE);
+    } catch (_) {
+      return false;
+    }
+  }
+  _cal() {
+    return google.calendar({ version: 'v3', auth: this.oauth });
+  }
+  // What the calendar knows about an invitation: the event itself (Gmail puts invitations in
+  // your calendar), your answer so far, and anything else you have on at that time.
+  async inviteInfo({ uid, start, end } = {}) {
+    const cal = this._cal();
+    let event = null;
+    if (uid) {
+      try {
+        const r = await cal.events.list({ calendarId: 'primary', iCalUID: String(uid), showDeleted: false, maxResults: 5 });
+        const e = (r.data.items || [])[0];
+        if (e) {
+          const me = (e.attendees || []).find((a) => a.self) || null;
+          event = { id: e.id, status: e.status, myStatus: me ? me.responseStatus : null, htmlLink: e.htmlLink || '' };
+        }
+      } catch (_) {
+        /* not in the calendar: answered by email then */
+      }
+    }
+    let busy = null;
+    if (start && end && end > start) {
+      try {
+        const r = await cal.events.list({
+          calendarId: 'primary',
+          timeMin: new Date(start).toISOString(),
+          timeMax: new Date(end).toISOString(),
+          singleEvents: true,
+          orderBy: 'startTime',
+          maxResults: 20,
+        });
+        busy = (r.data.items || [])
+          .filter(
+            (e) =>
+              e.iCalUID !== uid && // the invitation itself is not a conflict with itself
+              e.status !== 'cancelled' &&
+              e.transparency !== 'transparent' && // marked "free"
+              e.start &&
+              e.start.dateTime && // all-day markers (holidays, OOO banners) are not meetings
+              !(e.attendees || []).some((a) => a.self && a.responseStatus === 'declined')
+          )
+          .map((e) => ({ summary: e.summary || '(no title)', start: e.start.dateTime, end: (e.end && e.end.dateTime) || e.start.dateTime }));
+      } catch (_) {
+        busy = null;
+      }
+    }
+    return { event, busy, canRespond: await this.canRespond() };
+  }
+  // Your answer, recorded on your copy of the event; sendUpdates tells the organizer.
+  async inviteRespond({ eventId, response } = {}) {
+    if (!['accepted', 'tentative', 'declined'].includes(response)) throw new Error('not an answer: ' + response);
+    const cal = this._cal();
+    const e = (await cal.events.get({ calendarId: 'primary', eventId })).data;
+    if (!(e.attendees || []).some((a) => a.self)) throw new Error('you are not on the guest list of this event');
+    const attendees = e.attendees.map((a) => (a.self ? { ...a, responseStatus: response } : a));
+    await cal.events.patch({ calendarId: 'primary', eventId, sendUpdates: 'all', requestBody: { attendees } });
+    return { done: true, response };
   }
 
   /** The thread a message belongs to (Black Box events only remember the message). */
