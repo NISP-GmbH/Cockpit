@@ -48,6 +48,15 @@ Everything lives in one tabbed window (`Ctrl+Shift+T` new · `Ctrl+Shift+W` clos
 - Optional per-terminal **line numbers** for command output. **SFTP** file browser for the active SSH tab (drag-and-drop upload/download). New output **auto-scrolls** to the bottom (unless you've scrolled up to read history); `Ctrl+PageUp`/`Ctrl+PageDown` page the scrollback. **Shift+scroll** instead writes keys to the remote app, so you can scroll inside full-screen apps (tmux, `less`, vim, Claude Code) that own the screen and have no local scrollback. Which keys is configurable in ⚙ → **Terminal scrolling** (`PgUp`/`PgDn`, tmux copy-mode, `Ctrl+B`/`Ctrl+F`, arrows, an SGR mouse report, or your own sequence) because every app binds paging differently - notably, some editors bind `PgUp`/`PgDn` to jump to the start/end of the input rather than scroll. For tmux the simplest answer is usually `set -g mouse on`, after which a plain scroll works natively. On keyboards without `PageUp`/`PageDown` keys (Mac laptops, 60% boards), `Alt+Shift+↑/↓` sends the same configured sequence and `Ctrl+Shift+↑/↓` pages the local scrollback - the key bytes are synthesized, so the physical key never has to exist. In **tmux copy-mode** mode, scrolling up parks the pane in copy-mode (leave it with `q`, Escape or Enter); by default Cockpit sends that `q` for you the moment you start typing, so typing just resumes - untick **Leave copy-mode as soon as I type** if you would rather stay there to search or select.
 - **Record session → asciicast** (tab hover cheat-sheet → ⏺ Record session) - record a terminal to a standard **asciicast v2 `.cast`** file: the raw output stream is captured with timing, and on stop you're prompted to save. Replay it with `asciinema play file.cast`, embed a player, or convert it to a GIF - great for dropping a repro/how-to into a ticket or PR. The tab shows a pulsing red ● while recording; a 25 MB safety cap auto-stops runaway captures. Works on ssh and local tabs.
 - **Time travel** (tab hover cheat-sheet → 🕰 Time travel) - Cockpit keeps a bounded rolling capture of every terminal's output, so you can **scrub the terminal backward through time** with a slider and see its exact **state at any past moment** - before that `clear`, before the deploy, "what did this look like 3 minutes ago." It replays the captured stream into a read-only terminal (so cursor moves / clears / colors reconstruct faithfully), with a live time label and a "▶ latest" jump. Live output keeps flowing in the real tab. Rolling window is ~4 MB per terminal.
+- **⚡ Explain** (`Ctrl+Shift+E`, or the tab hover cheat-sheet; with the fast AI reply set up) -
+  select an error in a terminal (or select nothing: the last lines on screen) and a popover explains
+  it in plain words, with one command that would fix it or find out more. **⌨ Type it** puts the
+  command at the prompt WITHOUT Enter - nothing runs until you press it - or **Copy** it.
+- **⚡ Plain English → command** - type `# find files over 1 GB here` at the prompt and press
+  `Ctrl+J`: the line is replaced by the command (not run; check it, then Enter). It knows the
+  host, folder, shell and your last command. A request that needs several lines is shown to copy
+  instead of typed; one the model thinks unsafe is explained, not typed. Without a `# request` on
+  the line - or inside vim, tmux and other full-screen apps - `Ctrl+J` stays the shell's.
 - **Selection → note** (tab hover cheat-sheet → 🗒 Selection → note, or **Ctrl+Shift+N**) - select any terminal output and drop it straight into a sticky note, **auto-tagged** with the host, a timestamp, and **the command that produced it** (pulled from the tab's command tracker). The selection is stored fenced so it renders monospaced, and the note board opens and flashes the new note. Works on ssh and local tabs - handy for saving an error, a config snippet, or a one-off result you want to keep next to your tasks.
 - **Where am I** (tab hover cheat-sheet → 📍) - the tab title tracks the **real host and directory** of
   whatever shell the terminal is currently in, however deep: `ssh` inside `ssh`, `sudo`, a container.
@@ -315,9 +324,9 @@ the list you were in before the search. The tab comes back on restart. An unread
   badge, the Inbox board (its header names the filter) and the Home count. Starred, Sent,
   labels and search always show everything.
 - **Keyboard triage** (while the tab has focus, never inside a text field): `j`/`k` next /
-  previous, `Enter`/`o` open, `Esc` back, `e` archive, `#` trash, `s` star,
+  previous, `Enter`/`o` open, `Esc` back, `e` archive, `d` / `Delete` / `#` trash, `s` star,
   `Shift+I` read, `u`, `Shift+U` or `Ctrl+U` unread (`u` is not Gmail's "back" here - that is `Esc`), `l` label, `r`/`a`/`f` reply / reply all / forward,
-  `c` compose, `/` search, `z` undo, `1`-`9` quick replies, `d` reading mode, `?` the list. `Ctrl+Enter` sends.
+  `c` compose, `/` search, `z` undo, `1`-`9` quick replies, `t` reading mode, `?` the list. `Ctrl+Enter` sends.
   More of Gmail's own: `[`/`]` archive and open the previous / next conversation, `!` report spam,
   `+`/`-` important / not important, `n`/`p` next / previous message in the conversation,
   `;`/`:` expand / collapse them all, `Shift+N` refresh, and `g` then `i` `u` `s` `t` `a` `d` to go to
@@ -343,6 +352,14 @@ the list you were in before the search. The tab comes back on restart. An unread
   recipients while you type them, and is left alone once you edit it.
 - **Reply, reply all, forward** - plain text with the original quoted, kept in the same Gmail
   thread; reply all leaves you out. Forward brings the attachments along; 📎 adds your own.
+- **The compose window** - drag it by its title bar and resize it from any edge or corner; it
+  stays inside the Mail tab and keeps its place and size across restarts (double-click the title
+  bar to dock it bottom right again). **💾 Save draft** (`Ctrl+S`) on any message puts it in
+  Gmail Drafts - a reply inside its thread - and closes the window; finish it later here or in Gmail.
+- **Drag and drop to attach** - drag files from Explorer / Finder onto the Mail tab: onto a
+  message you are writing they are attached, with none open a new message starts with them.
+  Several at once work, anywhere on the tab (the list, the compose panel, an open mail); a
+  folder or a file past Gmail's 25 MB is refused with the reason.
 - **📎 From a terminal** (in compose) - pick a terminal and browse the folder its shell is in
   (sizes shown, folders open in place, or type a path); the chosen file comes through the shell
   itself, like *Get a file*, so it works **at any ssh depth**, inside `sudo`, `tmux` or a
@@ -366,9 +383,19 @@ the list you were in before the search. The tab comes back on restart. An unread
   `{cursor}`, and **`{free}`** - your next free hours from the calendar (`{free@Berlin}` gives
   them in one of your TZ planner zones). Edit them with **✂** in the Mail toolbar.
 - **Snippet from a highlight** - highlight text in a message you are writing or reading and a
-  **✂ Save as snippet** pill appears next to it: one click opens the editor with that text, a
-  name and a free shortcut already filled in (in your own message the recipient's first name
-  becomes `{first}`).
+  pill appears next to it: **✂ Snippet** opens the editor with that text, a name and a free
+  shortcut already filled in (in your own message the recipient's first name becomes `{first}`).
+- **⚡ Rewrite a highlight** (with the fast AI reply set up) - in a message you are writing the
+  same pill also offers **Shorter · Friendlier · Formal · German · English · Fix grammar**. The
+  answer replaces just the highlighted text and stays selected, so another one can follow;
+  `Ctrl+Z` puts the old text back, and a failure changes nothing.
+- **📎 "Attached", but nothing is** - Send checks your own words (not the quoted mail) and the
+  subject for "attached", "enclosed", "see the file", "anbei", "im Anhang" and a few more; with no
+  file attached it asks first: attach one, attach from a terminal, or **Send anyway** (undo send
+  still applies).
+- **🌐 Translate** (reader bar) - the open mail, translated under the original, streaming in; press
+  it again to hide it. The language is **English** unless you change it in Settings → ⚡ Fast AI
+  reply; a mail already in that language says so.
 - **Snippets that learn** (opt-in, Settings → Google) - after the third time you send nearly the
   same reply, the Sent toast offers to keep it as a snippet; **Not this** means never again for
   that one. It remembers your last 40 short replies on this computer only, and forgets them
@@ -378,7 +405,7 @@ the list you were in before the search. The tab comes back on restart. An unread
 - **Undo send** - every message waits 15 s with **Undo** / **Send now** in the toast (`z` undoes);
   undone, it comes back exactly as written. Quitting Cockpit sends what is waiting rather than
   dropping it. Settings → Google sets the time (or off).
-- **Reading modes** - the reader-bar button (or `d`) cycles **☀ as sent → 🌙 white on black →
+- **Reading modes** - the reader-bar button (or `t`) cycles **☀ as sent → 🌙 white on black →
   📟 green on black**. White on black inverts the mail, so even mails that fix their own
   colours turn dark and brand colours stay recognisable; green on black recolours everything to
   a terminal screen. Pictures keep their own colours in both. Remembered for all mail.
@@ -405,6 +432,20 @@ the list you were in before the search. The tab comes back on restart. An unread
   `{ ok, status, summary, ... }` until the status is `done`, `dry-run`, `failed`, `timeout`
   or `lock-timeout`; `GET ?models=1` -> `{ ok, default, models: { name: id } }`. The key goes
   in an `X-Api-Key` header, and only over https.
+- **⚡ Fast AI reply** (optional) - a reply written in a few seconds, straight into compose:
+  the thread goes to Anthropic's API with **your own key** (Haiku by default) and the text
+  streams in; you read it, change it, send it. Switch it on with **⚡** in the reader bar (it
+  then reads **⚡ AI on**, and Reply / Reply all carry a ⚡): from then on **↩ Reply** and **⤶ All**
+  (or `r` / `a`) open with the answer already being written - a bar at the top of compose says
+  so, then shows the time, with **↻ Again**. Forward is never written for you. In the compose
+  window's title bar, **⚡ AI reply** (`Ctrl+J`; **⚡ AI write** on a new message) works any time and
+  turns into **⏹ Stop** while it writes: what you typed above the quote is the brief -
+  "agree, ask for their seat count" is enough - and pressing it again rewrites. `Esc` (or Stop in
+  the bar) stops it and keeps what was written; a failure leaves your text untouched. 🤖 stays
+  the agent service; it is the fast reply only when no agent is set up. The model never sees an instruction in a
+  mail as one, leaves [placeholders] for facts it does not have, and adds no signature (yours is
+  added as usual). Set up in **Settings → ⚡ Fast AI reply**: the key (stored encrypted, never
+  shown again), a model, and optional notes on how you write.
 - **✏ Review a draft in Cockpit** - a finished agent job has **✏ Review** (the notification
   opens it too), and any draft in a thread has **✏ Edit draft**. It opens in compose with its
   recipients, subject, text and files; send it with the usual undo-send, and the Gmail draft
@@ -503,7 +544,7 @@ Saved sessions, settings, notes, project times, and encrypted tokens live in the
 Older installs used an `ssh-gui` folder; on first launch Cockpit **migrates it automatically**
 (copies it to the new location), so nothing is lost.
 
-Secrets (Slack/Google tokens, the agent reply service address and key) are encrypted at rest via Electron `safeStorage` - DPAPI on
+Secrets (Slack/Google tokens, the agent reply service address and key, the fast-reply API key) are encrypted at rest via Electron `safeStorage` - DPAPI on
 Windows, Keychain on macOS, the OS secret service (e.g. libsecret/kwallet) on Linux.
 
 ## Packaging
