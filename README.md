@@ -56,6 +56,8 @@ Everything lives in one tabbed window (`Ctrl+Shift+T` new · `Ctrl+Shift+W` clos
   with the whole exchange swallowed, so the terminal looks untouched. It runs once after connecting,
   when you switch to a tab, and on demand. It never types into a full-screen program: on the alternate
   screen the probe is skipped, so `vim`, tmux copy-mode and Claude are safe.
+- **Send a file here** (tab hover cheat-sheet → 📤) - the mirror of the grab below: pushes a file **into the shell this terminal is in right now**, so on a multi-hop `ssh` it lands on the **last** hop, not the first - and it reaches inside `sudo` or a container too. The bytes are base64 and typed through the terminal in chunks, with the whole exchange hidden, and the size is checked on arrival. Small files only (1 MB cap); use **📁 Files** for anything larger.
+- **📁 Files (SFTP)** (tab hover cheat-sheet, or ＋ New ▾ → 📁 Files) - browse the host you connected to: **⬆ upload**, download, and move around. You can also **drag files onto the terminal**. SFTP is attached to the first hop, so it does not follow further `ssh` hops - that is what Send a file here is for.
 - **Grab / preview a file from here** (tab hover cheat-sheet → 📥 Get a file) - reaches a file straight through the current terminal session, so it works even inside a **nested `ssh`**, `sudo`, `tmux`, or a container where SFTP can't reach. Two options: **👁 Preview** shows the contents in a scrollable viewer (`.json` pretty-prints; **`.log`/`.out`/`.err` jump to the end** so you see the newest lines; binary files are declined), and **📥 Download** saves it. The transfer is hidden from the terminal (a short `[sending file …]` note stands in for the base64), leaving no clutter. Best for small/medium files; use SFTP for large ones.
 - **Port forwarding** (tab hover cheat-sheet → 🔀 Port forwarding) - a visual SSH tunnel manager for the active connection. Port forwarding is confusing because it's hard to picture *who listens* and *which way traffic flows*, so each tunnel is drawn as a **three-node diagram** - your PC, the SSH host, the target - with a 📡 LISTENS pin and directional arrows, plus a plain-English sentence, and a live preview updates as you fill the form. Supports **Local (`-L`)** (reach an internal service from your machine), **Remote (`-R`)** (expose something of yours on the server), and **Dynamic (`-D`)** (a built-in SOCKS5 proxy). Each active tunnel shows a status dot, live connection count and bytes up/down, with a Stop button. Optionally **remember** a tunnel per host so it **auto-starts on connect**. An "allow other devices (0.0.0.0)" toggle exposes a local tunnel to your LAN. The panel is **draggable** by its header (double-click the header to re-center).
 - **Host vitals** (Terminal ▾ → 📈 Host vitals, opt-in) - a tiny live CPU / MEM / DISK sparkline strip in the **status bar**, next to the active SSH shell's name, so you can eyeball a box's health without opening `htop`. Each host is polled over a **separate exec channel** (default every 15 s, selectable 5/15/30/60 s in the same menu), so it never disturbs your interactive shell. CPU is load1 ÷ cores; colours go green → amber → red as a metric climbs. **Hover** the strip for absolute figures (e.g. `MEM 29% of 33 GB (9.6 GB used)`, `DISK 82% of 500 GB`, plus load and core count). Linux-oriented (reads `/proc` + `df`); unavailable values show `n/a`.
@@ -95,6 +97,9 @@ then *waits* - the next phase begins when you click it, so nothing starts behind
 (auto-continue is an option if you prefer the hands-off rhythm). Separate from the Focus Session
 above, which stays the one-shot deep-work block.
 
+- **A colour per phase** - work in the everyday accent, a break in green, a long break in violet,
+  and amber for a hand-off waiting for you to go **back to work**. The chip, the pill, the breathing
+  circle and every glow follow it, so a glance tells you where you are.
 - **Where it shows** - a chip in the status bar with the phase and countdown, a floating pill for
   breaks / the last minute of work / the hand-off between phases, the mini-cockpit, and the **window
   title** (`🍵 Work 12:34 · Cockpit`), so the taskbar answers "am I meant to be working right now"
@@ -106,8 +111,9 @@ above, which stays the one-shot deep-work block.
   or **Even (5-5)**), and each break **suggests one thing to do** with it ("look at something 20 m away
   for 20 seconds", "refill the water glass"), rotating so nothing repeats and with bigger ideas saved
   for the long break. The **Cockpit pet naps** through it and stretches at the hand-off.
-- **Move it out of the way** - the pill and the circle are one stack you can **drag anywhere**: grab
-  the pill and both follow. The spot is remembered; double-click to put it back.
+- **Move it out of the way** - the pill, the circle and the suggestion are one stack you can **drag
+  anywhere**: grab any of them and the whole thing follows. The spot is remembered; double-click to
+  put it back.
 - **The bell** - **eight soft voices** in two families: four that ring out (singing bowl, deep bowl,
   crystal bowl, soft gong) and four short ones (warm bell, wind chime, soft wood, glass drop). Plus
   **Your own bowl**, tuned with six sliders - pitch, swell, ring, shimmer, overtones, strikes - which

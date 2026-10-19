@@ -1751,8 +1751,24 @@ body.focus .tab:not(.active) {
 #relax-widget:hover {
   border-color: var(--rx-accent);
 }
-#relax-widget.rx-break {
+/* One colour per phase, used by the chip, the pill, the breathing circle and every
+   glow that follows them. Work is the everyday accent; a break is green; a long break
+   is violet, because it is a different animal from the five-minute one. (A hand-off
+   waiting for you to go back to work is amber - see .rx-towork below.) */
+#relax-widget.rx-p-work,
+#relax-hud.rx-p-work,
+#rx-stack.rx-p-work {
+  --rx-accent: var(--accent);
+}
+#relax-widget.rx-p-break,
+#relax-hud.rx-p-break,
+#rx-stack.rx-p-break {
   --rx-accent: #5aa864;
+}
+#relax-widget.rx-p-long,
+#relax-hud.rx-p-long,
+#rx-stack.rx-p-long {
+  --rx-accent: #b08bf0;
 }
 #relax-widget.rx-parked {
   border-color: var(--rx-accent);
@@ -1810,6 +1826,7 @@ body.focus .tab:not(.active) {
 /* One draggable stack: the pill on top, the breathing circle under it. Only the pill
    takes pointer events, so the circle never swallows a click meant for a tab. */
 #rx-stack {
+  --rx-accent: var(--accent);
   position: fixed;
   top: 42px;
   left: 50%;
@@ -1821,7 +1838,9 @@ body.focus .tab:not(.active) {
   gap: 10px;
   pointer-events: none;
 }
-#rx-stack.rx-dragging #relax-hud {
+#rx-stack.rx-dragging #relax-hud,
+#rx-stack.rx-dragging #rx-breathe,
+#rx-stack.rx-dragging #rx-tip {
   cursor: grabbing;
   opacity: 0.92;
 }
@@ -1843,9 +1862,6 @@ body.focus .tab:not(.active) {
 #relax-hud.hidden {
   display: none;
 }
-#relax-hud.rx-break {
-  --rx-accent: #5aa864;
-}
 /* Waiting to be started: the pill grows and the one button that matters lights up.
    Everything else about it stays put, so it reads as the same pill, just louder. */
 #relax-hud.rx-parked {
@@ -1855,8 +1871,10 @@ body.focus .tab:not(.active) {
   border-width: 2px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6), 0 0 26px rgba(78, 161, 255, 0.4);
 }
-#relax-hud.rx-parked.rx-break {
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6), 0 0 26px rgba(90, 168, 100, 0.45);
+/* The parked glow follows whichever phase colour is in play. */
+#relax-hud.rx-parked {
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6),
+    0 0 26px color-mix(in srgb, var(--rx-accent) 45%, transparent);
 }
 /* Work waiting gets amber rather than the everyday blue, so the two hand-offs are
    tellable apart at a glance: green means take the break, amber means get back to it. */
@@ -1947,7 +1965,9 @@ body.focus .tab:not(.active) {
   border: 1px solid var(--border);
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.6);
   backdrop-filter: blur(10px);
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: move;
+  user-select: none;
 }
 #rx-breathe.hidden {
   display: none;
@@ -1956,12 +1976,17 @@ body.focus .tab:not(.active) {
   width: 130px;
   height: 130px;
   border-radius: 50%;
-  border: 3px solid rgba(126, 216, 142, 0.95);
-  background: radial-gradient(circle, rgba(104, 190, 118, 0.62), rgba(90, 168, 100, 0.2));
-  /* A green glow to lift it off a black terminal, and a dark one under that so it
-     still reads on a white web page. */
-  box-shadow: 0 0 30px rgba(104, 190, 118, 0.38), 0 8px 24px rgba(0, 0, 0, 0.45),
-    inset 0 0 34px rgba(104, 190, 118, 0.22);
+  border: 3px solid color-mix(in srgb, var(--rx-accent) 90%, white);
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--rx-accent) 62%, transparent),
+    color-mix(in srgb, var(--rx-accent) 20%, transparent)
+  );
+  /* A glow in the phase colour to lift it off a black terminal, and a dark one under
+     that so it still reads on a white web page. */
+  box-shadow: 0 0 30px color-mix(in srgb, var(--rx-accent) 38%, transparent),
+    0 8px 24px rgba(0, 0, 0, 0.45),
+    inset 0 0 34px color-mix(in srgb, var(--rx-accent) 22%, transparent);
   transform: scale(0.45);
   opacity: 0.5;
   /* Opacity rides the same curve as the size: brightest at the top of the breath,
@@ -1987,6 +2012,9 @@ body.focus .tab:not(.active) {
 }
 /* The break suggestion, under the circle. */
 #rx-tip {
+  pointer-events: auto;
+  cursor: move;
+  user-select: none;
   max-width: 320px;
   padding: 4px 12px;
   border-radius: 12px;
@@ -6265,4 +6293,8 @@ button.primary:hover {
 }
 .slack-input {
   flex: 1;
+}
+
+.tun-info.tun-warn {
+  color: #e0a33a;
 }

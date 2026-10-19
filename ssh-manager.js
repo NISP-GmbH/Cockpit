@@ -357,12 +357,16 @@ class SSHManager {
     t.conns++;
     t._dirty = true;
     this._emitTunnel(t);
+    let sent = 0;
+    let got = 0;
     a.on('data', (d) => {
       t.up += d.length;
+      sent += d.length;
       t._dirty = true;
     });
     b.on('data', (d) => {
       t.down += d.length;
+      got += d.length;
       t._dirty = true;
     });
     let closed = false;
@@ -370,6 +374,15 @@ class SSHManager {
       if (closed) return;
       closed = true;
       t.conns = Math.max(0, t.conns - 1);
+      // Asked and not answered: the channel opened, we forwarded a request, and the
+      // far end hung up without a byte. Usually nothing is listening on the
+      // destination port, or it is listening on a different interface. In a browser
+      // this shows up as PR_END_OF_FILE_ERROR / ERR_EMPTY_RESPONSE.
+      if (sent > 0 && got === 0) {
+        t.error = `${t.destHost}:${t.destPort} accepted the connection then closed it without replying`;
+      } else if (got > 0) {
+        t.error = '';
+      }
       t._dirty = true;
       this._emitTunnel(t);
       try {
@@ -439,15 +452,41 @@ class SSHManager {
     return this._pubTunnel(t);
   }
 
+  // Bind the same handler on the IPv6 loopback as well. `localhost` resolves to ::1
+  // first on Windows, and plenty of clients never fall back to IPv4 - so a listener
+  // bound only to 127.0.0.1 answers nothing for them, and the tunnel looks perfectly
+  // healthy while forwarding nothing. Best effort: if ::1 is unavailable or already
+  // taken, the IPv4 listener still works on its own.
+  _alsoListenV6(t, onConn) {
+    if (t.listenHost !== '127.0.0.1') return;
+    try {
+      const v6 = net.createServer(onConn);
+      v6.on('error', () => {});
+      v6.listen(t.listenPort, '::1');
+      t.server6 = v6;
+    } catch (_) {
+      /* no IPv6 stack here */
+    }
+  }
+
   _startLocal(sess, t) {
-    const server = net.createServer((sock) => {
+    const onConn = (sock) => {
       const s = this.sessions.get(t.tabId);
       if (!s || !s.client) return sock.destroy();
       s.client.forwardOut(sock.remoteAddress || '127.0.0.1', sock.remotePort || 0, t.destHost, t.destPort, (err, stream) => {
-        if (err) return sock.destroy();
+        if (err) {
+          // The listener is fine, so the tunnel stays "up" - but every connection is
+          // being refused at the far end, and saying nothing about that is exactly why
+          // a dead tunnel looks like a working one.
+          t.error = `${t.destHost}:${t.destPort} refused on the host (${err.message || err})`;
+          this._emitTunnel(t);
+          return sock.destroy();
+        }
+        t.error = '';
         this._wirePair(t, sock, stream);
       });
-    });
+    };
+    const server = net.createServer(onConn);
     server.on('error', (e) => {
       t.status = 'error';
       t.error = e.code === 'EADDRINUSE' ? `Local port ${t.listenPort} is already in use` : e.message;
@@ -457,6 +496,7 @@ class SSHManager {
       t.status = 'up';
       t.error = '';
       this._emitTunnel(t);
+      this._alsoListenV6(t, onConn);
     });
     t.server = server;
   }
@@ -501,7 +541,8 @@ class SSHManager {
   }
 
   _startDynamic(sess, t) {
-    const server = net.createServer((sock) => this._socks5(sock, t));
+    const onConn = (sock) => this._socks5(sock, t);
+    const server = net.createServer(onConn);
     server.on('error', (e) => {
       t.status = 'error';
       t.error = e.code === 'EADDRINUSE' ? `Local port ${t.listenPort} is already in use` : e.message;
@@ -511,6 +552,7 @@ class SSHManager {
       t.status = 'up';
       t.error = '';
       this._emitTunnel(t);
+      this._alsoListenV6(t, onConn);
     });
     t.server = server;
   }
@@ -598,6 +640,11 @@ class SSHManager {
     if (!t) return false;
     try {
       if (t.server) t.server.close();
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      if (t.server6) t.server6.close(); // the IPv6 loopback twin
     } catch (_) {
       /* ignore */
     }

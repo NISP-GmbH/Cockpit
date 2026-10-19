@@ -37,6 +37,7 @@ contextBridge.exposeInMainWorld('sshApi', {
   sftpUploadPaths: (tabId, dir, paths) => ipcRenderer.invoke('sftp:uploadPaths', { tabId, dir, paths }),
   sftpDelete: (tabId, path, isDir) => ipcRenderer.invoke('sftp:delete', { tabId, path, isDir }),
   saveBase64: (name, b64) => ipcRenderer.invoke('file:saveBase64', { name, b64 }),
+  pickBase64: (maxBytes) => ipcRenderer.invoke('file:pickBase64', { maxBytes }),
   resize: (tabId, cols, rows) => ipcRenderer.send('ssh:resize', { tabId, cols, rows }),
   disconnect: (tabId) => ipcRenderer.send('ssh:disconnect', { tabId }),
 
