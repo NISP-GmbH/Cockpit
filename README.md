@@ -314,7 +314,12 @@ it. The compose panel says so when it is missing.
 a tab: search, Inbox / Unread / Starred / Sent / All mail, your labels, a thread list and a
 reader. The list loads more **by itself as you scroll** - the next page is already fetched in
 the background, so it appears at once - and **emptying the search box** (or its ✕) puts back
-the list you were in before the search. The tab comes back on restart. An unread count on the tab itself is off by default
+the list you were in before the search. A long conversation opens at the mail that matters - the **first unread** one, else the
+**newest** - with the older ones folded above it. Every list, search results included, is shown **newest
+first**. Gmail's search only finds whole words, so a **one-word search** also includes the people
+in your address book whose name or address contains it (`taylor` finds mail to and from
+`ntaylor@…`); the search chip says "+2 people" and lists them on hover. Two words, quotes or an
+operator like `from:` are searched exactly as typed. The tab comes back on restart. An unread count on the tab itself is off by default
 (Settings → Google turns it on); Home always shows the real inbox count.
 
 - **Inbox categories** - the row under the toolbar picks which of Gmail's categories you see:
@@ -323,7 +328,9 @@ the list you were in before the search. The tab comes back on restart. An unread
   remembered, and it decides what "inbox" means everywhere: the Inbox / Unread views, the tab
   badge, the Inbox board (its header names the filter) and the Home count. Starred, Sent,
   labels and search always show everything.
-- **Keyboard triage** (while the tab has focus, never inside a text field): `j`/`k` next /
+- **Keyboard triage** (while the tab has focus, never inside a text field): `↑`/`↓` move in
+  the list, `→` opens the mail (then `↑`/`↓` and `PgUp`/`PgDn` scroll it) and `←` goes back to the
+  list; `j`/`k` next /
   previous, `Enter`/`o` open, `Esc` back, `e` archive, `d` / `Delete` / `#` trash, `s` star,
   `Shift+I` read, `u`, `Shift+U` or `Ctrl+U` unread (`u` is not Gmail's "back" here - that is `Esc`), `l` label, `r`/`a`/`f` reply / reply all / forward,
   `c` compose, `/` search, `z` undo, `1`-`9` quick replies, `t` reading mode, `?` the list. `Ctrl+Enter` sends.
@@ -356,6 +363,26 @@ the list you were in before the search. The tab comes back on restart. An unread
   stays inside the Mail tab and keeps its place and size across restarts (double-click the title
   bar to dock it bottom right again). **💾 Save draft** (`Ctrl+S`) on any message puts it in
   Gmail Drafts - a reply inside its thread - and closes the window; finish it later here or in Gmail.
+- **Font and weight** - **Aa** in the Mail toolbar: pick the font (each shown in its own face;
+  ones not installed are marked, **Other…** takes any installed font by name), the weight (Light to
+  Bold) and the size. It covers the list, the reader, plain-text mails and compose; formatted
+  mails take it where they set no font of their own - or always (**Override**, code stays
+  monospace) - or never. Unread mails stay bold whatever you pick. **Background**: Dark (the
+  standard), Dim, Slate, Light grey, Paper, White or any colour from the picker - the rest of the
+  tab (cards, buttons, lines, the text itself: dark on a light background) is made to match.
+  Only the Mail tab changes; formatted mails keep their own look (that is the reading mode).
+  Remembered.
+- **Text size** - `Ctrl` + mouse wheel anywhere in the Mail tab (or `Ctrl` `+` / `-`, `Ctrl+0` to reset)
+  makes the list and the mail text bigger or smaller, like the font zoom in a terminal; 70 % to
+  200 %, remembered.
+- **Drag an attachment to a terminal** - drag an attachment chip of a mail onto a **terminal tab**
+  (or onto the terminal itself): it is uploaded through that shell, into the folder the shell is
+  in, **at any ssh depth** (the in-band path, up to 1 MB). A name that is taken becomes
+  `name (1).ext` - nothing is overwritten. You stay in the mail and get a confirmation. Dropped
+  onto the message you are writing, the chip is attached instead.
+- **Paste to attach** - `Ctrl+V` in compose with a **screenshot** on the clipboard attaches it (named
+  `screenshot 2026-09-30 14.05.11.png`); files copied in Explorer / Finder paste the same way.
+  Text still pastes as text - also when the clipboard holds both (a spreadsheet range).
 - **Drag and drop to attach** - drag files from Explorer / Finder onto the Mail tab: onto a
   message you are writing they are attached, with none open a new message starts with them.
   Several at once work, anywhere on the tab (the list, the compose panel, an open mail); a
@@ -367,11 +394,19 @@ the list you were in before the search. The tab comes back on restart. An unread
   has it. The message will not send while a file is still on its way.
 - **📅 Invitations** - a mail carrying a calendar invitation shows a card: what, when (in your
   time zone - Outlook's Windows zone names included), where, who organises, whether it
-  **clashes** with something in your calendar, and **Accept / Maybe / Decline**. The answer is
-  recorded on your Google Calendar copy (which tells the organizer) when Cockpit has the
-  calendar-events permission - press **Connect & sign in** in Settings once more to grant it;
-  until then, or for an invitation that is not in your calendar, it goes to the organizer as a
-  standard calendar reply by mail. Cancellations and other people's answers show as such.
+  **clashes** with something in your calendar, and **Accept / Maybe / Decline**. **Accept and
+  Maybe always end with the appointment in your Google Calendar**: if it is there already, your
+  answer is set on it and Google tells the organizer; if it is not (an invitation from Outlook,
+  say), the organizer gets the standard calendar reply by mail and the event is **imported**
+  into your calendar - same invitation ID, so a later update or cancellation finds it. Decline
+  only tells the organizer. Writing to the calendar needs one permission - the card says so
+  before you answer, with a button to Settings (**Connect & sign in** once more). Afterwards the
+  card says exactly what happened, with **📅 Open in Calendar**.
+  A **cancellation** offers **🗑 Remove from my calendar** (or says Google already did). **Someone
+  else's answer** - the "Accepted: ..." mail a guest's calendar sends to the organizer, which
+  you only see when you were copied - says so: "Bob accepted Ann's invitation · you were copied,
+  this is their answer, not an invitation to you", whether it is in your calendar, and if not
+  **✉ Ask Ann to invite me**. An answer to an invitation of YOURS reads "Answer to your invitation".
 - **Address suggestions** - start typing in To / Cc / Bcc and the people you mail pop up
   (by name, surname, address or domain); ↑↓ to choose, Enter or Tab to take one, Esc to close
   the list. ↓ in an empty field lists the people you write to most. The list is built from your
@@ -389,6 +424,10 @@ the list you were in before the search. The tab comes back on restart. An unread
   same pill also offers **Shorter · Friendlier · Formal · German · English · Fix grammar**. The
   answer replaces just the highlighted text and stays selected, so another one can follow;
   `Ctrl+Z` puts the old text back, and a failure changes nothing.
+- **✋ A [placeholder] left in** - the AI writes `[square brackets]` for a fact it does not have.
+  Send stops while one is still in your text (not the quoted mail, not the subject): the bar
+  names them, **Show it** selects the first so you can type over it, **Send anyway** overrides.
+  Markdown links, `[1]`, `[x]` and dates do not count.
 - **📎 "Attached", but nothing is** - Send checks your own words (not the quoted mail) and the
   subject for "attached", "enclosed", "see the file", "anbei", "im Anhang" and a few more; with no
   file attached it asks first: attach one, attach from a terminal, or **Send anyway** (undo send

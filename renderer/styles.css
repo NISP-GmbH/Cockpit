@@ -8172,3 +8172,241 @@ body.privacy #gmail-preview {
   color: var(--fg-dim);
   font-size: 11.5px;
 }
+
+/* which side the arrow keys work on: the list (default) or the open mail */
+.mail-pane.read-focus .mail-row.sel {
+  border-left-color: #6b5446;
+}
+.mail-pane.read-focus .mail-reader {
+  box-shadow: inset 3px 0 0 #ea8a5c;
+}
+
+/* the mail text size (Ctrl + wheel): the text parts zoom, the bars and the layout do not;
+   mail frames zoom their own document instead (see mailFrameZoom) */
+.mail-row,
+.mr-subject,
+.mm-head,
+.mm-snip,
+.mm-to,
+.mm-text,
+.mm-atts,
+.mm-invite,
+.mm-trans,
+.mm-imgbar {
+  zoom: var(--mail-zoom, 1);
+}
+/* an attachment chip on its way to a terminal */
+.mm-att[draggable='true'] {
+  cursor: grab;
+}
+body.att-dragging .tab.tab--ssh,
+body.att-dragging .tab.tab--local {
+  outline: 1px dashed #6aa7e8;
+  outline-offset: -3px;
+}
+.tab.att-drop-over,
+.term-pane.att-drop-over {
+  outline: 2px solid #6aa7e8 !important;
+  outline-offset: -3px;
+  background-color: rgba(106, 167, 232, 0.14);
+}
+
+/* the search chip: people added because Gmail matches whole words only */
+.mail-chip-note {
+  font-size: 10.5px;
+  opacity: 0.8;
+  border-left: 1px solid rgba(0, 0, 0, 0.35);
+  margin-left: 4px;
+  padding-left: 5px;
+  cursor: help;
+}
+
+/* a [placeholder] still in the text */
+.mc-phwarn {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  border-bottom: 1px solid var(--border);
+  background: #351d1d;
+  color: #ffc4b8;
+}
+.mc-phwarn span {
+  flex: 1;
+  min-width: 180px;
+}
+.mc-phwarn code {
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 4px;
+  padding: 0 4px;
+  color: #fff;
+}
+
+/* the mail font and weight (Aa): the text parts, not the bars */
+.mail-row,
+.mr-subject,
+.mm-head,
+.mm-snip,
+.mm-to,
+.mm-text,
+.mm-trans .mt-text,
+.mc-body,
+.mc-field input {
+  font-family: var(--mail-font, inherit);
+}
+.mail-row .mr-from,
+.mail-row .mr-subj,
+.mail-row .mr-snip,
+.mm-snip,
+.mm-text,
+.mm-trans .mt-text,
+.mc-body {
+  font-weight: var(--mail-weight, 400);
+}
+/* unread stays unread, whatever the weight */
+.mail-pane .mail-row.unread .mr-from,
+.mail-pane .mail-row.unread .mr-subj {
+  font-weight: 800;
+}
+.mail-fontbtn {
+  font-family: Georgia, serif;
+  font-weight: 600;
+}
+.mf-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 4px 2px;
+  min-width: 300px;
+}
+.mf-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.mf-row > span {
+  width: 108px;
+  flex: 0 0 auto;
+  color: var(--fg-dim);
+}
+.mf-row select {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font: inherit;
+}
+.mf-weights,
+.mf-size {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  align-items: center;
+}
+.mf-w {
+  padding: 2px 7px;
+}
+.mf-w.sel {
+  border-color: var(--accent);
+  color: #fff;
+}
+.mf-pct {
+  min-width: 46px;
+  text-align: center;
+}
+.mf-other.bad {
+  border-color: var(--danger);
+}
+.mf-sample {
+  padding: 8px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  font-size: 14px;
+  color: #fff;
+}
+
+/* the Mail tab's own background (Aa → Background): the app's variables are re-set on the
+   pane (mailApplyBg); these are the colours that were hard-coded for the dark default */
+.mail-pane.mail-bg {
+  color: var(--fg);
+}
+.mail-pane.mail-bg .mail-row {
+  border-bottom-color: var(--m-row-line);
+}
+.mail-pane.mail-bg .mail-row:hover {
+  background: var(--m-row-hover);
+}
+.mail-pane.mail-bg .mail-row.sel {
+  background: var(--m-row-sel);
+}
+.mail-pane.mail-bg .mail-row.open {
+  background: var(--m-row-open);
+}
+.mail-pane.mail-bg .mail-row.unread .mr-from,
+.mail-pane.mail-bg .mail-row.unread .mr-subj,
+.mail-pane.mail-bg .mr-subject,
+.mail-pane.mail-bg .mm-from,
+.mail-pane.mail-bg .mc-head,
+.mail-pane.mail-bg .mk-title,
+.mail-pane.mail-bg .mf-w.sel,
+.mail-pane.mail-bg .mf-sample {
+  color: var(--m-strong);
+}
+.mail-pane.mail-bg .mc-field {
+  border-bottom-color: var(--border);
+}
+.mail-pane.mail-bg .mail-toast {
+  background: var(--bg-tab);
+  color: var(--fg);
+}
+.mail-pane.mail-bg .mp-item:hover,
+.mail-pane.mail-bg .mp-item.sel {
+  background: var(--m-row-sel);
+}
+.mail-pane.mail-light .mr-qr-n {
+  background: var(--bg-tab);
+  color: #a24d1d;
+}
+.mail-pane.mail-light .mail-row.unread .mr-date,
+.mail-pane.mail-light .mk-row kbd,
+.mail-pane.mail-light .mp-key {
+  color: #c25a1e;
+}
+/* the swatches */
+.mf-bgs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+}
+.mf-bg {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  cursor: pointer;
+  padding: 0;
+  position: relative;
+  overflow: hidden;
+}
+.mf-bg.sel {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--bg-alt), 0 0 0 3px var(--accent);
+}
+.mf-bgpick {
+  background: conic-gradient(#e66, #ec6, #6e6, #6ce, #66e, #e6e, #e66);
+}
+.mf-bgpick input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+  height: 100%;
+}

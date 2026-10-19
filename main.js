@@ -1271,6 +1271,8 @@ app.whenReady().then(() => {
   );
   ipcMain.handle('mail:inviteInfo', mailCall((o) => googleMgr.inviteInfo(o)));
   ipcMain.handle('mail:inviteRespond', mailCall((o) => googleMgr.inviteRespond(o)));
+  ipcMain.handle('mail:inviteImport', mailCall((o) => googleMgr.inviteImport(o)));
+  ipcMain.handle('mail:inviteRemove', mailCall((o) => googleMgr.inviteRemove(o)));
   // Where a tracking link really goes - followed hop by hop, public hosts only, never opened.
   ipcMain.handle('mail:resolveUrl', async (_e, { url }) => {
     try {

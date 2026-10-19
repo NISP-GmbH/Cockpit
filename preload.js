@@ -197,6 +197,8 @@ contextBridge.exposeInMainWorld('sshApi', {
   mailResolveUrl: (url) => ipcRenderer.invoke('mail:resolveUrl', { url }),
   mailInviteInfo: (o) => ipcRenderer.invoke('mail:inviteInfo', o),
   mailInviteRespond: (o) => ipcRenderer.invoke('mail:inviteRespond', o),
+  mailInviteImport: (o) => ipcRenderer.invoke('mail:inviteImport', o), // an outside invitation into your calendar
+  mailInviteRemove: (o) => ipcRenderer.invoke('mail:inviteRemove', o), // a cancelled one out of it
   // agent replies: config is write-only from here (getConfig says what is SET, never the key)
   agentGetConfig: () => ipcRenderer.invoke('agent:getConfig'),
   agentSetConfig: (o) => ipcRenderer.invoke('agent:setConfig', o),

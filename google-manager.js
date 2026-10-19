@@ -1133,6 +1133,67 @@ class GoogleManager {
     return { done: true, response };
   }
 
+  /**
+   * Put an invitation that is NOT in the calendar yet into it - Google's import call, made for
+   * invitations from other calendar systems: same iCalUID (so a later update or cancellation
+   * finds it), the organizer, the guests, and your answer. Google tells nobody about an import;
+   * the organizer gets your answer by mail (the renderer sends that).
+   */
+  async inviteImport(o = {}) {
+    const uid = String(o.uid || '');
+    if (!uid || uid.length > 1024) throw new Error('the invitation has no ID to import it by');
+    if (!['accepted', 'tentative'].includes(o.response)) throw new Error('only an accepted or tentative invitation goes into the calendar');
+    const start = Number(o.start);
+    const end = Number(o.end) > start ? Number(o.end) : start + 3600000;
+    if (!Number.isFinite(start)) throw new Error('the invitation has no start time');
+    const pad = (n) => String(n).padStart(2, '0');
+    const day = (ms) => {
+      const d = new Date(ms);
+      return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+    };
+    const when = (ms) => (o.allDay ? { date: day(ms) } : { dateTime: new Date(ms).toISOString() });
+    const me = String(this.email || '').toLowerCase();
+    const STATUS = { ACCEPTED: 'accepted', TENTATIVE: 'tentative', DECLINED: 'declined' };
+    const valid = (e) => /^[^\s@<>"]+@[^\s@<>"]+$/.test(String(e || ''));
+    const people = (Array.isArray(o.attendees) ? o.attendees : [])
+      .filter((a) => a && valid(a.email))
+      .slice(0, 200)
+      .map((a) => {
+        const mine = String(a.email).toLowerCase() === me;
+        return {
+          email: a.email,
+          ...(a.name ? { displayName: String(a.name).slice(0, 200) } : {}),
+          responseStatus: mine ? o.response : STATUS[String(a.partstat || '').toUpperCase()] || 'needsAction',
+        };
+      });
+    if (me && !people.some((a) => a.email.toLowerCase() === me)) people.push({ email: me, responseStatus: o.response });
+    const requestBody = {
+      iCalUID: uid,
+      summary: String(o.summary || '(no title)').slice(0, 1000),
+      ...(o.location ? { location: String(o.location).slice(0, 1000) } : {}),
+      start: when(start),
+      end: when(end),
+      status: 'confirmed',
+      attendees: people,
+      ...(o.organizer && valid(o.organizer.email) ? { organizer: { email: o.organizer.email, ...(o.organizer.name ? { displayName: String(o.organizer.name).slice(0, 200) } : {}) } } : {}),
+      ...(Number.isInteger(o.sequence) && o.sequence >= 0 ? { sequence: o.sequence } : {}),
+      ...(o.rrule && /^[A-Z0-9=;,:+-]{1,500}$/i.test(o.rrule) ? { recurrence: ['RRULE:' + o.rrule] } : {}),
+    };
+    const res = await this._cal().events.import({ calendarId: 'primary', requestBody });
+    return { done: true, eventId: res.data.id, htmlLink: res.data.htmlLink || '' };
+  }
+  /** A cancelled invitation out of the calendar (Google tells nobody - it is already off). */
+  async inviteRemove({ eventId } = {}) {
+    if (!eventId || !/^[\w-]{1,1024}$/.test(String(eventId))) throw new Error('no event to remove');
+    try {
+      await this._cal().events.delete({ calendarId: 'primary', eventId: String(eventId), sendUpdates: 'none' });
+    } catch (err) {
+      const code = err && (err.code || err.status);
+      if (code !== 404 && code !== 410) throw err; // gone already: that is what was asked for
+    }
+    return { done: true };
+  }
+
   /** The thread a message belongs to (Black Box events only remember the message). */
   async threadIdOf(messageId) {
     const res = await this._gmail().users.messages.get({ userId: 'me', id: messageId, format: 'minimal' });

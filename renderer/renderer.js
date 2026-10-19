@@ -11428,6 +11428,9 @@ const MAIL_GO = { i: 'INBOX', u: 'UNREAD', s: 'STARRED', t: 'SENT', a: 'ALL', d:
 const MAIL_GO_MS = 1500;
 const MAIL_KEY_HELP = [
   ['j / k', 'next / previous conversation'],
+  ['↑ / ↓', 'move in the list - in an open mail (after →): scroll it'],
+  ['→ / ←', 'into the mail / back to the list'],
+  ['PgUp / PgDn', 'a page (in the list: 10 rows)'],
   ['Enter / o', 'open'],
   ['Esc', 'back to the list'],
   ['e', 'archive'],
@@ -11454,6 +11457,7 @@ const MAIL_KEY_HELP = [
   ['/', 'search'],
   ['z', 'undo'],
   ['t', 'reading: as sent / white on black / green on black'],
+  ['Ctrl + wheel / Ctrl + - 0', 'text size (Ctrl+0 resets)'],
   ['Ctrl+Enter', 'send (while writing)'],
   ['?', 'this list'],
 ];
@@ -11508,6 +11512,7 @@ function createMailTab(opts) {
     '<span class="mail-spacer"></span>' +
     '<button class="mail-btn" data-act="refresh" title="Refresh">⟳</button>' +
     '<button class="mail-btn" data-act="snippets" title="Snippets and quick replies">✂</button>' +
+    '<button class="mail-btn mail-fontbtn" data-act="font" title="Mail text: font, weight and size">Aa</button>' +
     '<button class="mail-btn mail-primary" data-act="compose" title="Compose (c)">✏ Compose</button>' +
     '<button class="mail-btn" data-act="help" title="Keyboard shortcuts (?)">?</button>' +
     '</div>' +
@@ -11573,7 +11578,27 @@ function mailReset() {
 function mailWire(rec) {
   const p = rec.paneEl;
   p.addEventListener('keydown', mailKeydown);
+  p.style.setProperty('--mail-zoom', String(mailZoom));
+  if (mailFont) p.style.setProperty('--mail-font', mailFontStack(mailFont));
+  p.style.setProperty('--mail-weight', String(mailFontWeight));
+  {
+    const pal = mailBgPalette(mailBg);
+    if (pal) {
+      p.classList.add('mail-bg');
+      p.classList.toggle('mail-light', pal.light);
+      for (const [k, v] of Object.entries(pal.vars)) p.style.setProperty(k, v);
+    }
+  }
   mailWireDrop(p);
+  p.addEventListener('wheel', mailZoomWheel, { passive: false, capture: true });
+  p.addEventListener(
+    'mousedown',
+    (e) => {
+      if (e.target.closest('.mail-reader')) mailSetReadFocus(true, true);
+      else if (e.target.closest('.mail-list')) mailSetReadFocus(false, true);
+    },
+    true
+  );
   const search = p.querySelector('.mail-search');
   search.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
@@ -11711,6 +11736,48 @@ function mailWireSplit(rec) {
     api.saveSettings({ mailListW: null });
   });
 }
+// The arrow keys work on one side at a time: the list (↑/↓ move, → opens) or the open mail
+// (↑/↓ and PgUp/PgDn scroll it, ← goes back to the list). A click on either side picks it.
+function mailSetReadFocus(on, quiet) {
+  mbox.readFocus = !!on && !!mbox.openId;
+  const rec = mailRec();
+  if (rec) rec.paneEl.classList.toggle('read-focus', mbox.readFocus);
+  if (!quiet && !mbox.readFocus) mailFocus(); // out of a mail frame, back onto the pane
+}
+function mailReaderScroll(dy) {
+  const r = mailEl('.mail-reader');
+  if (r) r.scrollBy({ top: dy });
+}
+function mailArrowKey(e) {
+  if (e.shiftKey) return false;
+  const k = e.key;
+  if (!/^(Arrow(Up|Down|Left|Right)|Page(Up|Down))$/.test(k)) return false;
+  const t = e.target;
+  const inFrame = !!(t && t.ownerDocument && t.ownerDocument !== document);
+  const reading = !!mbox.openId && (mbox.readFocus || inFrame);
+  const reader = mailEl('.mail-reader');
+  const page = Math.max(120, ((reader && reader.clientHeight) || 600) - 80);
+  if (k === 'ArrowDown' || k === 'ArrowUp') {
+    if (reading) mailReaderScroll(k === 'ArrowDown' ? 70 : -70);
+    else mailMove(k === 'ArrowDown' ? 1 : -1);
+  } else if (k === 'PageDown' || k === 'PageUp') {
+    if (reading) mailReaderScroll(k === 'PageDown' ? page : -page);
+    else mailMove(k === 'PageDown' ? 10 : -10);
+  } else if (k === 'ArrowRight') {
+    const sel = mbox.threads[mbox.sel];
+    if (sel && sel.id !== mbox.openId) mailOpenThread(sel.id);
+    if (sel || mbox.openId) {
+      mbox.openId = mbox.openId || (sel && sel.id);
+      mailSetReadFocus(true, true);
+    }
+  } else if (k === 'ArrowLeft') {
+    if (!reading) return false; // already in the list
+    mailSetReadFocus(false);
+  }
+  e.preventDefault();
+  e.stopPropagation();
+  return true;
+}
 function mailFocus() {
   const rec = mailRec();
   if (!rec || rec.id !== activeTabId) return;
@@ -11735,7 +11802,7 @@ function mailCategoryQuery(cats) {
   return terms.length === 1 ? terms[0] : '{' + terms.join(' ') + '}';
 }
 function mailViewQuery() {
-  if (mbox.view === 'SEARCH') return { q: mbox.q, labelIds: [] };
+  if (mbox.view === 'SEARCH') return { q: mbox.qx || mbox.q, labelIds: [] };
   const v = MAIL_VIEWS.find((x) => x.key === mbox.view);
   if (v) {
     // Categories only mean something inside the inbox; Starred, Sent and the rest are whole.
@@ -11783,6 +11850,8 @@ function mailSetView(view) {
   mbox.view = view;
   if (view !== 'SEARCH') {
     mbox.q = '';
+    mbox.qx = '';
+    mbox.qPeople = [];
     const s = mailEl('.mail-search');
     if (s) s.value = '';
   }
@@ -11799,11 +11868,40 @@ function mailSetView(view) {
 }
 // A search replaces the list; emptying the box (deleting the text, its ✕, the chip's ✕)
 // puts back the list you were in before - Inbox, Starred, a label - not always the Inbox.
-function mailSearch(q) {
+// Gmail's search matches whole words: "taylor" finds "Nick Taylor" but not ntaylor@ or
+// "Taylorson". So for ONE plain word, the people in your address book whose name or address
+// CONTAINS it are added to the search ({a b c} is Gmail's OR), and a fragment finds their
+// mail. Letters only - no nickname table: "nick" does not find "Nicholas" (there is no "nick"
+// in it), by the user's choice. Anything with a space, an operator or quotes goes as typed.
+const MAIL_SEARCH_PEOPLE = 8;
+function mailSearchExpand(q) {
+  const w = String(q || '').trim();
+  if (w.length < 3 || /[\s:"(){}@*]/.test(w) || w.startsWith('-')) return { q: w, people: [] };
+  const lw = w.toLowerCase();
+  const now = Date.now();
+  const hits = mailBook
+    .filter((c) => String(c.email || '').toLowerCase().includes(lw) || String(c.name || '').toLowerCase().includes(lw))
+    .sort((a, b) => mailContactWeight(b, now) - mailContactWeight(a, now))
+    .slice(0, MAIL_SEARCH_PEOPLE);
+  const terms = [w];
+  const people = [];
+  for (const c of hits) {
+    const e = String(c.email || '').replace(/[^\w.@+-]/g, ''); // an address, and nothing that could be an operator
+    if (!/^[^@]+@[^@]+$/.test(e)) continue;
+    terms.push('from:' + e, 'to:' + e, 'cc:' + e);
+    people.push(c.name ? c.name + ' <' + e + '>' : e);
+  }
+  return people.length ? { q: '{' + terms.join(' ') + '}', people } : { q: w, people: [] };
+}
+async function mailSearch(q) {
   q = String(q || '').trim();
   if (!q) return mailEndSearch();
   if (mbox.view !== 'SEARCH') mbox.preSearchView = mbox.view;
-  mbox.q = q;
+  if (!mailBook.length) await mailLoadContacts(); // cached in the main process: quick
+  const x = mailSearchExpand(q);
+  mbox.q = q; // what you typed - the box and the chip show this
+  mbox.qx = x.q; // what Gmail is asked
+  mbox.qPeople = x.people;
   mailSetView('SEARCH');
 }
 function mailEndSearch() {
@@ -11821,7 +11919,13 @@ function mailRenderViews() {
   const lab = !MAIL_VIEWS.some((v) => v.key === mbox.view) && mbox.labels.find((l) => l.id === mbox.view);
   if (lab) html += `<button class="mail-chip sel" data-view="${escapeHtml(lab.id)}">🏷 ${escapeHtml(lab.name)}</button>`;
   if (mbox.view === 'SEARCH') {
-    html += `<span class="mail-chip sel">🔍 ${escapeHtml(mbox.q)} <button class="mail-x" data-act="clear-search" title="Clear search">✕</button></span>`;
+    const ppl = mbox.qPeople || [];
+    html +=
+      `<span class="mail-chip sel">🔍 ${escapeHtml(mbox.q)}` +
+      (ppl.length
+        ? ` <span class="mail-chip-note" title="Gmail only finds whole words, so mail from or to these people (the word is part of their name or address) is included too:&#10;${escapeHtml(ppl.join('\n'))}">+${ppl.length} ${ppl.length === 1 ? 'person' : 'people'}</span>`
+        : '') +
+      ' <button class="mail-x" data-act="clear-search" title="Clear search">✕</button></span>';
   }
   box.innerHTML = html;
   mailRenderCats();
@@ -11918,13 +12022,18 @@ async function mailLoad(more, silent) {
 // append: a next page. replace: a fresh view. merge: a background refresh of page one -
 // update what is there, add what is new, and keep the pages the user already loaded,
 // newest first, so a refresh never throws away "Load more".
+// Every mode ends newest first, by the date each row SHOWS (its newest message). Gmail's own
+// order is close to that but not the same - a search above all - and rows out of order by
+// their own dates made a recent mail impossible to find by eye. The sort is stable, so rows
+// of the same instant keep the order they came in.
 function mailMergeThreads(have, got, how) {
-  if (how === 'replace') return got.slice();
-  if (how === 'append') return have.concat(got.filter((t) => !have.some((x) => x.id === t.id)));
+  const newest = (list) => list.sort((a, b) => (b.date || 0) - (a.date || 0));
+  if (how === 'replace') return newest(got.slice());
+  if (how === 'append') return newest(have.concat(got.filter((t) => !have.some((x) => x.id === t.id))));
   const byId = new Map(got.map((t) => [t.id, t]));
   const kept = have.map((t) => byId.get(t.id) || t);
   const fresh = got.filter((t) => !have.some((x) => x.id === t.id));
-  return fresh.concat(kept).sort((a, b) => (b.date || 0) - (a.date || 0));
+  return newest(fresh.concat(kept));
 }
 function mailDate(ms) {
   if (!ms) return '';
@@ -11990,6 +12099,7 @@ function mailRenderList() {
 function mailCloseReader(focus) {
   mbox.openId = null;
   mbox.thread = null;
+  mailSetReadFocus(false, true);
   const r = mailEl('.mail-reader');
   if (r) r.innerHTML = '<div class="mail-empty">Pick a conversation<br /><span>j / k to move, Enter to open, ? for keys</span></div>';
   mailRenderList();
@@ -12003,6 +12113,7 @@ async function mailOpenThread(id) {
   mailRenderList();
   const reader = mailEl('.mail-reader');
   reader.innerHTML = '<div class="mail-empty">Loading…</div>';
+  delete reader.dataset.shown; // what comes next is a fresh open: it goes to the mail that matters
   const res = await api.mailGetThread(id);
   if (mbox.openId !== id) return; // moved on while it loaded
   if (!res || !res.ok) {
@@ -12029,6 +12140,9 @@ function mailRenderThread() {
   if (!t || !reader) return;
   const subj = (t.messages[0] && t.messages[0].subject) || '(no subject)';
   const starred = mailThreadHas(t.id, 'STARRED');
+  // the same thread drawn again (a reading mode, the ⚡ toggle, a label): stay where you were
+  const redraw = reader.dataset.shown === t.id;
+  const keepTop = reader.scrollTop;
   reader.innerHTML =
     '<div class="mr-bar">' +
     '<button class="mail-btn" data-act="back" title="Back to the list (Esc)">←</button>' +
@@ -12065,8 +12179,42 @@ function mailRenderThread() {
   const last = t.messages.length - 1;
   t.messages.forEach((m, i) => box.appendChild(mailMessageEl(m, i === last || (m.labelIds || []).includes('UNREAD'))));
   reader.insertAdjacentHTML('beforeend', mailQuickRowHtml());
-  reader.scrollTop = 0;
+  reader.dataset.shown = t.id;
+  if (redraw) reader.scrollTop = keepTop;
+  else mailScrollToCurrent(reader, box, t);
   agentPaintReader();
+}
+// A long thread opens at the mail that matters - the first unread one, else the newest (a
+// draft at the end does not count) - not at the top of the older ones folded above it. Short
+// threads stay at the top, subject and all. Mail frames above the target that grow as they load
+// are no problem: Chromium's scroll anchoring keeps the target where it was put.
+function mailScrollToCurrent(reader, box, t) {
+  reader.scrollTop = 0;
+  const msgs = t.messages || [];
+  if (msgs.length < 2) return;
+  let k = msgs.findIndex((m) => (m.labelIds || []).includes('UNREAD'));
+  if (k === -1) {
+    k = msgs.length - 1;
+    while (k > 0 && (msgs[k].labelIds || []).includes('DRAFT')) k--;
+  }
+  const el = box.children[k];
+  if (!el) return;
+  // Now, not on the next frame: reading the position lays the page out on the spot, and a
+  // frame callback is not guaranteed to come soon (a window that is not painting skips it).
+  const at = el.getBoundingClientRect().top - reader.getBoundingClientRect().top;
+  if (at < reader.clientHeight * 0.5) return; // already in view
+  mailScrollMsgTo(reader, el);
+}
+// Put a message straight below the sticky bar (and the agent strip, when there is one).
+// Computed, not scrollIntoView: with the sticky bar in the same scroller, scrollIntoView left
+// the message UNDER the bar and called that done - scroll-margin or not.
+function mailScrollMsgTo(reader, el) {
+  const rTop = reader.getBoundingClientRect().top;
+  const covers = ['.mr-bar', '.mr-agent'].reduce((y, s) => {
+    const x = reader.querySelector(s);
+    return x ? Math.max(y, x.getBoundingClientRect().bottom - rTop) : y;
+  }, 0);
+  reader.scrollTop += el.getBoundingClientRect().top - rTop - covers - 8;
 }
 function mailAddr(s) {
   const m = /<([^>]+)>/.exec(String(s || ''));
@@ -12300,6 +12448,7 @@ function mailSrcdoc(clean) {
     '<style>html,body{margin:0}body{padding:12px 14px;font:14px/1.45 "Segoe UI",system-ui,sans-serif;' +
     'color:#202124;background:#fff;overflow-wrap:anywhere}img{max-width:100%;height:auto}a{color:#1a5fb4}' +
     'blockquote{margin:0 0 0 .5em;padding-left:.8em;border-left:3px solid #ddd;color:#555}pre{white-space:pre-wrap}</style>' +
+    (mailFontCss() ? '<style id="' + MAIL_FONT_ID + '">' + mailFontCss() + '</style>' : '') +
     (mailReadCss(mailReadMode) ? '<style id="' + MAIL_DARK_ID + '" data-mode="' + mailReadMode + '">' + mailReadCss(mailReadMode) + '</style>' : '') +
     '</head><body' + clean.bodyAttrs + '>' + clean.html + '</body></html>'
   );
@@ -12311,6 +12460,8 @@ function mailFrameReady(ifr, m) {
   const fit = () => {
     ifr.style.height = Math.min(40000, doc.documentElement.scrollHeight + 2) + 'px';
   };
+  ifr._fit = fit; // the zoom re-fits it
+  if (mailZoom !== 1) doc.documentElement.style.zoom = String(mailZoom);
   fit();
   setTimeout(fit, 250);
   doc.querySelectorAll('img').forEach((i) => i.addEventListener('load', fit));
@@ -12327,6 +12478,8 @@ function mailFrameReady(ifr, m) {
   // Keys typed while the mail itself has focus still drive the tab.
   doc.addEventListener('keydown', mailKeydown);
   mailWireDrop(doc);
+  doc.addEventListener('wheel', mailZoomWheel, { passive: false }); // Ctrl + wheel over a mail
+  doc.addEventListener('mousedown', () => mailSetReadFocus(true, true)); // a click inside a mail
   // Hovering a link shows where it really goes.
   doc.addEventListener('mouseover', (e) => {
     const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
@@ -12705,6 +12858,93 @@ function mailSafeName(name) {
     .trim();
   return !n || n === '.' || n === '..' ? 'attachment' : n;
 }
+// ---- drag a mail attachment onto a terminal, or into the message being written ----
+// A chip is draggable. Dropped on a terminal TAB or PANE it is uploaded through that shell
+// (in-band, so any ssh depth), into the shell's own folder - under a free name, never over
+// a file that is already there. Dropped on compose it is attached. The chip carries its own
+// type, so the tab strip's reorder drag and file drops from outside never mistake it.
+let cockpitDrag = null; // { kind: 'mail-att', m, a } while a chip is dragged
+const ATT_DRAG_TYPE = 'application/x-cockpit-att';
+function dragIsAtt(e) {
+  const t = e.dataTransfer && e.dataTransfer.types;
+  return !!cockpitDrag && !!t && Array.from(t).includes(ATT_DRAG_TYPE);
+}
+function termRecAt(e) {
+  const el = e.target && e.target.closest ? e.target.closest('.tab[data-id], .term-pane[data-id]') : null;
+  const rec = el && tabs.get(el.dataset.id);
+  return rec && (rec.kind === 'ssh' || rec.kind === 'local') && rec.term ? { rec, el } : null;
+}
+function attDropMark(el) {
+  document.querySelectorAll('.att-drop-over').forEach((x) => x !== el && x.classList.remove('att-drop-over'));
+  if (el) el.classList.add('att-drop-over');
+}
+// The first free name in the shell's folder: "report.pdf", else "report (1).pdf", ... - one
+// in-band question. null when the shell does not answer (not a Unix shell, or busy).
+async function shellFreeName(rec, name, timeoutMs) {
+  const dot = name.lastIndexOf('.');
+  const base = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : '';
+  const alts = [name];
+  for (let i = 1; i <= 20; i++) alts.push(base + ' (' + i + ')' + ext);
+  const probe = 'for f in ' + alts.map(shQuote).join(' ') + '; do [ -e "$f" ] || { printf "%s" "$f"; break; }; done';
+  const got = await inBandAsk(rec, probe, timeoutMs || 6000);
+  return got === null ? null : String(got).replace(/\r|\n/g, '');
+}
+async function mailSendAttToTerm(rec, m, a) {
+  const where = (rec.tabEl && rec.tabEl.querySelector('.title') && rec.tabEl.querySelector('.title').textContent) || 'the terminal';
+  if (a.size > SEND_MAX_BYTES) {
+    return mailToast(a.filename + ' is ' + fmtBytes(a.size) + ' - too big to type through a terminal (' + fmtBytes(SEND_MAX_BYTES) + '). Use 💾 Save.', 'err');
+  }
+  if (rec._grab || rec._send) return mailToast(where + ' is busy with another transfer - try again in a moment.', 'err');
+  mailToast('📤 Sending ' + a.filename + ' to ' + where + ' …');
+  const b64 = await mailAttB64(m, a);
+  if (!b64) return mailToast('Could not fetch ' + a.filename, 'err');
+  const size = mailB64Size(b64);
+  const want = mailSafeName(a.filename);
+  let name = want;
+  if (inBandBusy(rec)) await new Promise((r) => whenInBandFree(rec, r, r));
+  const free = await shellFreeName(rec, want);
+  if (free === null) return mailToast('No answer from ' + where + ' - it needs a Unix shell at a prompt (not PowerShell, not inside vim or less).', 'err');
+  if (!free) return mailToast(want + ' and 20 numbered copies are all taken in that folder - not sent.', 'err');
+  name = free;
+  const ok = await sendB64InBand(rec, { name, size, b64 });
+  const cwd = rec.where && rec.where.cwd ? ' (' + rec.where.cwd + ')' : '';
+  if (ok) mailToast('📤 ' + name + ' (' + fmtBytes(size) + ') is in ' + where + cwd + (name !== want ? ' - ' + want + ' was taken' : ''));
+  else mailToast('Could not send ' + want + ' to ' + where + ' - the terminal says why.', 'err');
+}
+document.addEventListener(
+  'dragover',
+  (e) => {
+    if (!dragIsAtt(e)) return;
+    const hit = termRecAt(e);
+    attDropMark(hit && hit.el);
+    if (!hit) {
+      // Not a terminal: say "no" - the tab strip's reorder code accepts every drag, and would
+      // show a move cursor over the Mail tab. Compose (mailWireDrop, later) sets copy again.
+      if (e.target && e.target.closest && e.target.closest('#tabs')) e.dataTransfer.dropEffect = 'none';
+      return;
+    }
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  },
+  true
+);
+document.addEventListener(
+  'drop',
+  (e) => {
+    if (!dragIsAtt(e)) return;
+    const hit = termRecAt(e);
+    if (!hit) return;
+    e.preventDefault();
+    e.stopPropagation(); // before the terminal's own drop (that one uploads OS files over SFTP)
+    const { m, a } = cockpitDrag;
+    cockpitDrag = null;
+    attDropMark(null);
+    document.body.classList.remove('att-dragging');
+    mailSendAttToTerm(hit.rec, m, a);
+  },
+  true
+);
 function mailAttachmentsEl(m) {
   const files = (m.attachments || []).filter((a) => !a.inline);
   if (!files.length) return null;
@@ -12730,6 +12970,19 @@ function mailAttachmentsEl(m) {
     chip.addEventListener('click', (e) => {
       const b = e.target.closest('button[data-act]');
       if (b) mailAttAction(b.dataset.act, m, a, b);
+    });
+    chip.draggable = true;
+    chip.title = 'Drag onto a terminal tab to upload it there (any ssh depth), or into the message you are writing';
+    chip.addEventListener('dragstart', (e) => {
+      cockpitDrag = { kind: 'mail-att', m, a };
+      e.dataTransfer.setData(ATT_DRAG_TYPE, a.filename);
+      e.dataTransfer.effectAllowed = 'copy';
+      document.body.classList.add('att-dragging'); // terminal tabs light up as places to drop
+    });
+    chip.addEventListener('dragend', () => {
+      cockpitDrag = null;
+      attDropMark(null);
+      document.body.classList.remove('att-dragging');
     });
     wrap.appendChild(chip);
   }
@@ -13063,6 +13316,10 @@ function mailKeydown(e) {
       e.preventDefault();
       e.stopPropagation();
       mailDo('unread');
+    } else if ((e.ctrlKey || e.metaKey) && !e.altKey && ['+', '=', '-', '0'].includes(e.key)) {
+      e.preventDefault(); // the mail text size, as Ctrl + / - / 0 do for a terminal's font
+      e.stopPropagation();
+      mailSetZoom(e.key === '0' ? 1 : mailZoom + (e.key === '-' ? -0.1 : 0.1), true);
     }
     return;
   }
@@ -13083,6 +13340,7 @@ function mailKeydown(e) {
     mbox.goAt = Date.now();
     return;
   }
+  if (mailArrowKey(e)) return;
   if (/^[1-9]$/.test(e.key) && mbox.openId) {
     e.preventDefault();
     e.stopPropagation();
@@ -13130,7 +13388,8 @@ function mailMsgMove(d) {
   const el = all[Math.max(0, Math.min(all.length - 1, i + d))];
   all.forEach((x) => x.classList.toggle('cur', x === el));
   if (!el.classList.contains('open')) el.querySelector('.mm-head').click();
-  el.scrollIntoView({ block: 'start' });
+  const reader = mailEl('.mail-reader');
+  if (reader) mailScrollMsgTo(reader, el);
 }
 function mailExpandAll(open) {
   const box = mailEl('.mr-msgs');
@@ -13182,7 +13441,10 @@ async function mailDo(act) {
       return mailMove(-1);
     case 'open': {
       const t = mbox.threads[mbox.sel];
-      if (t) mailOpenThread(t.id);
+      if (t) {
+        mailOpenThread(t.id);
+        mailSetReadFocus(true, true);
+      }
       return;
     }
     case 'back':
@@ -13228,6 +13490,8 @@ async function mailDo(act) {
       return;
     case 'compose':
       return mailCompose({});
+    case 'font':
+      return mailFontPanel(mailEl('.mail-fontbtn'));
     case 'snippets':
       return mailSnippetManager();
     case 'dark':
@@ -14006,6 +14270,57 @@ async function aiRewriteSel(src, how) {
   mailSelCheck(rect.left + 24, rect.top + 10, out, d.to, { ta, start, end: start + out.length }); // chain another one
 }
 
+// ---- a [placeholder] left in the text ----
+// The fast reply (and the agent) write [square brackets] for a fact they do not have. One of
+// those must not go out. Only YOUR part of the body counts - not the quoted mail, and not the
+// subject, where "[EXTERNAL]" and "[Ticket #12]" tags are normal. A placeholder has a letter
+// and is at least three characters: "[1]", "[x]" and "[ ]" are not, nor is a Markdown link.
+const MAIL_PLACEHOLDER = /\[(?=[^\]\n]*\p{L})[^\[\]\n]{3,80}\](?!\()/gu;
+function mailPlaceholders(d) {
+  const own = mailOwnText(d.body);
+  return [...new Set(own.match(MAIL_PLACEHOLDER) || [])];
+}
+function mailPlaceholderWarn(d, found) {
+  const box = mailEl('.mail-compose');
+  if (!box || mbox.draft !== d) return;
+  let bar = box.querySelector('.mc-phwarn');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.className = 'mc-phwarn';
+    box.querySelector('.mc-head').after(bar);
+    bar.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-pw]');
+      if (!b || mbox.draft !== d) return;
+      if (b.dataset.pw === 'send') {
+        d.skipPlaceholderCheck = true; // asked and answered, for this message
+        bar.remove();
+        mailSend();
+      } else if (b.dataset.pw === 'show') {
+        const ta = box.querySelector('.mc-body');
+        const first = mailPlaceholders(d)[0];
+        const at = first ? ta.value.indexOf(first) : -1;
+        if (at === -1) return bar.remove();
+        ta.focus();
+        ta.setSelectionRange(at, at + first.length); // selected: just type over it
+      }
+    });
+  }
+  const shown = found.slice(0, 3).map((p) => '<code>' + escapeHtml(p) + '</code>').join(' ');
+  bar.innerHTML =
+    '<span>✋ Still to fill in: ' + shown + (found.length > 3 ? ' and ' + (found.length - 3) + ' more' : '') + '</span>' +
+    '<button class="mail-btn" data-pw="show">Show it</button>' +
+    '<button class="mail-btn" data-pw="send">Send anyway</button>';
+  mailComposeStatus('');
+}
+// typing the placeholder away takes the reminder with it
+function mailPlaceholderSync(d) {
+  const bar = mailEl('.mail-compose .mc-phwarn');
+  if (!bar || mbox.draft !== d) return;
+  const found = mailPlaceholders(d);
+  if (!found.length) bar.remove();
+  else mailPlaceholderWarn(d, found);
+}
+
 // ---- 2. "attached" but nothing attached ----
 // Only YOUR words count (the quote below is someone else's), and the subject.
 const MAIL_ATTACH_WORDS =
@@ -14151,6 +14466,20 @@ function aiTermKey(e, id) {
   }
   return false;
 }
+// Typing into the shell waits for an opportunistic in-band probe (where-am-I, the size
+// resync): while one waits for its answer it swallows what the terminal echoes, so the command
+// would sit at the prompt unseen. They cap at 4 s; a real transfer (6 s and still busy) wins,
+// and then nothing is typed - onBusy says so.
+function aiTypeWhenFree(rec, data, onTyped, onBusy) {
+  whenInBandFree(
+    rec,
+    () => {
+      termSend(rec, data);
+      if (onTyped) onTyped();
+    },
+    () => onBusy && onBusy()
+  );
+}
 // The popover in a terminal pane: one at a time, Esc or ✕ closes it.
 function aiTermPop(rec, title, keepFocus) {
   rec.paneEl.querySelector('.ai-pop')?.remove();
@@ -14184,8 +14513,18 @@ function aiTermPop(rec, title, keepFocus) {
     } else if (b.dataset.ap === 'type') {
       // typed, never sent: no newline, so nothing runs until YOU press Enter
       if (rec.term.buffer.active.type !== 'normal') return;
-      termSend(rec, pop._command || '');
-      close();
+      b.disabled = true;
+      aiTypeWhenFree(
+        rec,
+        pop._command || '',
+        () => close(),
+        () => {
+          b.disabled = false;
+          const note = pop.querySelector('.ap-note') || pop.querySelector('.ap-acts').appendChild(document.createElement('span'));
+          note.className = 'ap-note';
+          note.textContent = 'The terminal is busy with a transfer - copy it instead.';
+        }
+      );
     }
   });
   if (!keepFocus) pop.focus();
@@ -14252,19 +14591,35 @@ async function aiCommandFromLine(rec, request) {
     txt.textContent = cmd ? cmd.replace(/^#\s*/, 'Not in one safe line: ') : 'The model sent no command back.';
     return;
   }
-  // Only replace the line if it still is the request we read - if you typed on, it waits.
-  const still = AI_CMD_REQ.exec(aiCursorLine(rec.term));
-  if (r.multi || !still || still[1] !== request || rec.term.buffer.active.type !== 'normal') {
-    txt.textContent = r.multi ? 'That needs more than one line:' : 'The line changed meanwhile - here it is:';
+  if (r.multi) {
+    txt.textContent = 'That needs more than one line:';
     return aiPopCommand(pop, rec, cmd);
   }
-  // clear what is typed (PowerShell: Esc; readline shells: Ctrl+U), then type the command
-  const clear = rec.kind === 'local' && /^Win/.test(String(navigator.platform || '')) ? '\x1b' : '\x15';
-  termSend(rec, clear + cmd);
-  focusTerm(rec);
-  txt.textContent = 'Typed at the prompt - check it, then press Enter to run it.';
   pop._command = cmd;
-  setTimeout(() => pop.isConnected && !pop.matches(':hover') && pop._close(), 4000);
+  // Only replace the line if it still is the request we read - checked at the moment of
+  // typing, after any probe has finished. If you typed on meanwhile, it is shown instead.
+  const clear = rec.kind === 'local' && /^Win/.test(String(navigator.platform || '')) ? '\x1b' : '\x15';
+  whenInBandFree(
+    rec,
+    () => {
+      if (!pop.isConnected) return;
+      const still = AI_CMD_REQ.exec(aiCursorLine(rec.term));
+      if (!still || still[1] !== request || rec.term.buffer.active.type !== 'normal') {
+        txt.textContent = 'The line changed meanwhile - here it is:';
+        return aiPopCommand(pop, rec, cmd);
+      }
+      // clear what is typed (PowerShell: Esc; readline shells: Ctrl+U), then type the command
+      termSend(rec, clear + cmd);
+      focusTerm(rec);
+      txt.textContent = 'Typed at the prompt - check it, then press Enter to run it.';
+      setTimeout(() => pop.isConnected && !pop.matches(':hover') && pop._close(), 4000);
+    },
+    () => {
+      if (!pop.isConnected) return;
+      txt.textContent = 'The terminal is busy with a transfer - here it is to copy:';
+      aiPopCommand(pop, rec, cmd, 'Busy - copy it, or press ⌨ Type it once the transfer is done.');
+    }
+  );
 }
 
 // ---- compose / reply / forward ----
@@ -14555,7 +14910,10 @@ function mailRenderCompose() {
     inp.addEventListener('input', () => {
       d[inp.dataset.f] = inp.value;
       if (/^(to|cc|bcc)$/.test(inp.dataset.f)) mailSigRefresh(); // colleague or not decides the signature
-      else if (inp.dataset.f === 'body' && d.draftId) mailDraftNote();
+      else if (inp.dataset.f === 'body') {
+        if (d.draftId) mailDraftNote();
+        mailPlaceholderSync(d);
+      }
     });
   });
   box.onclick = (e) => {
@@ -14584,6 +14942,7 @@ function mailRenderCompose() {
       mailRenderAtts();
     }
   };
+  box.onpaste = mailPasteFiles; // a screenshot or copied files -> attached
   box.onkeydown = (e) => {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
@@ -14806,6 +15165,289 @@ async function mailAttach() {
   mailRenderAtts();
   mailComposeStatus('');
 }
+// ---- mail text size: Ctrl + wheel (and Ctrl + / - / 0), like the terminal font ----
+// One zoom for the tab's TEXT: list rows and the reader's own parts get CSS zoom through
+// --mail-zoom, and each mail frame zooms its own document (zooming the frame element too
+// would scale it twice). The frame's height is re-fitted after, or the zoomed text is cut off.
+let mailZoom = 1;
+const MAIL_ZOOM_MIN = 0.7;
+const MAIL_ZOOM_MAX = 2;
+let mailZoomAcc = 0; // a trackpad pinch sends many tiny deltas: step once per notch's worth
+let mailZoomSave = null;
+function mailFrameZoom(ifr) {
+  const doc = ifr.contentDocument;
+  if (!doc || !doc.documentElement) return;
+  doc.documentElement.style.zoom = mailZoom === 1 ? '' : String(mailZoom);
+  if (ifr._fit) ifr._fit();
+}
+function mailApplyZoom() {
+  const rec = mailRec();
+  if (!rec) return;
+  rec.paneEl.style.setProperty('--mail-zoom', String(mailZoom));
+  rec.paneEl.querySelectorAll('iframe.mm-frame').forEach(mailFrameZoom);
+}
+function mailSetZoom(z, say) {
+  z = Math.round(Math.max(MAIL_ZOOM_MIN, Math.min(MAIL_ZOOM_MAX, z)) * 10) / 10;
+  if (z === mailZoom) return;
+  mailZoom = z;
+  mailApplyZoom();
+  clearTimeout(mailZoomSave);
+  mailZoomSave = setTimeout(() => api.saveSettings({ mailZoom }), 400);
+  if (say) mailToast('Mail text ' + Math.round(z * 100) + ' % · Ctrl+0 resets');
+}
+function mailZoomWheel(e) {
+  if (!e.ctrlKey) return;
+  e.preventDefault(); // Chromium would zoom the whole window otherwise
+  e.stopPropagation();
+  mailZoomAcc += e.deltaY;
+  if (Math.abs(mailZoomAcc) < 40) return;
+  mailSetZoom(mailZoom + (mailZoomAcc < 0 ? 0.1 : -0.1), true);
+  mailZoomAcc = 0;
+}
+
+// ---- the mail font and weight (the Aa panel in the toolbar) ----
+// One font and one weight for the tab's text: list rows, headers, plain-text mails, compose -
+// through --mail-font / --mail-weight on the pane. Formatted (HTML) mails get it as their
+// DEFAULT (a mail that sets its own font keeps it), or forced with "override" (code stays
+// monospace). Unread rows stay bold whatever the weight: that is how unread is seen.
+let mailFont = ''; // '' = the app's own (Segoe UI / system-ui)
+let mailFontWeight = 400;
+let mailFontHtml = 'default'; // 'off' | 'default' | 'override'
+const MAIL_FONTS = ['Segoe UI', 'Calibri', 'Arial', 'Verdana', 'Tahoma', 'Aptos', 'Georgia', 'Cambria', 'Times New Roman', 'Consolas', 'Cascadia Code'];
+const MAIL_WEIGHTS = [
+  [300, 'Light'],
+  [400, 'Normal'],
+  [500, 'Medium'],
+  [600, 'Semibold'],
+  [700, 'Bold'],
+];
+const MAIL_FONT_NAME = /^[\p{L}\p{N} _.-]{1,60}$/u; // a font name, never CSS
+const MAIL_FONT_ID = 'cockpit-font';
+function mailFontStack(name) {
+  if (!name) return '';
+  const mono = /consolas|cascadia|mono|courier/i.test(name);
+  return '"' + name + '", ' + (mono ? 'Consolas, monospace' : '"Segoe UI", system-ui, sans-serif');
+}
+// Is a font installed? Text measured in it differs from both fallbacks if the browser has it.
+function mailFontInstalled(name) {
+  const c = mailFontInstalled.ctx || (mailFontInstalled.ctx = document.createElement('canvas').getContext('2d'));
+  const s = 'mmmmmmmmmwwwwwlli1|WQ@#';
+  return ['monospace', 'serif'].some((base) => {
+    c.font = '40px ' + base;
+    const w0 = c.measureText(s).width;
+    c.font = '40px "' + name + '", ' + base;
+    return c.measureText(s).width !== w0;
+  });
+}
+function mailFontCss() {
+  if (mailFontHtml === 'off' || (!mailFont && mailFontWeight === 400)) return '';
+  const fam = mailFont ? 'font-family:' + mailFontStack(mailFont) + ';' : '';
+  const w = mailFontWeight !== 400 ? 'font-weight:' + mailFontWeight + ';' : '';
+  let css = 'body{' + fam + w + '}';
+  if (mailFontHtml === 'override' && mailFont) {
+    css += 'body :not(pre):not(code):not(kbd):not(samp):not(tt){font-family:' + mailFontStack(mailFont) + ' !important}';
+  }
+  return css;
+}
+function mailFrameFont(doc) {
+  if (!doc || !doc.head) return;
+  let st = doc.getElementById(MAIL_FONT_ID);
+  const css = mailFontCss();
+  if (!css) return st && st.remove();
+  if (!st) {
+    st = doc.createElement('style');
+    st.id = MAIL_FONT_ID;
+    doc.head.appendChild(st);
+  }
+  st.textContent = css;
+}
+function mailApplyFont() {
+  const rec = mailRec();
+  if (!rec) return;
+  const p = rec.paneEl;
+  if (mailFont) p.style.setProperty('--mail-font', mailFontStack(mailFont));
+  else p.style.removeProperty('--mail-font');
+  p.style.setProperty('--mail-weight', String(mailFontWeight));
+  p.querySelectorAll('iframe.mm-frame').forEach((f) => {
+    mailFrameFont(f.contentDocument);
+    if (f._fit) f._fit(); // a wider face wraps more: the frame grows
+  });
+}
+function mailSaveFont() {
+  api.saveSettings({ mailFont, mailFontWeight, mailFontHtml, mailBg });
+}
+// The Mail tab's background. One colour; everything else is made from it - cards a step
+// lighter (or darker, on a light one), buttons, lines, the list's hover / selection, and the
+// text: dark on a light background. Set as the app's own colour variables on the pane, so
+// every rule there that already uses them follows; the few hard-coded ones read --m-* (CSS).
+// '' = the app's dark default. HTML mails keep their own design (the reading mode).
+let mailBg = '';
+let mailBgSaveTimer = null;
+const MAIL_BGS = [
+  ['', 'Dark (standard)'],
+  ['#2a2e33', 'Dim'],
+  ['#3b4148', 'Slate'],
+  ['#e9ebee', 'Light grey'],
+  ['#f5f0e6', 'Paper'],
+  ['#ffffff', 'White'],
+];
+const MAIL_BG_VARS = ['--bg', '--bg-alt', '--bg-tab', '--border', '--fg', '--fg-dim', '--m-strong', '--m-row-line', '--m-row-hover', '--m-row-sel', '--m-row-open'];
+function mailHexRgb(h) {
+  const m = /^#([0-9a-f]{6})$/i.exec(String(h || ''));
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+function mailRgbHex(c) {
+  return '#' + c.map((x) => Math.max(0, Math.min(255, Math.round(x))).toString(16).padStart(2, '0')).join('');
+}
+// c towards target by f (0..1)
+function mailMix(c, target, f) {
+  return c.map((x, i) => x + (target[i] - x) * f);
+}
+function mailIsLight(c) {
+  const lin = (v) => {
+    v /= 255;
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2]) > 0.3;
+}
+function mailBgPalette(hex) {
+  const c = mailHexRgb(hex);
+  if (!c) return null;
+  const light = mailIsLight(c);
+  const toward = light ? [0, 0, 0] : [255, 255, 255];
+  const step = (f) => mailRgbHex(mailMix(c, toward, f));
+  return {
+    light,
+    vars: {
+      '--bg': mailRgbHex(c),
+      '--bg-alt': step(light ? 0.035 : 0.05),
+      '--bg-tab': step(light ? 0.07 : 0.1),
+      '--border': step(light ? 0.16 : 0.17),
+      '--fg': light ? '#1f2328' : '#d4d7d5',
+      '--fg-dim': light ? '#5c636b' : '#9aa0a6',
+      '--m-strong': light ? '#000000' : '#ffffff',
+      '--m-row-line': step(light ? 0.08 : 0.07),
+      '--m-row-hover': step(light ? 0.04 : 0.04),
+      '--m-row-sel': step(light ? 0.07 : 0.07),
+      '--m-row-open': step(light ? 0.1 : 0.1),
+    },
+  };
+}
+function mailApplyBg() {
+  const rec = mailRec();
+  if (!rec) return;
+  const p = rec.paneEl;
+  const pal = mailBgPalette(mailBg);
+  for (const v of MAIL_BG_VARS) p.style.removeProperty(v);
+  p.classList.toggle('mail-bg', !!pal);
+  p.classList.toggle('mail-light', !!(pal && pal.light));
+  if (pal) for (const [k, v] of Object.entries(pal.vars)) p.style.setProperty(k, v);
+}
+function mailFontPanel(anchor) {
+  const pop = mailEl('.mail-pop');
+  if (!pop) return;
+  const known = MAIL_FONTS.includes(mailFont);
+  const opt = (name, label) => {
+    const has = !name || mailFontInstalled(name);
+    return `<option value="${escapeHtml(name)}"${name === mailFont ? ' selected' : ''}${name ? ` style="font-family:${escapeHtml(mailFontStack(name))}"` : ''}>${escapeHtml(label || name)}${has ? '' : '  (not installed)'}</option>`;
+  };
+  pop.innerHTML =
+    '<div class="mp-cap">Mail look</div>' +
+    '<div class="mf-panel">' +
+    '<label class="mf-row"><span>Font</span><select class="mf-font">' +
+    opt('', 'Standard (Segoe UI)') +
+    MAIL_FONTS.map((n) => opt(n)).join('') +
+    `<option value="__other"${mailFont && !known ? ' selected' : ''}>Other…</option></select></label>` +
+    `<input class="mf-other mp-filter${mailFont && !known ? '' : ' hidden'}" type="text" spellcheck="false" placeholder="Any installed font, e.g. Roboto" value="${mailFont && !known ? escapeHtml(mailFont) : ''}" />` +
+    '<div class="mf-row"><span>Weight</span><div class="mf-weights">' +
+    MAIL_WEIGHTS.map(([w, l]) => `<button class="mail-btn mf-w${w === mailFontWeight ? ' sel' : ''}" data-w="${w}" style="font-weight:${w}">${l}</button>`).join('') +
+    '</div></div>' +
+    `<div class="mf-row"><span>Size</span><div class="mf-size"><button class="mail-btn" data-z="-">−</button><b class="mf-pct">${Math.round(mailZoom * 100)} %</b><button class="mail-btn" data-z="+">+</button><button class="mail-btn" data-z="0" title="Ctrl+0">Reset</button></div></div>` +
+    '<div class="mf-row"><span>Background</span><div class="mf-bgs">' +
+    MAIL_BGS.map(
+      ([c, l]) =>
+        `<button class="mf-bg${c === mailBg ? ' sel' : ''}" data-bg="${c}" title="${escapeHtml(l)}" style="background:${c || '#1d1f21'}"></button>`
+    ).join('') +
+    `<label class="mf-bg mf-bgpick${mailBg && !MAIL_BGS.some(([c]) => c === mailBg) ? ' sel' : ''}" title="Any colour"><input type="color" class="mf-bgcolor" value="${escapeHtml(mailBg || '#1d1f21')}" /></label>` +
+    '</div></div>' +
+    '<label class="mf-row"><span>Formatted mails</span><select class="mf-html">' +
+    [
+      ['default', 'Use it where the mail sets no font'],
+      ['override', 'Override every font (code stays)'],
+      ['off', 'Leave them as sent'],
+    ]
+      .map(([v, l]) => `<option value="${v}"${v === mailFontHtml ? ' selected' : ''}>${l}</option>`)
+      .join('') +
+    '</select></label>' +
+    `<div class="mf-sample" style="font-family:${escapeHtml(mailFontStack(mailFont) || 'inherit')};font-weight:${mailFontWeight}">Hi Ann, the quote for 25 seats is attached. 0O 1lI</div>` +
+    '</div>';
+  mailShowPop(anchor);
+  const sample = pop.querySelector('.mf-sample');
+  const other = pop.querySelector('.mf-other');
+  const paintBg = () => {
+    pop.querySelectorAll('.mf-bg[data-bg]').forEach((b) => b.classList.toggle('sel', b.dataset.bg === mailBg));
+    pop.querySelector('.mf-bgpick').classList.toggle('sel', !!mailBg && !MAIL_BGS.some(([c]) => c === mailBg));
+  };
+  pop.querySelector('.mf-bgcolor').addEventListener('input', (e) => {
+    if (!mailHexRgb(e.target.value)) return;
+    mailBg = e.target.value.toLowerCase();
+    mailApplyBg();
+    paintBg();
+    clearTimeout(mailBgSaveTimer);
+    mailBgSaveTimer = setTimeout(mailSaveFont, 400); // the picker sends a stream while you drag
+  });
+  const paint = () => {
+    sample.style.fontFamily = mailFontStack(mailFont) || 'inherit';
+    sample.style.fontWeight = String(mailFontWeight);
+    pop.querySelectorAll('.mf-w').forEach((b) => b.classList.toggle('sel', +b.dataset.w === mailFontWeight));
+    pop.querySelector('.mf-pct').textContent = Math.round(mailZoom * 100) + ' %';
+  };
+  const commit = () => {
+    mailApplyFont();
+    mailSaveFont();
+    paint();
+  };
+  pop.querySelector('.mf-font').addEventListener('change', (e) => {
+    const v = e.target.value;
+    other.classList.toggle('hidden', v !== '__other');
+    if (v === '__other') return other.focus();
+    mailFont = v;
+    commit();
+  });
+  other.addEventListener('input', () => {
+    const v = other.value.trim();
+    other.classList.toggle('bad', !!v && (!MAIL_FONT_NAME.test(v) || !mailFontInstalled(v)));
+    if (!v || !MAIL_FONT_NAME.test(v)) return;
+    mailFont = v;
+    commit();
+  });
+  pop.querySelector('.mf-html').addEventListener('change', (e) => {
+    mailFontHtml = e.target.value;
+    commit();
+  });
+  pop.onclick = (e) => {
+    const w = e.target.closest('[data-w]');
+    if (w) {
+      mailFontWeight = +w.dataset.w;
+      return commit();
+    }
+    const bg = e.target.closest('.mf-bg[data-bg]');
+    if (bg) {
+      mailBg = bg.dataset.bg;
+      mailApplyBg();
+      mailSaveFont();
+      return paintBg();
+    }
+    const z = e.target.closest('[data-z]');
+    if (z) {
+      mailSetZoom(z.dataset.z === '0' ? 1 : mailZoom + (z.dataset.z === '-' ? -0.1 : 0.1));
+      paint();
+    }
+  };
+}
+
 // ---- drag files onto the Mail tab ----
 // Onto a message being written: attached. With none open: a new message, attached. The files
 // are read here (File.arrayBuffer), so it works for anything the OS can drag - no path needed.
@@ -14828,7 +15470,7 @@ function mailDropShow(on) {
 }
 function mailWireDrop(target) {
   const over = (e) => {
-    if (!mailDragHasFiles(e)) return;
+    if (!mailDragHasFiles(e) && !dragIsAtt(e)) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
     mailDropShow(true);
@@ -14840,6 +15482,16 @@ function mailWireDrop(target) {
   target.addEventListener('dragenter', over);
   target.addEventListener('dragover', over);
   target.addEventListener('drop', (e) => {
+    if (dragIsAtt(e)) {
+      e.preventDefault();
+      e.stopPropagation();
+      clearTimeout(mailDropTimer);
+      mailDropShow(false);
+      const { m, a } = cockpitDrag;
+      cockpitDrag = null;
+      document.body.classList.remove('att-dragging');
+      return mailAttachFromMail(m, a);
+    }
     if (!mailDragHasFiles(e)) return;
     e.preventDefault();
     e.stopPropagation();
@@ -14855,6 +15507,45 @@ function mailWireDrop(target) {
       });
     mailAttachDropped(files, kinds);
   });
+}
+// A chip from a mail, into the message being written (or a new one).
+async function mailAttachFromMail(m, a) {
+  if (!mbox.draft) mailCompose({});
+  const d = mbox.draft;
+  if (!d) return;
+  const used = d.attachments.reduce((n, x) => n + (x.size || 0), 0);
+  if (used + (a.size || 0) > MAIL_SEND_MAX) return mailComposeStatus(a.filename + ' would go past Gmail’s ' + fmtBytes(MAIL_SEND_MAX), true);
+  const att = { name: a.filename, mimeType: a.mimeType, size: a.size || 0, b64: null };
+  d.attachments.push(att);
+  mailRenderAtts();
+  att.b64 = await mailAttB64(m, a);
+  att.failed = !att.b64;
+  if (att.b64) att.size = mailB64Size(att.b64);
+  if (mbox.draft === d) mailRenderAtts();
+}
+// Ctrl+V in compose with an image on the clipboard (a screenshot) or files copied in the file
+// manager: attached. Text pastes as text - when the clipboard has BOTH (a cell range copied
+// from a spreadsheet is text and a picture of it), the text wins.
+function mailPasteFiles(e) {
+  const cd = e.clipboardData;
+  if (!cd || !mbox.draft) return;
+  const items = Array.from(cd.items || []);
+  if (items.some((it) => it.kind === 'string' && it.type === 'text/plain')) return;
+  const files = items.filter((it) => it.kind === 'file').map((it) => it.getAsFile()).filter(Boolean);
+  if (!files.length) return;
+  e.preventDefault();
+  const stamp = new Date();
+  const p2 = (n) => String(n).padStart(2, '0');
+  const when = stamp.getFullYear() + '-' + p2(stamp.getMonth() + 1) + '-' + p2(stamp.getDate()) + ' ' + p2(stamp.getHours()) + '.' + p2(stamp.getMinutes()) + '.' + p2(stamp.getSeconds());
+  let n = 0;
+  const named = files.map((f) => {
+    // a bitmap off the clipboard arrives as "image.png": give it a name that says what and when
+    if (!/^image\//.test(f.type) || (f.name && !/^image\.\w+$/i.test(f.name))) return f;
+    const ext = (f.type.split('/')[1] || 'png').replace('jpeg', 'jpg').replace(/[^a-z0-9]/gi, '') || 'png';
+    n++;
+    return new File([f], 'screenshot ' + when + (n > 1 ? ' (' + n + ')' : '') + '.' + ext, { type: f.type });
+  });
+  mailAttachDropped(named, named.map(() => 'file'));
 }
 async function mailAttachDropped(files, kinds) {
   if (!files.length) return;
@@ -14913,6 +15604,10 @@ async function mailSend() {
   if (mbox.canSend === false) {
     mailRenderBanner();
     return mailComposeStatus('Not allowed to send yet - see above.', true);
+  }
+  if (!d.skipPlaceholderCheck) {
+    const left = mailPlaceholders(d);
+    if (left.length) return mailPlaceholderWarn(d, left);
   }
   if (!d.attachments.length && !d.skipAttachCheck && mailMentionsAttachment(d)) return mailAttachWarn(d);
   d.sending = true;
@@ -16020,20 +16715,61 @@ function mailInviteMine(ics, ev, st) {
   const a = ev.attendees.find((x) => x.email === me);
   return a ? { ACCEPTED: 'accept', TENTATIVE: 'maybe', DECLINED: 'decline' }[a.partstat] || null : null;
 }
+// Whose invitation this is: a REPLY (an "Accepted: ..." mail) goes to the ORGANIZER, so one
+// that reaches you while someone else organizes means you were only copied on their answer.
+function mailInviteIsMine(ev) {
+  const me = String(googleEmail || '').toLowerCase();
+  const org = String((ev.organizer && ev.organizer.email) || '').toLowerCase();
+  return !org || (!!me && org === me);
+}
+const MAIL_PARTSTAT_WORD = { ACCEPTED: 'accepted', TENTATIVE: 'said maybe to', DECLINED: 'declined', 'NEEDS-ACTION': 'has not answered' };
 function mailInviteCardHtml(ics, ev, st) {
   const cancelled = ics.method === 'CANCEL' || ev.status === 'CANCELLED';
   const isReply = ics.method === 'REPLY';
-  const head = cancelled ? '❌ Cancelled' : isReply ? '📅 Answer to your invitation' : '📅 Invitation';
+  const copied = isReply && !mailInviteIsMine(ev);
+  const orgName = ev.organizer ? ev.organizer.name || ev.organizer.email : 'the organizer';
+  const replier = isReply ? ev.attendees.find((x) => x.partstat) : null;
+  const head = cancelled
+    ? '❌ Cancelled'
+    : copied && replier
+      ? '📅 ' + escapeHtml(replier.name || replier.email) + ' ' + escapeHtml(MAIL_PARTSTAT_WORD[replier.partstat] || replier.partstat.toLowerCase()) + ' ' + escapeHtml(orgName) + '’s invitation'
+      : isReply
+        ? '📅 Answer to your invitation'
+        : '📅 Invitation';
   const rows = [];
   rows.push(`<div class="iv-when">${escapeHtml(mailInviteWhen(ev))}</div>`);
   const who = ev.organizer ? ev.organizer.name || ev.organizer.email : '';
   const meta = [ev.location && '📍 ' + ev.location, who && 'from ' + who, ev.attendees.length > 1 && ev.attendees.length + ' guests'].filter(Boolean);
   if (meta.length) rows.push(`<div class="iv-meta">${escapeHtml(meta.join('  ·  '))}</div>`);
-  if (isReply) {
+  if (isReply && !copied) {
     for (const a of ev.attendees.filter((x) => x.partstat)) {
       const word = { ACCEPTED: 'accepted', TENTATIVE: 'said maybe', DECLINED: 'declined', 'NEEDS-ACTION': 'has not answered yet' }[a.partstat] || a.partstat.toLowerCase();
       rows.push(`<div class="iv-reply">${escapeHtml((a.name || a.email) + ' ' + word)}</div>`);
     }
+  }
+  if (copied) {
+    // the answer of someone else, sent to the organizer, with you on copy
+    rows.push(`<div class="iv-note">You were copied - this is their answer to ${escapeHtml(orgName)}, not an invitation to you.</div>`);
+    if (!st.checked) rows.push('<div class="iv-note">Checking your calendar…</div>');
+    else if (st.info && st.info.event) {
+      const yours = { accepted: ' - you accepted', tentative: ' - you said maybe', declined: ' - you declined' }[st.info.event.myStatus] || '';
+      rows.push(`<div class="iv-free">✓ It is in your calendar too${escapeHtml(yours)}</div>`);
+      if (st.info.event.htmlLink) rows.push('<div class="iv-actions"><button class="mail-btn" data-iv="open">📅 Open in Calendar</button></div>');
+    } else if (!st.info) {
+      rows.push('<div class="iv-note">Could not check your calendar.</div>');
+    } else {
+      rows.push('<div class="iv-note">It is not in your calendar.</div>');
+      if (ev.organizer && ev.organizer.email) rows.push(`<div class="iv-actions"><button class="mail-btn" data-iv="ask">✉ Ask ${escapeHtml(orgName)} to invite me</button></div>`);
+    }
+  }
+  if (cancelled) {
+    if (st.removed) rows.push('<div class="iv-free">✓ Removed from your calendar.</div>');
+    else if (st.info && st.info.event && st.info.event.status === 'cancelled') rows.push('<div class="iv-note">Google has already taken it out of your calendar.</div>');
+    else if (st.info && st.info.event && st.info.canRespond)
+      rows.push('<div class="iv-actions"><button class="mail-btn" data-iv="remove"' + (st.removing ? ' disabled' : '') + '>🗑 Remove from my calendar</button></div>');
+    else if (st.info && st.info.event) rows.push('<div class="iv-note">It is still in your calendar - reconnect Google (Settings) to let Cockpit take it out.</div>');
+    else if (st.info) rows.push('<div class="iv-note">It is not in your calendar.</div>');
+    if (st.error) rows.push(`<div class="iv-err">${escapeHtml(st.error)}</div>`);
   }
   if (!cancelled && !isReply && !ev.start.allDay) {
     if (st.busy === undefined) rows.push('<div class="iv-note">Checking your calendar…</div>');
@@ -16057,12 +16793,31 @@ function mailInviteCardHtml(ics, ev, st) {
         '</div>'
     );
     let how;
-    if (st.info && st.info.event && st.info.canRespond) how = 'Answering updates your Google Calendar and tells the organizer.';
-    else if (st.info && st.info.event) how = 'Your answer goes to the organizer by mail. Reconnect Google (Settings) to have it put in your calendar too.';
-    else how = 'Your answer goes to the organizer by mail.';
+    let needsGrant = false;
+    if (st.info && st.info.event && st.info.canRespond) how = 'Answering updates your Google Calendar, and Google tells the organizer.';
+    else if (st.info && st.info.canRespond) how = 'Accept or Maybe puts it in your Google Calendar; your answer goes to the organizer by mail.';
+    else if (st.info) {
+      how = 'Your answer goes to the organizer by mail - but it will not reach YOUR calendar: Cockpit may not write to it yet.';
+      needsGrant = true;
+    } else how = 'Your answer goes to the organizer by mail.';
     if (st.answering) how = 'Answering…';
-    if (st.answered) how = '✓ You ' + MAIL_RSVP[st.answered.kind].did + ' it' + (st.answered.via === 'calendar' ? ' - saved in your calendar, the organizer is told.' : ' - sent to the organizer.');
+    if (st.answered) {
+      const did = '✓ You ' + MAIL_RSVP[st.answered.kind].did + ' it';
+      const v = st.answered.via;
+      how =
+        v === 'calendar'
+          ? did + ' - saved in your calendar, and Google told the organizer.'
+          : v === 'mail+import'
+            ? did + ' - it is in your calendar now, and the organizer got your answer by mail.'
+            : st.answered.kind === 'decline'
+              ? did + ' - the organizer got your answer by mail.'
+              : did + ' - the organizer got your answer by mail. It is NOT in your calendar' + (st.importError ? ': ' + st.importError : needsGrant ? ' (reconnect Google to allow that).' : '.');
+    }
     rows.push(`<div class="iv-note">${escapeHtml(how)}</div>`);
+    const btns = [];
+    if (needsGrant && !st.answering) btns.push('<button class="mail-btn" data-iv="settings" title="Settings → Google → Connect & sign in, and allow the calendar">🔑 Allow calendar access</button>');
+    if (st.info && st.info.event && st.info.event.htmlLink && st.answered) btns.push('<button class="mail-btn" data-iv="open">📅 Open in Calendar</button>');
+    if (btns.length) rows.push('<div class="iv-actions">' + btns.join('') + '</div>');
     if (st.error) rows.push(`<div class="iv-err">${escapeHtml(st.error)}</div>`);
   }
   return `<div class="iv-head">${head}: <b>${escapeHtml(ev.summary || '(no title)')}</b></div>` + rows.join('');
@@ -16139,10 +16894,13 @@ async function mailInviteMount(el, m) {
   draw();
   el.onclick = (e) => {
     const b = e.target.closest('[data-rsvp]');
-    if (b && !st.answering) mailRsvp(m, ics, ev, b.dataset.rsvp, st, draw);
+    if (b && !st.answering) return mailRsvp(m, ics, ev, b.dataset.rsvp, st, draw);
+    const x = e.target.closest('[data-iv]');
+    if (x) mailInviteAction(x.dataset.iv, m, ics, ev, st, draw);
   };
   if (!googleConnected) {
     st.busy = null;
+    st.checked = true;
     return draw();
   }
   const r = await api.mailInviteInfo({ uid: ev.uid, start: ev.start.ms, end: ev.end ? ev.end.ms : ev.start.ms + 3600000 });
@@ -16150,7 +16908,38 @@ async function mailInviteMount(el, m) {
     st.info = r;
     st.busy = r.busy;
   } else st.busy = null;
+  st.checked = true; // looked - whether or not the calendar answered
   draw();
+}
+async function mailInviteAction(act, m, ics, ev, st, draw) {
+  if (act === 'settings') return openSettings();
+  if (act === 'open') {
+    const link = st.info && st.info.event && st.info.event.htmlLink;
+    if (link) createWebTab(link);
+    return;
+  }
+  if (act === 'ask') {
+    const org = ev.organizer || {};
+    const first = String(org.name || '').trim().split(/\s+/)[0] || '';
+    return mailCompose({
+      to: org.name ? '"' + org.name.replace(/"/g, '') + '" <' + org.email + '>' : org.email,
+      subject: 'Invitation: ' + (ev.summary || ''),
+      body: 'Hi' + (first ? ' ' + first : '') + ',\n\ncould you add me to "' + (ev.summary || 'the meeting') + '" (' + mailInviteWhen(ev) + ')?\n\nThanks\n',
+    });
+  }
+  if (act === 'remove') {
+    if (!st.info || !st.info.event) return;
+    st.removing = true;
+    st.error = null;
+    draw();
+    const r = await api.mailInviteRemove({ eventId: st.info.event.id });
+    st.removing = false;
+    if (r && r.ok) {
+      st.removed = true;
+      st.info.event = null;
+    } else st.error = 'Could not remove it: ' + mailStaleMain((r && r.error) || 'unknown');
+    draw();
+  }
 }
 async function mailRsvp(m, ics, ev, kind, st, draw) {
   const how = MAIL_RSVP[kind];
@@ -16178,6 +16967,28 @@ async function mailRsvp(m, ics, ev, kind, st, draw) {
       references: [m.references, m.messageId].filter(Boolean).join(' '),
       calendar: { method: 'REPLY', ics: mailIcsReply(ics, ev, how.partstat) },
     });
+  }
+  // Answered by mail, and the calendar is ours to write: put it in, unless it was a no. (When
+  // the event was already in the calendar, the patch above did both - Google told them.)
+  st.importError = null;
+  if (res && res.ok && via === 'mail' && kind !== 'decline' && st.info && st.info.canRespond) {
+    const imp = await api.mailInviteImport({
+      uid: ev.uid,
+      summary: ev.summary,
+      location: ev.location,
+      start: ev.start.ms,
+      end: ev.end ? ev.end.ms : null,
+      allDay: !!ev.start.allDay,
+      organizer: ev.organizer,
+      attendees: ev.attendees,
+      response: how.google,
+      sequence: ev.sequence,
+      rrule: ev.rrule,
+    });
+    if (imp && imp.ok) {
+      via = 'mail+import';
+      st.info.event = { id: imp.eventId, status: 'confirmed', myStatus: how.google, htmlLink: imp.htmlLink };
+    } else st.importError = mailStaleMain((imp && imp.error) || 'unknown');
   }
   if (res && res.ok) {
     st.answered = { kind, via };
@@ -20102,6 +20913,11 @@ setInterval(() => {
   else if (settings && settings.mailDarkRead === true) mailReadMode = 'dark';
   if (settings && typeof settings.mailTabBadge === 'boolean') mailTabBadge = settings.mailTabBadge;
   if (settings && typeof settings.mailAiFast === 'boolean') mailAiFast = settings.mailAiFast;
+  if (settings && Number.isFinite(settings.mailZoom)) mailZoom = Math.round(Math.max(0.7, Math.min(2, settings.mailZoom)) * 10) / 10;
+  if (settings && typeof settings.mailFont === 'string' && (settings.mailFont === '' || MAIL_FONT_NAME.test(settings.mailFont))) mailFont = settings.mailFont;
+  if (settings && MAIL_WEIGHTS.some(([w]) => w === settings.mailFontWeight)) mailFontWeight = settings.mailFontWeight;
+  if (settings && ['off', 'default', 'override'].includes(settings.mailFontHtml)) mailFontHtml = settings.mailFontHtml;
+  if (settings && typeof settings.mailBg === 'string' && (settings.mailBg === '' || /^#[0-9a-f]{6}$/i.test(settings.mailBg))) mailBg = settings.mailBg.toLowerCase();
   if (settings && typeof settings.aiTranslateTo === 'string' && /^[\p{L} ()-]{2,40}$/u.test(settings.aiTranslateTo)) aiTranslateTo = settings.aiTranslateTo;
   {
     const r = settings && settings.mailComposeRect;
