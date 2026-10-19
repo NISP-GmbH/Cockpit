@@ -774,6 +774,10 @@
             <a href="#" id="set-tmux-reset" class="hidden"></a>
           </label>
           <label class="settings-check" style="margin-top: 6px">
+            <input type="checkbox" id="set-where-auto" />
+            Find out host and folder by itself for the tab title (types one silent command, only at a shell prompt)
+          </label>
+          <label class="settings-check" style="margin-top: 6px">
             <input type="checkbox" id="set-clip-on" />
             Clipboard history (Ctrl+Shift+H) - the last 50 copies, kept in memory only
           </label>
@@ -921,6 +925,39 @@
           </div>
         </div>
 
+        <div class="settings-section" style="margin-top: 14px" id="set-screen-section">
+          <h3>🖱 Screen control (for programs in local terminals)</h3>
+          <div class="settings-status">
+            Lets a program running in a Cockpit <b>local</b> terminal - Claude Code, a script - take screenshots,
+            move the mouse, click, type and handle windows on this computer. Each terminal has to be allowed in
+            Cockpit first (it asks, for 15 / 60 minutes or until the tab closes); a red pill shows while one is,
+            and <b>Ctrl+Alt+Esc</b> stops all of it at once. Every action is in the Black Box (typed text only as a
+            length). SSH terminals never get it.
+          </div>
+          <label class="settings-check" style="margin-top: 6px">
+            <input type="checkbox" id="set-screen-on" />
+            Allow programs in local terminals to ask for screen control
+          </label>
+          <label class="settings-check" style="margin-top: 4px">
+            <input type="checkbox" id="set-screen-offlimits" />
+            Cockpit's own windows are off limits (recommended: no typing into other terminals or Settings)
+          </label>
+          <label for="set-screen-width" style="margin-top: 6px">Screenshot width for the program</label>
+          <select id="set-screen-width">
+            <option value="1024">1024 px (fewer tokens)</option>
+            <option value="1280">1280 px</option>
+            <option value="1600">1600 px</option>
+            <option value="1920">1920 px (most detail)</option>
+          </select>
+          <div id="set-screen-setup" class="settings-status hidden" style="margin-top: 8px">
+            Once, for Claude Code (in any terminal):
+            <div class="screen-setup-row"><code id="set-screen-cmd"></code><button id="set-screen-copy" type="button">Copy</button></div>
+            Then start <code>claude</code> in a Cockpit local terminal. Terminals that were already open get it after their
+            shell starts again. Scripts can use the <code>cockpit-screen</code> command (try <code>cockpit-screen help</code>).
+          </div>
+          <div id="set-screen-na" class="settings-status hidden">Not available on this system yet (Windows only for now).</div>
+        </div>
+
         <div class="settings-section" style="margin-top: 14px">
           <h3>Quick commands</h3>
           <div class="settings-status">
@@ -960,6 +997,10 @@
           <label class="settings-check" style="margin-top: 8px">
             <input type="checkbox" id="set-preset-auto" />
             When Cockpit starts, run a preset by itself in every terminal that belongs to it
+          </label>
+          <label class="settings-check" style="margin-top: 4px">
+            <input type="checkbox" id="set-preset-reconnect" />
+            When a terminal reconnects (after sleep, a dropped network, R), run its preset again
           </label>
           <div class="settings-status">
             A terminal belongs to a preset when it was started with it, or when its tab title is the preset's name or

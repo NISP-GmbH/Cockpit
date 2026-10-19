@@ -69,13 +69,18 @@ Everything lives in one tabbed window (`Ctrl+Shift+T` new · `Ctrl+Shift+W` clos
   whatever shell the terminal is currently in, however deep: `ssh` inside `ssh`, `sudo`, a container.
   Cockpit reads it for free when the shell offers it (OSC 7, or a `user@host:cwd` window title), and
   otherwise asks in-band with the same trick as the file grab - one command wrapped in unique markers,
-  with the whole exchange swallowed, so the terminal looks untouched. It runs once after connecting,
-  when you switch to a tab, and on demand. It never types into a full-screen program: on the alternate
-  screen the probe is skipped, so `vim`, tmux copy-mode and Claude are safe.
+  with the whole exchange swallowed, so the terminal looks untouched. That question is asked **on demand**
+  (📍 on the tab hover sheet); asking by itself - after connecting and when you switch to a tab - is **off
+  unless you switch it on** in ⚙ → Terminal ("Find out host and folder by itself ..."), because it types
+  into the terminal. Either way it is only typed at a **shell prompt**: never while a program runs - not on
+  the alternate screen (`vim`, tmux copy-mode), and not in **Claude Code**, which draws on the normal
+  screen (a program that hid the cursor, Claude Code's own words on screen, or a cursor line that does not
+  end like a prompt all count as "not now"). The same rule keeps the size resync and the tmux picker out.
 - **🪟 tmux sessions** - when an SSH tab connects to a host that has tmux sessions, a small card
   in the corner offers them (windows, whether they are open elsewhere, when last active): one
   click attaches, or start a named new one. It asks only when the shell is idle at a prompt and
-  you have not started typing, never inside tmux, and typing puts it away; **Do not ask on this
+  you have not started typing, never inside tmux or while a terminal preset is running (the
+  preset decides what that terminal does), and typing puts it away; **Do not ask on this
   host** is remembered (Settings resets it, or turns the whole thing off). The tab hover sheet's
   **🪟 tmux sessions** (or the command palette) opens it on any tab at any depth - inside tmux it
   switches sessions instead of nesting one.
@@ -184,9 +189,21 @@ ran through, which **stopped and why** ("$" did not show up in 30 s at step 3 of
 wait for you (running at launch is off, or a question has no answer yet). Click a row to go to that tab. When
 all went through it goes away by itself; otherwise it stays until you close it.
 
+**After a reconnect** the preset runs again. A connection that dropped - the computer slept, the network
+changed, the server restarted - takes everything the preset did with it (the `tmux attach`, the `cd`, the
+program it started), so when you reconnect a tab (**R**, **⟳ Reconnect**, or **P** with a new passphrase) or
+start an exited local shell again, the tab's preset is typed once more, with the answers it had. This also
+covers a cold start where Cockpit came up before the network: the launch run gives up on a terminal that
+cannot connect, and your first **R** runs it. A tab that waits for a click at launch keeps waiting, and a
+preset with a question that has no answer yet shows **▶ Run preset** instead. Switch it off in ⚙ → Terminal
+presets ("When a terminal reconnects ..."); then a reconnected tab shows **▶ Run preset** and nothing is typed
+without a click.
+
 While a preset runs, a small strip in the corner of the terminal shows the step it is at and has **Stop**;
 afterwards it offers **▶ Run again**. Cockpit's own background commands (the where-am-I check, the size
-resync) stay out of a terminal while a preset is typing into it.
+resync, the tmux session picker) stay out of a terminal while a preset is typing into it; if one of them is
+still finishing when the preset wants to type, the preset waits for it (up to 20 s). Only a file transfer
+in that terminal stops it, and the strip says so.
 
 One thing to know: a fixed `sleep` does not look at the screen. If `ssh` is still asking for a password when
 the pause is over, the next command is typed into the password prompt. With key login that cannot happen;
@@ -744,6 +761,76 @@ To let an external tool (e.g. Claude Code) drive the app for testing:
 
 ⚠️ Local-only (binds 127.0.0.1), but **anything on the machine can attach while it's on** - leave
 the port blank to disable when you're not testing.
+
+## 🖱 Screen control (computer use from a local terminal)
+A program running in a Cockpit **local** terminal - Claude Code above all - can see and operate
+this computer: take screenshots, zoom in, move the mouse, click, drag, scroll, type, press keys,
+list windows, bring one to the front and start apps. Windows for now (macOS later).
+
+1. **⚙ Settings → Screen control** → tick **Allow programs in local terminals to ask for screen
+   control**. The section then shows a one-time setup line for Claude Code - copy it and run it in
+   any terminal:
+   ```
+   claude mcp add cockpit-screen -- node "%APPDATA%\Cockpit\tools\cockpit-screen.js"
+   ```
+   (Settings shows the exact path.) Claude Code then has the tools `screenshot`, `zoom`, `click`,
+   `move_mouse`, `drag`, `scroll`, `type_text`, `key`, `list_windows`, `focus_window`,
+   `launch_app`, `ui_elements`, `ui_action`, `read_text`, `wait_for` and `what_changed`; a
+   screenshot reaches it as a picture. A screenshot does not have to be the whole
+   screen: it can be **one window** (by title) or **a region** (x, y, width, height), captured at
+   full resolution - smaller, sharper and cheaper for the model than a full shot. Claude is told to
+   prefer that once it knows where it works; `max_width` asks for an even smaller picture.
+
+   Four tools make it more reliable and cheaper than pictures alone:
+   - **`ui_elements` / `ui_action`** - the buttons, fields, checkboxes, menus and list items of a
+     window, read through Windows accessibility, with their names, values and states. Claude presses
+     "Save" or fills "File name" by what it is, not by guessing pixels - mostly without moving the
+     mouse at all, and even when the window is covered. A field's value goes to the Black Box only as
+     its length; password fields never show their value.
+   - **`read_text`** - the text of a window or an area, recognised by Windows' own OCR, with
+     positions (and `find` says where a word is). Words cost far less than a picture.
+   - **`wait_for`** - waits until a text appears or disappears, the area changes, or it settles
+     (a page finished loading), instead of taking screenshot after screenshot. Up to a minute; other
+     terminals are not held up meanwhile, and Ctrl+Alt+Esc ends it too.
+   - **`what_changed`** - compares the screen with the last screenshot and returns a picture of only
+     the part that changed (or "nothing changed"). A blinking cursor does not count.
+2. Start `claude` in a **Cockpit local terminal** (opened after switching it on - a terminal that
+   was already open gets it once its shell starts again) and ask it to do something on screen.
+3. The first time a terminal asks, Cockpit asks **you**: which terminal, what it wants to do first,
+   and **Allow 15 min / Allow 60 min / Until the tab closes / Don't allow** (no answer within a minute
+   = no). Each terminal is asked on its own.
+
+While a terminal may control the screen:
+- a **red pill** floats at the top of the screen (who, how long still, **Stop**), and the tab has
+  a red mark; its hover menu has **🛑 Stop screen control**;
+- **Ctrl+Alt+Esc** ends it for every terminal at once, from anywhere - even what is still queued
+  or half typed;
+- **Cockpit's own windows are off limits** (Settings, on by default): a click, keys or typing aimed
+  at Cockpit are refused, so a program cannot type into your other terminals, change Settings or
+  answer the question for itself. While a question is open, nothing is clicked or typed at all;
+- every action goes to the **Black Box** (Terminal lane) - typed text only as its length, never the
+  text; screenshots are not stored.
+
+For scripts there is also a command, on the PATH of every Cockpit local terminal:
+`cockpit-screen screenshot` (prints the path of a PNG; `--window Notepad` or
+`--region 100 50 400 300` for only a part), `cockpit-screen click 640 380 [--double]`,
+`cockpit-screen type "hello"`, `cockpit-screen key ctrl+s`, `cockpit-screen windows`,
+`cockpit-screen focus Notepad`, `cockpit-screen launch notepad`, `cockpit-screen controls Notepad`
+then `cockpit-screen act 3.12 click`, `cockpit-screen text --window Notepad`,
+`cockpit-screen wait --text "Done" --timeout 30` (exit code 2 when it timed out),
+`cockpit-screen changes` - `cockpit-screen help` lists all.
+Coordinates are in the last screenshot (it is scaled down to the width set in Settings; Cockpit maps
+them back to the real pixels, monitor and display scaling included).
+
+How it works: Cockpit gives each local shell a secret token and the name of a local named pipe in
+its environment; the tool sends each request with that token, so Cockpit knows which terminal is
+asking. No network port is opened, SSH terminals never get a token, and a program started in another
+terminal app cannot use it. The screen itself is read and driven by a small helper Cockpit compiles
+in PowerShell - no extra software is installed.
+
+⚠️ What is on the screen can try to give the program instructions (a web page or a mail that says
+"now do X"). The tools tell the model that screen content is data, not instructions - but keep an
+eye on it, grant short times, and use Ctrl+Alt+Esc freely.
 
 ## Where data lives
 Saved sessions, settings, notes, project times, and encrypted tokens live in the app's

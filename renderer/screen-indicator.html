@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+    <title>Cockpit · screen control</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        user-select: none;
+        font-family: "Segoe UI", system-ui, sans-serif;
+      }
+      /* the whole pill moves the window; the button does not */
+      #pill {
+        -webkit-app-region: drag;
+        box-sizing: border-box;
+        height: 34px;
+        margin: 3px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 6px 0 12px;
+        border-radius: 17px;
+        background: rgba(40, 10, 12, 0.92);
+        border: 2px solid #ff4d4f;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+        color: #ffd6d6;
+        font-size: 12.5px;
+        white-space: nowrap;
+      }
+      #dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: #ff4d4f;
+        animation: blink 1.4s ease-in-out infinite;
+        flex: 0 0 auto;
+      }
+      @keyframes blink {
+        50% {
+          opacity: 0.25;
+        }
+      }
+      #text {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #text b {
+        color: #fff;
+      }
+      #stop {
+        -webkit-app-region: no-drag;
+        flex: 0 0 auto;
+        border: none;
+        border-radius: 12px;
+        background: #ff4d4f;
+        color: #fff;
+        font: 600 12px "Segoe UI", system-ui, sans-serif;
+        padding: 4px 10px;
+        cursor: pointer;
+      }
+      #stop:hover {
+        background: #ff7072;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="pill">
+      <span id="dot"></span>
+      <span id="text">Screen control</span>
+      <button id="stop" title="Stop: every terminal loses screen control at once">Stop</button>
+    </div>
+    <script src="screen-indicator.js"></script>
+  </body>
+</html>

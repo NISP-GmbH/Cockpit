@@ -121,7 +121,7 @@ class LocalPty {
           cols: opts.cols || 80,
           rows: opts.rows || 24,
           cwd,
-          env: process.env,
+          env: mergeEnv(opts.env),
         });
         this.inproc.set(tabId, p);
         p.onData((d) => this.send('pty:data', { tabId, data: d }));
@@ -144,7 +144,7 @@ class LocalPty {
       return { ok: false, error: this._lastError || 'pty host unavailable' };
     }
     if (this._hostTabs) this._hostTabs.add(tabId);
-    this._hostSend({ type: 'spawn', id: tabId, shell, cols: opts.cols, rows: opts.rows, cwd });
+    this._hostSend({ type: 'spawn', id: tabId, shell, cols: opts.cols, rows: opts.rows, cwd, env: opts.env || undefined });
     return { ok: true, shell, backend: 'host' };
   }
 
@@ -223,6 +223,23 @@ function usableShell(shell) {
 }
 // A remembered folder that is gone (deleted, an unplugged drive, another machine's path):
 // start at home rather than not start at all.
+// The shell's environment: Cockpit's own, plus what this one terminal is given (the screen-control
+// pipe and token). Windows spells the path variable "Path" and treats names case-insensitively,
+// but a plain object does not: an added "PATH" next to "Path" would put both into the block
+// and which one wins is undefined. So an extra variable REPLACES the existing key of that name,
+// whatever its case. (pty-host.js has the same helper; it runs under another Node.)
+function mergeEnv(extra) {
+  const env = { ...process.env };
+  if (!extra || typeof extra !== 'object') return env;
+  for (const [k, v] of Object.entries(extra)) {
+    if (typeof v !== 'string') continue;
+    const same = Object.keys(env).find((x) => x.toLowerCase() === k.toLowerCase());
+    if (same && same !== k) delete env[same];
+    env[k] = v;
+  }
+  return env;
+}
+
 function usableCwd(cwd) {
   try {
     if (cwd && fs.statSync(cwd).isDirectory()) return cwd;
@@ -236,4 +253,4 @@ function withHelp(msg) {
   return hint ? msg + ' ' + hint : msg;
 }
 
-module.exports = { LocalPty, defaultShell, usableShell, usableCwd };
+module.exports = { LocalPty, defaultShell, usableShell, usableCwd, mergeEnv };

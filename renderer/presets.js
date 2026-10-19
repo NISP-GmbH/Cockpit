@@ -26,6 +26,7 @@ const PRESET_WAIT_DEFAULT = 30; // seconds a "wait:" gives the text to show up
 const PRESET_PROMPT_DEFAULT = 120; // seconds a "wait-prompt" waits (a password may be typed in between)
 const PRESET_GAP_MS = 400; // between two commands with nothing in between
 const PRESET_QUIET_MS = 400; // output that has stopped this long, ending in a prompt, is a prompt
+const PRESET_QUIET_WAIT_MS = 20000; // Cockpit's own quiet shell questions end within 8 s; wait this long for one
 const PRESET_VAR = /\{([A-Za-z_][\w-]*)\}/g;
 // The end of a line a shell asks a secret on (ssh, sudo, a key's passphrase, a code).
 const PRESET_SECRET = /\b(password|passphrase|passcode|pin|verification code|one-time code|otp)\b[^\n]{0,80}:\s*$/i;
@@ -587,9 +588,40 @@ function presetAtLaunch(id, saved, savedVars) {
   } else {
     const missing = p.asks.filter((a) => !vars[a.name]).map((a) => a.name);
     presetLaunchAdd(rec, p, 'idle', !presetAutoRun ? 'waits for a click - running at launch is off' : 'waits for a click - no answer yet for ' + missing.join(', '));
+    rec._presetIdle = true; // its first connection leaves it to the click, too
     presetBar(rec, 'idle');
   }
   return p.name;
+}
+
+// ---- when the connection comes (back) ----
+// A dropped connection (sleep, a network change, a shell that exited) takes everything the
+// preset did with it: the new ssh has no tmux attached, no cd, nothing. So when a terminal
+// that belongs to a preset connects and no run is already waiting for that connection, the
+// preset runs again (`presetOnReconnect`, saved, default on; off = the strip with Run).
+// Called once per new connection: from the ssh 'connected' status and from a local shell that
+// started. A run that is ALREADY there was started for this very connection - at launch, by a
+// preset start, by Apply on a dropped tab - so it is left alone; that is also what keeps the
+// first connection at launch from running it twice. The first connection after a cold boot
+// often fails (the network is not up yet) and the launch run gives up; the R that follows is
+// then the first REAL connection, and gets the preset like any reconnect. Only a tab the
+// launch left for a click (auto-run off, a question without an answer) keeps waiting for it.
+let presetOnReconnect = true; // saved
+function presetConnected(rec) {
+  if (!rec || (rec.kind !== 'ssh' && rec.kind !== 'local')) return;
+  rec._connects = (rec._connects || 0) + 1;
+  if (rec._presetRun || !rec.preset) return;
+  const p = presetFind(rec.preset.name);
+  if (!p) return;
+  if (rec._connects === 1 && rec._presetIdle) return;
+  const vars = rec.preset.vars || {};
+  if (presetOnReconnect && presetVarsDone(p, vars)) {
+    if (typeof logEvent === 'function') logEvent('system', { title: '⚡ Reconnected: preset ' + p.name + ' runs again', detail: (rec.tabEl && rec.tabEl.querySelector('.title').textContent) || '' });
+    presetRun(rec);
+  } else {
+    const missing = p.asks.filter((a) => !vars[a.name]).map((a) => a.name);
+    presetBar(rec, 'idle', presetOnReconnect ? 'reconnected - no answer yet for ' + missing.join(', ') : 'reconnected');
+  }
 }
 
 // ---- the launch report: one note after a restart, how the preset tabs did ----
@@ -785,6 +817,7 @@ function presetRun(rec) {
   if (!p) return presetBar(rec, 'gone');
   const vars = (rec.preset && rec.preset.vars) || {};
   if (rec._presetRun) presetStop(rec, 'Restarted');
+  rec._presetIdle = false; // it ran: the next connection is an ordinary reconnect
   const st = (rec._presetRun = { p, i: 0, stopped: false, timer: null, wait: null, lastCmdAt: 0, outSince: 0, since: Date.now() });
   const alive = () => !st.stopped && rec._presetRun === st && tabs.get(rec.id) === rec;
   const later = (ms, fn) => {
@@ -821,20 +854,27 @@ function presetRun(rec) {
       const settled = (rec._lastDataAt ? quiet > 300 : false) || Date.now() - t0 > 2500;
       const gap = Date.now() - st.lastCmdAt >= PRESET_GAP_MS;
       if (!settled || !gap) return later(120, tryNow);
-      whenInBandFree(
-        rec,
-        () => {
-          if (!alive()) return;
-          show();
-          tmuxNoteTyping(rec); // this counts as typing: no tmux card on top of it
-          termSend(rec, text + '\r');
-          st.lastCmdAt = Date.now();
-          st.outSince = 0;
-          rec._probeAt = Date.now(); // and no where-am-I probe for its half minute after this
-          then();
-        },
-        () => alive() && presetStop(rec, 'The terminal was busy with a transfer')
-      );
+      waitFree(Date.now());
+    };
+    // One of Cockpit's own quiet questions to the shell (where-am-I, the size, the tmux list)
+    // always ends by itself - within 8 s - so it is waited out, up to PRESET_QUIET_WAIT_MS. A
+    // real file transfer can take minutes: that one stops the preset after 6 s, and says so.
+    const waitFree = (w0) => {
+      if (!alive()) return;
+      if (!inBandBusy(rec)) {
+        show();
+        tmuxNoteTyping(rec); // this counts as typing: no tmux card on top of it
+        termSend(rec, text + '\r');
+        st.lastCmdAt = Date.now();
+        st.outSince = 0;
+        rec._probeAt = Date.now(); // and no where-am-I probe for its half minute after this
+        return then();
+      }
+      const transfer = !!(rec._grab || rec._send);
+      if (transfer && Date.now() - w0 > 6000) return presetStop(rec, 'A file transfer was using the terminal');
+      if (!transfer && Date.now() - w0 > PRESET_QUIET_WAIT_MS) return presetStop(rec, "Cockpit's own check of the shell did not finish");
+      show(transfer ? 'waiting for a file transfer in this terminal' : 'waiting for a moment of quiet in the shell');
+      later(120, () => waitFree(w0));
     };
     tryNow();
   };

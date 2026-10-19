@@ -54,6 +54,9 @@
       "project-store.js",
       "app-tracker.js",
       "app-store.js",
+      "screen-control.js",
+      "screen-win.cs",
+      "tools/**/*",
       "renderer/**/*",
       "assets/**/*",
       "node_modules/**/*"

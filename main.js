@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
-const { app, BrowserWindow, ipcMain, dialog, Menu, screen, safeStorage, shell, session, powerMonitor, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, screen, safeStorage, shell, session, powerMonitor, clipboard, globalShortcut, nativeImage } = require('electron');
 const { SSHManager } = require('./ssh-manager');
 const { AppTracker } = require('./app-tracker');
 const { AppStore } = require('./app-store');
@@ -12,6 +12,7 @@ const { SlackManager } = require('./slack-manager');
 const { WhatsAppManager } = require('./whatsapp-manager');
 const { GoogleManager, _mail: mailUtil } = require('./google-manager');
 const { LocalPty } = require('./local-pty');
+const { ScreenControl } = require('./screen-control');
 const { ClipHistory } = require('./clip-history');
 const { AgentManager } = require('./agent-manager');
 const { AiReply } = require('./ai-reply');
@@ -67,7 +68,12 @@ let pendingSshUrl = null;
 const ssh = new SSHManager();
 const slack = new SlackManager();
 let whatsapp = null; // WhatsAppManager, created lazily once userData path is known
-const localPty = new LocalPty((ch, payload) => send(ch, payload));
+// A shell that ends takes its screen-control token and grant with it (screen-control.js).
+const localPty = new LocalPty((ch, payload) => {
+  if (ch === 'pty:exit' && screenCtl && payload) screenCtl.tabGone(payload.tabId, true);
+  send(ch, payload);
+});
+let screenCtl = null; // ScreenControl, created once userData is known
 const codeServer = new CodeServerManager();
 const PDF_PREVIEW_DIR = path.join(os.tmpdir(), 'cockpit-pdf-preview');
 // Clipboard history lives here, where the system clipboard is; memory only (clip-history.js).
@@ -501,6 +507,19 @@ app.whenReady().then(() => {
 
   store = new Store(app.getPath('userData'));
   agent = new AgentManager({ store, encrypt: encryptSecret, decrypt: decryptSecret });
+  // Screen control for programs in local terminals: off unless switched on in Settings.
+  screenCtl = new ScreenControl({
+    userData: app.getPath('userData'),
+    appDir: __dirname,
+    send,
+    electron: { BrowserWindow, globalShortcut, nativeImage, screen },
+    getMainWindow: () => mainWindow,
+    preload: path.join(__dirname, 'preload.js'),
+  });
+  {
+    const s = store.loadSettings();
+    screenCtl.configure({ enabled: s.screenControl === true, offLimits: s.screenOffLimits !== false, maxWidth: Number(s.screenMaxWidth) || 1280 });
+  }
   aiReply = new AiReply({ store, encrypt: encryptSecret, decrypt: decryptSecret });
 
   // Restore a Google session from stored, encrypted credentials (no browser needed).
@@ -1107,10 +1126,26 @@ app.whenReady().then(() => {
   });
 
   // --- Local terminal (node-pty) ---
-  ipcMain.handle('pty:spawn', (_e, opts) => localPty.spawn(opts && opts.tabId, opts || {}));
+  ipcMain.handle('pty:spawn', (_e, opts) => {
+    const o = { ...(opts || {}) };
+    delete o.env; // the page never sets a shell's environment; screen control's comes from here
+    const env = screenCtl && screenCtl.envFor(o.tabId);
+    if (env) o.env = env;
+    return localPty.spawn(o.tabId, o);
+  });
   ipcMain.on('pty:write', (_e, { tabId, data }) => localPty.write(tabId, data));
   ipcMain.on('pty:resize', (_e, { tabId, cols, rows }) => localPty.resize(tabId, cols, rows));
-  ipcMain.on('pty:kill', (_e, { tabId }) => localPty.kill(tabId));
+  ipcMain.on('pty:kill', (_e, { tabId }) => {
+    if (screenCtl) screenCtl.tabGone(tabId);
+    localPty.kill(tabId);
+  });
+  // --- Screen control (screen-control.js) ---
+  ipcMain.handle('screen:status', () => (screenCtl ? screenCtl.status() : { supported: false }));
+  ipcMain.handle('screen:configure', (_e, o) => (screenCtl ? screenCtl.configure(o || {}) : { supported: false }));
+  ipcMain.on('screen:answer', (_e, { askId, choice }) => screenCtl && screenCtl.answer(askId, choice));
+  ipcMain.on('screen:stop', () => screenCtl && screenCtl.stop('the Stop button'));
+  ipcMain.on('screen:revoke', (_e, { tabId }) => screenCtl && screenCtl.revoke(tabId));
+  ipcMain.on('screen:title', (_e, { tabId, title }) => screenCtl && screenCtl.setTitle(tabId, title));
   ipcMain.handle('slack:history', async (_e, { channel }) => {
     try {
       return { ok: true, messages: await slack.history(channel) };
@@ -1351,6 +1386,7 @@ app.on('before-quit', () => {
   slack.disconnect();
   if (whatsapp) whatsapp.disconnect();
   localPty.disposeAll();
+  if (screenCtl) screenCtl.dispose();
   codeServer.stop();
   appTracker.stop();
   if (appStore) appStore.flush();

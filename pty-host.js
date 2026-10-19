@@ -4,7 +4,7 @@
 // matches the ABI), bridged to the Electron main process over stdio with a simple
 // newline-delimited JSON protocol. This sidesteps rebuilding node-pty for Electron.
 //
-// In → { type:'spawn', id, shell?, cols, rows, cwd }
+// In → { type:'spawn', id, shell?, cols, rows, cwd, env? }  (env: extra variables for this shell)
 //      { type:'write', id, data }
 //      { type:'resize', id, cols, rows }
 //      { type:'kill', id }
@@ -40,6 +40,23 @@ function defaultShell() {
   return process.env.SHELL || '/bin/bash';
 }
 
+// The shell's environment: Cockpit's own, plus what this one terminal is given (the screen-control
+// pipe and token). Windows spells the path variable "Path" and treats names case-insensitively,
+// but a plain object does not: an added "PATH" next to "Path" would put both into the block
+// and which one wins is undefined. So an extra variable REPLACES the existing key of that name,
+// whatever its case. (pty-host.js has the same helper; it runs under another Node.)
+function mergeEnv(extra) {
+  const env = { ...process.env };
+  if (!extra || typeof extra !== 'object') return env;
+  for (const [k, v] of Object.entries(extra)) {
+    if (typeof v !== 'string') continue;
+    const same = Object.keys(env).find((x) => x.toLowerCase() === k.toLowerCase());
+    if (same && same !== k) delete env[same];
+    env[k] = v;
+  }
+  return env;
+}
+
 function handle(msg) {
   const id = msg.id;
   if (msg.type === 'spawn') {
@@ -50,7 +67,7 @@ function handle(msg) {
         cols: msg.cols || 80,
         rows: msg.rows || 24,
         cwd: msg.cwd || os.homedir(),
-        env: process.env,
+        env: mergeEnv(msg.env),
       });
       sessions.set(id, p);
       p.onData((d) => out({ type: 'data', id, data: d }));

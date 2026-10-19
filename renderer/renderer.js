@@ -234,6 +234,7 @@ const els = {
   termPresetsSave: document.getElementById('term-presets-save'),
   termPresetsMsg: document.getElementById('term-presets-msg'),
   setPresetAuto: document.getElementById('set-preset-auto'),
+  setPresetReconnect: document.getElementById('set-preset-reconnect'),
   searchBar: document.getElementById('search-bar'),
   searchInput: document.getElementById('search-input'),
   searchInfo: document.getElementById('search-info'),
@@ -307,6 +308,7 @@ const els = {
   setMailUndo: document.getElementById('set-mail-undo'),
   setMailBadge: document.getElementById('set-mail-badge'),
   setTmuxOffer: document.getElementById('set-tmux-offer'),
+  setWhereAuto: document.getElementById('set-where-auto'),
   setTmuxReset: document.getElementById('set-tmux-reset'),
   setClipOn: document.getElementById('set-clip-on'),
   setClipSecrets: document.getElementById('set-clip-secrets'),
@@ -554,7 +556,7 @@ function showTabHelp(tabEl) {
     whereBtn.textContent = '📍 Where am I?';
     whereBtn.title =
       'Read the real host and directory out of this shell and show them in the tab title\n' +
-      '(one silent command; skipped while a full-screen program is on screen)';
+      '(one silent command, only at a shell prompt - never into a running program such as Claude Code)';
     whereBtn.addEventListener('click', () => {
       els.tabHelp.classList.add('hidden');
       const r = tabs.get(tabHelpTabId);
@@ -563,7 +565,7 @@ function showTabHelp(tabEl) {
       if (!probeWhere(r) && r.term) {
         writeToTerm(
           r,
-          '\r\n\x1b[2m[not now: this terminal is running a full-screen program]\x1b[0m\r\n'
+          '\r\n\x1b[2m[not now: this terminal is not at a shell prompt - a program (Claude Code, vim ...) is running]\x1b[0m\r\n'
         );
       }
       if (r.term) r.term.focus();
@@ -589,12 +591,25 @@ function showTabHelp(tabEl) {
           r,
           told
             ? '\r\n\x1b[2m[told the shell this terminal is ' + r.term.cols + 'x' + r.term.rows + ']\x1b[0m\r\n'
-            : '\r\n\x1b[2m[sent the resize signal only - leave the full-screen program to say it in words]\x1b[0m\r\n'
+            : '\r\n\x1b[2m[sent the resize signal only - a program is running, so nothing was typed]\x1b[0m\r\n'
         );
         r.term.focus();
       }
     });
     els.tabHelpPaste.appendChild(sizeBtn);
+
+    // a program in this terminal may control the screen right now: end it for this terminal
+    if (rec && screenGranted.has(rec.id)) {
+      const scBtn = document.createElement('button');
+      scBtn.className = 'th-cmd th-plain th-screen-stop';
+      scBtn.textContent = '🛑 Stop screen control';
+      scBtn.title = 'A program in this terminal may see and control the screen - end that now (Ctrl+Alt+Esc ends it for every terminal)';
+      scBtn.addEventListener('click', () => {
+        els.tabHelp.classList.add('hidden');
+        api.screenRevoke(rec.id);
+      });
+      els.tabHelpPaste.appendChild(scBtn);
+    }
 
     // tmux sessions on whatever host this shell is on now - attach, start, or switch.
     const tmuxBtn = document.createElement('button');
@@ -3263,6 +3278,7 @@ async function startLocalShell(rec) {
   }
   rec.status = 'connected';
   setTabStatus(rec.id, 'connected', res.shell || 'local');
+  presetConnected(rec);
   requestAnimationFrame(() => {
     try {
       rec.fitAddon.fit();
@@ -3856,13 +3872,8 @@ function quietCommand(rec, body) {
   if (!rec || (rec.kind !== 'ssh' && rec.kind !== 'local')) return false;
   if (rec.status !== 'connected' || !rec.term) return false;
   if (inBandBusy(rec)) return false;
-  try {
-    // Never type into a full-screen program: the keystrokes would land in vim, tmux
-    // copy-mode or Claude rather than a shell.
-    if (rec.term.buffer.active.type !== 'normal') return false;
-  } catch (_) {
-    return false;
-  }
+  // Never type into a program: the keystrokes would land in vim, tmux copy-mode or Claude Code.
+  if (!termAtShellPrompt(rec)) return false;
   const tok = 'Q' + Math.random().toString(36).slice(2, 10).toUpperCase().replace(/[^A-Z0-9]/g, '') + 'Q';
   const startMark = '::Q6' + tok + '::';
   const endMark = '::R6' + tok + '::';
@@ -3974,13 +3985,9 @@ function probeWhere(rec) {
   if (rec.status !== 'connected' || !rec.term) return false;
   if (inBandBusy(rec)) return false; // one in-band conversation at a time
   if (rec._presetRun) return false; // a preset is typing: its ssh may be asking for a password right now
-  try {
-    // Never type into a full-screen program. On the alternate screen the keystrokes
-    // would land in vim, tmux's copy-mode or Claude, not in a shell.
-    if (rec.term.buffer.active.type !== 'normal') return false;
-  } catch (_) {
-    return false;
-  }
+  // Only into a shell at its prompt - never into vim, tmux's copy-mode or Claude Code (which
+  // draws on the normal screen: the old alternate-screen test let the printf into its input).
+  if (!termAtShellPrompt(rec)) return false;
   const tok = 'W' + Math.random().toString(36).slice(2, 10).toUpperCase().replace(/[^A-Z0-9]/g, '') + 'W';
   const startMark = '::W7' + tok + '::';
   const endMark = '::Z7' + tok + '::';
@@ -4029,9 +4036,12 @@ function probeWhere(rec) {
   return true;
 }
 // Opportunistic: at most one probe per tab per half minute, and only when the
-// terminal is sitting at a shell.
+// terminal is sitting at a shell. OFF unless chosen (`whereAuto`, Settings): it types into the
+// terminal by itself, and the user had it land in a Claude Code session. The free paths - OSC 7
+// and a user@host:cwd window title - still keep the title right; the hover sheet's button asks.
+let whereAuto = false;
 function probeWhereSoon(rec, delay) {
-  if (!rec) return;
+  if (!rec || !whereAuto) return;
   if (rec._probeAt && Date.now() - rec._probeAt < 30000) return;
   setTimeout(() => probeWhere(rec), delay || 0);
 }
@@ -4264,6 +4274,43 @@ function previewJsonFile(rec, filePath) {
 
 // Anything that uses the terminal as a transport. The routers hand the stream to one tap
 // at a time, so a second conversation would read the first one’s output.
+// Is this terminal sitting at a SHELL PROMPT - the only place Cockpit may type a silent command
+// of its own (where-am-I, the size resync, the tmux list)? "Not the alternate screen" was the
+// whole test once, and it is not enough: Claude Code draws on the NORMAL screen, so the probe's
+// printf went into Claude's input box and its Enter sent it to Claude as a message (seen by the
+// user). So all of: a visible cursor (Claude Code, like most programs that draw their own UI,
+// hides it), none of Claude Code's own words on screen, a cursor line that ends like a prompt,
+// and output that has stopped. Anything uncertain is a no - a title can wait, a message cannot
+// be unsent.
+const TERM_PROGRAM_MARKS = /\? for shortcuts|esc to interrupt|shift\+tab to cycle|accept edits|bypass permissions|ctrl\+r to expand|Claude Code|⏵⏵/i;
+function termCursorHidden(term) {
+  try {
+    const core = term && term._core;
+    const cs = core && (core.coreService || core._coreService);
+    return !!(cs && cs.isCursorHidden);
+  } catch (_) {
+    return false;
+  }
+}
+function termAtShellPrompt(rec) {
+  if (!rec || !rec.term || rec.status !== 'connected') return false;
+  try {
+    const buf = rec.term.buffer.active;
+    if (buf.type !== 'normal') return false; // vim, less, tmux's own screen
+    if (termCursorHidden(rec.term)) return false; // a program draws its own cursor
+    if (Date.now() - (rec._lastDataAt || 0) < 400) return false; // still printing
+    const y = buf.baseY + buf.cursorY;
+    let screen = '';
+    for (let k = Math.max(0, y - rec.term.rows); k <= Math.min(buf.length - 1, y + 3); k++) {
+      const l = buf.getLine(k);
+      if (l) screen += l.translateToString(true) + '\n';
+    }
+    if (TERM_PROGRAM_MARKS.test(screen)) return false; // Claude Code is on screen
+    return presetLineState(presetCursorText(rec, false)) === 'prompt';
+  } catch (_) {
+    return false;
+  }
+}
 function inBandBusy(rec) {
   return !!(rec && (rec._grab || rec._send || rec._probe || rec._size || rec._ask));
 }
@@ -4294,6 +4341,21 @@ const GRAB_SLICE_MAX = 12288; // source bytes per request when nothing is being 
 const GRAB_SLICE_MIN = 512; // small enough to survive a badly behaved pane
 const GRAB_SLICE_TRIES = 3; // attempts at one slice before the slice is halved
 
+// An answer as the shell printed it, without what the terminals in between added. A relaying
+// terminal - tmux above all - redraws what it shows with escape sequences of its own: colours,
+// and cursor moves such as ESC[12;1H where a line ends. They carry DIGITS and letters, and
+// "keep only the digits" glued them onto a file size (a 76 KB file "was" 124174470061001488 GB),
+// "keep only base64" into every slice. A cursor position becomes a line break (that is what tmux
+// uses it for); every other escape, and every control character but tab and newline, goes.
+function inBandClean(s) {
+  return String(s == null ? '' : s)
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC (a title, a hyperlink)
+    .replace(/\x1b[P^_X][\s\S]*?\x1b\\/g, '') // DCS / PM / APC / SOS
+    .replace(/\x1b\[[0-9;]*[Hf]/g, '\n') // a cursor position: the next row
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '') // any other CSI (colour, erase, mode)
+    .replace(/\x1b[ -/]*[0-~]/g, '') // two-byte escapes: ESC ( B, ESC =, ESC 7 ...
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, ''); // control characters but \t and \n (CR, SI, BEL)
+}
 // Ask the shell one question and hand back what it printed, with the whole exchange
 // swallowed. Resolves null if it never answers.
 function inBandAsk(rec, body, timeoutMs) {
@@ -4319,7 +4381,7 @@ function inBandAsk(rec, body, timeoutMs) {
         }
         const j = this.all.indexOf(endMark, i + startMark.length);
         if (j === -1) return '';
-        const payload = this.all.slice(i + startMark.length, j);
+        const payload = inBandClean(this.all.slice(i + startMark.length, j));
         const after = this.all.slice(j + endMark.length);
         const nl = after.indexOf('\n');
         this.finish(payload, nl === -1 ? '' : after.slice(nl + 1));
@@ -4401,7 +4463,9 @@ async function grabInSlices(rec, filePath, opts, status) {
           'vim, Claude) holds the terminal, and the file has to come back through it.',
       });
     }
-    const total = parseInt(String(sizeTxt).replace(/[^0-9]/g, ''), 10);
+    // the first whole number (wc pads with spaces on a Mac) - never the digits glued together
+    const sizeNum = /(\d+)/.exec(String(sizeTxt));
+    const total = sizeNum ? parseInt(sizeNum[1], 10) : NaN;
     if (!Number.isFinite(total) || total <= 0) {
       return finish({ error: 'Cannot read ' + name + ' - check the path and permissions.' });
     }
@@ -5642,6 +5706,7 @@ api.onStatus(({ tabId, line }) => {
   if (!rec || !rec.term) return;
   if (/connected/i.test(line)) {
     setTabStatus(tabId, 'connected', line);
+    presetConnected(rec); // the tab's preset again after a reconnect (presets.js)
     // A reconnected shell (and anything it re-attaches to, tmux above all) needs to be
     // told the size for real, not just at shell-open time.
     setTimeout(() => nudgeRemoteSize(rec), 400);
@@ -7481,6 +7546,8 @@ async function openSettings() {
   els.setMailQuiet.checked = mailQuietFocus;
   els.setMailBadge.checked = mailTabBadge;
   els.setTmuxOffer.checked = tmuxOffer;
+  els.setWhereAuto.checked = whereAuto;
+  screenSettingsRender();
   els.setTmuxReset.classList.toggle('hidden', !tmuxNeverHosts.length);
   els.setTmuxReset.textContent = 'ask again on ' + tmuxNeverHosts.length + ' host' + (tmuxNeverHosts.length === 1 ? '' : 's');
   els.setClipOn.checked = clipOn;
@@ -7533,6 +7600,7 @@ async function openSettings() {
   els.setTermPresets.value = termPresetsText;
   els.termPresetsMsg.textContent = '';
   els.setPresetAuto.checked = presetAutoRun;
+  els.setPresetReconnect.checked = presetOnReconnect;
   els.setDebugPort.value = remoteDebugPort || '';
   els.debugPortMsg.textContent = '';
   els.webExtMsg.textContent = '';
@@ -7600,6 +7668,10 @@ els.quickCmdsSave.addEventListener('click', () => {
   els.quickCmdsMsg.textContent = 'Saved.';
 });
 
+els.setPresetReconnect.addEventListener('change', () => {
+  presetOnReconnect = els.setPresetReconnect.checked;
+  api.saveSettings({ presetOnReconnect });
+});
 els.setPresetAuto.addEventListener('change', () => {
   presetAutoRun = els.setPresetAuto.checked;
   api.saveSettings({ presetAutoRun });
@@ -7660,6 +7732,10 @@ els.setMailLearn.addEventListener('change', () => {
   if (!mailLearnSnippets) mailForgetLearning(); // off means nothing is kept, not just not offered
 });
 
+els.setWhereAuto.addEventListener('change', () => {
+  whereAuto = els.setWhereAuto.checked;
+  api.saveSettings({ whereAuto });
+});
 els.setTmuxOffer.addEventListener('change', () => {
   tmuxOffer = els.setTmuxOffer.checked;
   api.saveSettings({ tmuxOffer });
@@ -8309,12 +8385,13 @@ const BB_LANE_LABEL = {
 const BB_COLOR = {
   cmd: '#4ea1ff', 'cmd-done': '#7ee787', slack: '#c285e0', whatsapp: '#25d366',
   mail: '#f0c674', meeting: '#ff9d5c', note: '#f0c674', 'tab-open': '#8a8f94',
-  'tab-close': '#5a6068', attention: '#ff5f56', reminder: '#a0e0a0',
+  'tab-close': '#5a6068', attention: '#ff5f56', reminder: '#a0e0a0', screen: '#ff4d4f',
 };
 const BB_LANE_FOR = {
   cmd: 'terminal', 'cmd-done': 'terminal', attention: 'terminal',
   slack: 'slack', whatsapp: 'whatsapp', mail: 'mail', meeting: 'calendar',
   note: 'notes', 'tab-open': 'system', 'tab-close': 'system', reminder: 'system',
+  screen: 'terminal', // a program in a terminal controlled the screen
 };
 
 // The one call sites use — safe to sprinkle anywhere; never throws.
@@ -18813,7 +18890,15 @@ async function tmuxPick(rec) {
 function tmuxAutoOffer(rec, tries) {
   if (!tmuxOffer || !rec || rec.kind !== 'ssh' || !tabs.has(rec.id) || rec.status !== 'connected') return;
   if (tmuxNeverHosts.includes(tmuxHostKey(rec))) return;
+  // A preset is the plan for this terminal (it usually attaches tmux itself), and its first step
+  // is often a `sleep` - so "nothing typed yet" is no invitation here. The question would hold the
+  // shell for up to 8 s exactly when the preset wants to type: all five tabs of a launch stopped.
+  if (rec._presetRun) return;
   if (rec._typedAt && rec._typedAt > (rec._connectedAt || 0)) return; // you started working
+  if (!termAtShellPrompt(rec)) {
+    if ((tries || 0) < 8) setTimeout(() => tmuxAutoOffer(rec, (tries || 0) + 1), 700); // the motd may still be on its way
+    return;
+  }
   const quietFor = Date.now() - (rec._lastDataAt || 0);
   if (quietFor < 700 || inBandBusy(rec)) {
     if ((tries || 0) < 8) setTimeout(() => tmuxAutoOffer(rec, (tries || 0) + 1), 700); // output still coming (auto-hop, motd)
@@ -18824,6 +18909,121 @@ function tmuxAutoOffer(rec, tries) {
     if (rec._typedAt && rec._typedAt > (rec._connectedAt || 0)) return;
     tmuxShowCard(rec, info, false);
   });
+}
+
+// ---- screen control (screen-control.js in main; the tool is tools/cockpit-screen.js) ----
+// A program in a LOCAL terminal asks; Cockpit shows who asks and what for, and the user allows it
+// for that terminal (15 / 60 min / until the tab closes) or not. The tokens never come to the page;
+// it only answers, shows the badge, writes the Black Box lines and keeps the titles current.
+let screenControlOn = false; // saved: screenControl (main reads it at start, too)
+let screenOffLimits = true; // saved: screenOffLimits
+let screenMaxWidth = 1280; // saved: screenMaxWidth
+let screenGranted = new Set(); // tab ids
+const screenTabTitle = (rec) => (rec && rec.tabEl && rec.tabEl.querySelector('.title') ? rec.tabEl.querySelector('.title').textContent : '') || 'a terminal';
+// The Black Box and the red pill name terminals by their titles, which only the page knows.
+function screenPushTitles() {
+  if (!screenControlOn) return;
+  for (const rec of tabs.values()) {
+    if (rec.kind !== 'local') continue;
+    const t = screenTabTitle(rec);
+    if (rec._screenTitle === t) continue;
+    rec._screenTitle = t;
+    api.screenTitle(rec.id, t);
+  }
+}
+setInterval(screenPushTitles, 3000);
+function screenAskShow(a) {
+  document.getElementById('screen-dlg')?.remove();
+  const rec = tabs.get(a.tabId);
+  const title = rec ? screenTabTitle(rec) : a.title || 'a terminal';
+  api.screenTitle(a.tabId, title);
+  const ov = document.createElement('div');
+  ov.id = 'screen-dlg';
+  ov.dataset.ask = a.askId;
+  ov.innerHTML =
+    '<div class="pd-box" role="dialog">' +
+    '<div class="pd-title">🖱 Screen control</div>' +
+    '<div class="pd-text">A program in the terminal <b>' + escapeHtml(title) + '</b> wants to see and control this screen.' +
+    (a.first ? ' Its first request: <b>' + escapeHtml(a.first) + '</b>.' : '') + '</div>' +
+    '<div class="pd-text sd-what">While allowed it can take screenshots, move the mouse, click, type and bring windows to the front - in every program except Cockpit itself' +
+    (screenOffLimits ? '' : ' (no: Cockpit\'s own windows are NOT off limits now, see Settings)') +
+    '. A red pill shows while it is allowed; <b>Ctrl+Alt+Esc</b> or its Stop ends it at once. Everything it does is in the Black Box.</div>' +
+    '<div class="sd-buttons">' +
+    '<button data-sc="15" class="primary">Allow 15 min</button><button data-sc="60">Allow 60 min</button>' +
+    '<button data-sc="tab">Until the tab closes</button><button data-sc="deny" class="sd-deny">Don\'t allow</button></div>' +
+    '<div class="sd-note">No answer within a minute counts as no.</div>' +
+    '</div>';
+  document.body.appendChild(ov);
+  const done = (choice) => {
+    api.screenAnswer(a.askId, choice);
+    ov.remove();
+    if (rec) activateTab(rec.id);
+  };
+  ov.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-sc]');
+    if (b) done(b.dataset.sc);
+  });
+  ov.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      done('deny');
+    }
+  });
+  ov.querySelector('.sd-deny').focus(); // Enter on its own never allows anything
+}
+if (api.onScreenAsk) {
+  api.onScreenAsk((a) => a && screenAskShow(a));
+  api.onScreenAsked((a) => {
+    const ov = document.getElementById('screen-dlg');
+    if (ov && a && String(ov.dataset.ask) === String(a.askId)) ov.remove(); // answered elsewhere, or timed out
+  });
+  api.onScreenEvent((e) => {
+    if (!e) return;
+    const rec = e.tabId ? tabs.get(e.tabId) : null;
+    logEvent('screen', { title: e.title, detail: e.detail, host: rec ? screenTabTitle(rec) : '', ref: rec ? { type: 'tab', tabKey: tabKey(rec) } : undefined });
+  });
+  api.onScreenStatus((s) => screenApplyStatus(s));
+}
+function screenApplyStatus(s) {
+  screenGranted = new Set(((s && s.grants) || []).map((g) => g.tabId));
+  for (const rec of tabs.values()) if (rec.tabEl) rec.tabEl.classList.toggle('screen-on', screenGranted.has(rec.id));
+}
+async function screenSettingsRender() {
+  const on = document.getElementById('set-screen-on');
+  if (!on) return;
+  on.checked = screenControlOn;
+  document.getElementById('set-screen-offlimits').checked = screenOffLimits;
+  document.getElementById('set-screen-width').value = String(screenMaxWidth);
+  if (document.getElementById('set-screen-width').value !== String(screenMaxWidth)) document.getElementById('set-screen-width').value = '1280';
+  const s = await api.screenStatus();
+  const ok = s && s.supported;
+  document.getElementById('set-screen-na').classList.toggle('hidden', !!ok);
+  document.getElementById('set-screen-setup').classList.toggle('hidden', !(ok && screenControlOn));
+  if (s && s.mcpCommand) document.getElementById('set-screen-cmd').textContent = s.mcpCommand;
+}
+async function screenSave() {
+  screenControlOn = document.getElementById('set-screen-on').checked;
+  screenOffLimits = document.getElementById('set-screen-offlimits').checked;
+  screenMaxWidth = Number(document.getElementById('set-screen-width').value) || 1280;
+  api.saveSettings({ screenControl: screenControlOn, screenOffLimits, screenMaxWidth });
+  await api.screenConfigure({ enabled: screenControlOn, offLimits: screenOffLimits, maxWidth: screenMaxWidth });
+  if (screenControlOn) for (const rec of tabs.values()) rec._screenTitle = null; // send every title again
+  screenPushTitles();
+  screenSettingsRender();
+}
+['set-screen-on', 'set-screen-offlimits', 'set-screen-width'].forEach((id) => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('change', screenSave);
+});
+{
+  const copy = document.getElementById('set-screen-copy');
+  if (copy)
+    copy.addEventListener('click', () => {
+      api.clipboardWrite(document.getElementById('set-screen-cmd').textContent);
+      copy.textContent = 'Copied';
+      setTimeout(() => (copy.textContent = 'Copy'), 1500);
+    });
 }
 
 // ---- clipboard history ----
@@ -22369,6 +22569,10 @@ setInterval(() => {
     if (r && ['x', 'y', 'w', 'h'].every((k) => Number.isFinite(r[k])) && r.w > 0 && r.h > 0) mailComposeRect = { x: r.x, y: r.y, w: r.w, h: r.h };
   }
   if (settings && typeof settings.tmuxOffer === 'boolean') tmuxOffer = settings.tmuxOffer;
+  if (settings && typeof settings.whereAuto === 'boolean') whereAuto = settings.whereAuto;
+  if (settings && typeof settings.screenControl === 'boolean') screenControlOn = settings.screenControl;
+  if (settings && typeof settings.screenOffLimits === 'boolean') screenOffLimits = settings.screenOffLimits;
+  if (settings && Number.isFinite(settings.screenMaxWidth)) screenMaxWidth = settings.screenMaxWidth;
   if (settings && Array.isArray(settings.tmuxNeverHosts)) tmuxNeverHosts = settings.tmuxNeverHosts.filter((x) => typeof x === 'string').slice(-200);
   if (settings && typeof settings.clipOn === 'boolean') clipOn = settings.clipOn;
   if (settings && typeof settings.clipClearSecrets === 'boolean') clipClearSecrets = settings.clipClearSecrets;
@@ -22498,6 +22702,7 @@ setInterval(() => {
   if (settings && Array.isArray(settings.quickCommands)) quickCommands = settings.quickCommands;
   presetSetText(settings && typeof settings.termPresets === 'string' ? settings.termPresets : '', false);
   if (settings && typeof settings.presetAutoRun === 'boolean') presetAutoRun = settings.presetAutoRun;
+  if (settings && typeof settings.presetOnReconnect === 'boolean') presetOnReconnect = settings.presetOnReconnect;
   if (settings && settings.presetLastVars && typeof settings.presetLastVars === 'object') presetLastVars = settings.presetLastVars;
   presetWireMenu();
   if (settings && Number.isFinite(settings.remoteDebugPort)) remoteDebugPort = settings.remoteDebugPort;

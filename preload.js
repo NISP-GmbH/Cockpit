@@ -155,6 +155,34 @@ contextBridge.exposeInMainWorld('sshApi', {
     ipcRenderer.on('pty:exit', handler);
     return () => ipcRenderer.removeListener('pty:exit', handler);
   },
+  // --- Screen control for programs in local terminals (screen-control.js); tokens never come here ---
+  screenStatus: () => ipcRenderer.invoke('screen:status'),
+  screenConfigure: (o) => ipcRenderer.invoke('screen:configure', o),
+  screenAnswer: (askId, choice) => ipcRenderer.send('screen:answer', { askId, choice }),
+  screenStop: () => ipcRenderer.send('screen:stop'),
+  screenRevoke: (tabId) => ipcRenderer.send('screen:revoke', { tabId }),
+  screenTitle: (tabId, title) => ipcRenderer.send('screen:title', { tabId, title }),
+  onScreenAsk: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('screen:ask', handler);
+    return () => ipcRenderer.removeListener('screen:ask', handler);
+  },
+  onScreenAsked: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('screen:asked', handler);
+    return () => ipcRenderer.removeListener('screen:asked', handler);
+  },
+  onScreenEvent: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('screen:event', handler);
+    return () => ipcRenderer.removeListener('screen:event', handler);
+  },
+  onScreenStatus: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('screen:status', handler);
+    return () => ipcRenderer.removeListener('screen:status', handler);
+  },
+  onScreenIndicator: (cb) => ipcRenderer.on('screen:indicator', (_e, d) => cb(d)), // the indicator window
   focusWindow: () => ipcRenderer.invoke('app:focus'),
   bringToFront: () => ipcRenderer.invoke('app:toFront'),
   capturePage: (rect) => ipcRenderer.invoke('app:capturePage', rect),
