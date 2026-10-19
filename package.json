@@ -48,6 +48,7 @@
       "clip-history.js",
       "agent-manager.js",
       "web-menu.js",
+      "ai-reply.js",
       "codeserver-manager.js",
       "blackbox-store.js",
       "project-store.js",

@@ -7317,19 +7317,50 @@ body.privacy .ms-text {
 .mail-selpill {
   position: absolute;
   z-index: 32;
-  padding: 3px 10px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
   border-radius: 12px;
   border: 1px solid #ea8a5c;
   background: #2b2520;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+.mail-selpill.hidden {
+  display: none;
+}
+.mail-selpill .sp-btn {
+  padding: 2px 8px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
   color: #f3b58f;
   font: inherit;
   font-size: 12px;
   cursor: pointer;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  white-space: nowrap;
 }
-.mail-selpill:hover {
+.mail-selpill .sp-btn:hover {
   background: #ea8a5c;
   color: #1b1204;
+}
+/* the rewrites only when the selection is in the message being written */
+.mail-selpill .sp-ai {
+  display: none;
+  align-items: center;
+  gap: 1px;
+  border-left: 1px solid #5a4636;
+  padding-left: 4px;
+}
+.mail-selpill.with-ai .sp-ai {
+  display: flex;
+}
+.mail-selpill .sp-cap {
+  color: #ffd75e;
+  padding: 0 2px;
+}
+.mail-selpill .sp-ai .sp-btn {
+  color: #ffe89a;
 }
 /* Mail: where a link really goes */
 .mail-linkcard {
@@ -7844,4 +7875,300 @@ body.privacy #gmail-preview {
 .mm.cur {
   outline: 1px solid var(--accent);
   outline-offset: -1px;
+}
+
+/* fast AI replies: the toggle next to 🤖, and compose while the model writes */
+.mail-btn.mr-fastbtn {
+  opacity: 0.45;
+  padding: 3px 6px;
+}
+.mail-btn.mr-fastbtn.on {
+  opacity: 1;
+  color: #ffd75e;
+  border-color: #8a7430;
+}
+.mail-compose.ai-writing .mc-body {
+  box-shadow: inset 0 0 0 1px #8a7430; /* the field has no border of its own */
+  animation: ai-writing 1.4s ease-in-out infinite;
+}
+@keyframes ai-writing {
+  50% {
+    box-shadow: inset 0 0 0 1px #ffd75e;
+  }
+}
+
+/* a file dragged over the Mail tab */
+.mail-drop {
+  display: none;
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  background: rgba(20, 24, 28, 0.72);
+  border: 2px dashed var(--accent);
+  border-radius: 8px;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none; /* the drop lands on the pane underneath */
+}
+.mail-pane.mail-dropping .mail-drop {
+  display: flex;
+}
+/* frames must not take the drag away from the pane while it is over them */
+.mail-pane.mail-dropping iframe {
+  pointer-events: none;
+}
+.md-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 22px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 15px;
+  color: #fff;
+}
+.md-icon {
+  font-size: 22px;
+}
+
+/* AI replies on: the Reply buttons say so */
+.mail-btn.mr-ai {
+  color: #ffd75e;
+  border-color: #8a7430;
+}
+/* the bar at the top of compose while the model writes, and after */
+.mc-aibar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  border-bottom: 1px solid var(--border);
+  background: #2d2913;
+  color: #ffe89a;
+}
+.mc-aibar .ai-txt {
+  flex: 1;
+  min-width: 0;
+}
+.mc-aibar.busy .ai-ico {
+  animation: ai-writing-ico 0.9s ease-in-out infinite;
+}
+@keyframes ai-writing-ico {
+  50% {
+    opacity: 0.25;
+  }
+}
+.mc-aibar.ok {
+  background: #1f2a1c;
+  color: #b9e6a8;
+}
+.mc-aibar.bad {
+  background: #2e1c1c;
+  color: #ffb4a8;
+}
+
+/* compose: moved or resized, it floats - a full frame instead of the docked tab shape */
+.mail-compose.floating {
+  border-bottom: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 34px rgba(0, 0, 0, 0.55);
+}
+.mc-head {
+  cursor: move;
+  user-select: none;
+}
+.mc-rs {
+  position: absolute;
+  z-index: 3;
+  touch-action: none;
+}
+.mc-rs-n,
+.mc-rs-s {
+  left: 10px;
+  right: 10px;
+  height: 6px;
+  cursor: ns-resize;
+}
+.mc-rs-n {
+  top: -3px;
+}
+.mc-rs-s {
+  bottom: -3px;
+}
+.mc-rs-e,
+.mc-rs-w {
+  top: 10px;
+  bottom: 10px;
+  width: 6px;
+  cursor: ew-resize;
+}
+.mc-rs-e {
+  right: -3px;
+}
+.mc-rs-w {
+  left: -3px;
+}
+.mc-rs-ne,
+.mc-rs-nw,
+.mc-rs-se,
+.mc-rs-sw {
+  width: 14px;
+  height: 14px;
+}
+.mc-rs-ne {
+  top: -4px;
+  right: -4px;
+  cursor: nesw-resize;
+}
+.mc-rs-sw {
+  bottom: -4px;
+  left: -4px;
+  cursor: nesw-resize;
+}
+.mc-rs-nw {
+  top: -4px;
+  left: -4px;
+  cursor: nwse-resize;
+}
+.mc-rs-se {
+  bottom: -4px;
+  right: -4px;
+  cursor: nwse-resize;
+}
+/* while moving or resizing: one cursor everywhere, and frames let the pointer go */
+.mail-moving,
+.mail-moving * {
+  cursor: var(--mc-cursor, move) !important;
+  user-select: none;
+}
+.mail-moving iframe {
+  pointer-events: none;
+}
+
+/* the AI button in the compose title bar */
+.mc-head .mc-aibtn {
+  margin-right: 8px;
+  font-weight: 600;
+  color: #ffd75e;
+  border-color: #8a7430;
+  padding: 2px 10px;
+}
+.mc-head .mc-aibtn.busy {
+  color: #ffb4a8;
+  border-color: #8a4a40;
+}
+
+/* "attached" with nothing attached */
+.mc-attwarn {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  border-bottom: 1px solid var(--border);
+  background: #33240f;
+  color: #ffd9a0;
+}
+.mc-attwarn span {
+  flex: 1;
+  min-width: 180px;
+}
+/* 🌐 the translation under a mail */
+.mm-trans {
+  margin: 10px 0 4px;
+  border: 1px solid #3c4a5a;
+  border-left: 3px solid #6aa7e8;
+  border-radius: 6px;
+  background: #1c232b;
+}
+.mm-trans .mt-head {
+  display: flex;
+  align-items: center;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  color: #9cc4ee;
+  border-bottom: 1px solid #2c3a48;
+}
+.mm-trans .mt-text {
+  padding: 8px 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+.mm-trans.busy .mt-head span:first-child::after {
+  content: ' …';
+}
+.mm-trans.bad {
+  border-left-color: var(--danger);
+}
+.mm-trans.same .mt-text {
+  color: var(--fg-dim);
+}
+/* ⚡ the explain / command popover in a terminal pane */
+.ai-pop {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  z-index: 40;
+  width: min(560px, calc(100% - 32px));
+  max-height: min(60%, 420px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-alt);
+  border: 1px solid #8a7430;
+  border-radius: 10px;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.6);
+  font: 13px/1.45 "Segoe UI", system-ui, sans-serif;
+  color: var(--fg);
+  outline: none;
+}
+.ai-pop .ap-head {
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  font-weight: 600;
+  color: #ffe89a;
+  border-bottom: 1px solid var(--border);
+}
+.ai-pop.busy .ap-head span:first-child {
+  animation: ai-writing-ico 0.9s ease-in-out infinite;
+}
+.ai-pop .ap-text {
+  padding: 8px 12px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+.ai-pop.bad .ap-text {
+  color: #ffb4a8;
+}
+.ai-pop.small {
+  max-width: 460px;
+}
+.ai-pop .ap-cmd {
+  border-top: 1px solid var(--border);
+  padding: 8px 12px;
+}
+.ai-pop .ap-cmd code {
+  display: block;
+  padding: 6px 8px;
+  background: #0d0f11;
+  border-radius: 6px;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #b9e6a8;
+}
+.ai-pop .ap-acts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+.ai-pop .ap-note {
+  color: var(--fg-dim);
+  font-size: 11.5px;
 }

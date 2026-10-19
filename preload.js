@@ -203,6 +203,14 @@ contextBridge.exposeInMainWorld('sshApi', {
   agentModels: () => ipcRenderer.invoke('agent:models'),
   agentStart: (o) => ipcRenderer.invoke('agent:start', o),
   agentJob: (id) => ipcRenderer.invoke('agent:job', { id }),
+  // fast AI replies: same rule, the key stays in main
+  aiGetConfig: () => ipcRenderer.invoke('ai:getConfig'),
+  aiSetConfig: (o) => ipcRenderer.invoke('ai:setConfig', o),
+  aiTest: () => ipcRenderer.invoke('ai:test'),
+  aiDraft: (reqId, input) => ipcRenderer.invoke('ai:draft', { reqId, input }),
+  aiCancel: (reqId) => ipcRenderer.invoke('ai:cancel', { reqId }),
+  aiTask: (reqId, kind, input) => ipcRenderer.invoke('ai:task', { reqId, kind, input }), // rewrite / translate / explain / command
+  onAiDelta: (cb) => ipcRenderer.on('ai:delta', (_e, p) => cb(p)),
   mailCancelSend: (id) => ipcRenderer.invoke('mail:cancelSend', { id }),
   mailSendNow: (id) => ipcRenderer.invoke('mail:sendNow', { id }),
   mailContacts: (o) => ipcRenderer.invoke('mail:contacts', o || {}),

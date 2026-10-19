@@ -535,6 +535,21 @@ function showTabHelp(tabEl) {
       r.term.focus();
     });
     els.tabHelpPaste.appendChild(joinBtn);
+
+    if (aiReady()) {
+      const exBtn = document.createElement('button');
+      exBtn.className = 'th-cmd th-plain';
+      exBtn.textContent = '⚡ Explain';
+      exBtn.title = hasSel
+        ? 'Explain the selected output, with a command to fix it if there is one - typed only when you say so (Ctrl+Shift+E)'
+        : 'Explain the last lines on screen - or select the output first (Ctrl+Shift+E). Type # and a request, then Ctrl+J, for a command';
+      exBtn.addEventListener('click', () => {
+        els.tabHelp.classList.add('hidden');
+        const r = tabs.get(tabHelpTabId);
+        if (r) aiExplainTerm(r);
+      });
+      els.tabHelpPaste.appendChild(exBtn);
+    }
   }
 
   // Port forwarding (SSH tunnels) - only for real ssh connections.
@@ -2829,6 +2844,7 @@ function createTab(profile) {
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== 'keydown') return true;
     if (termScrollKey(term, e, id)) return false; // Ctrl+PageUp/Down, Ctrl+Shift+arrows, Alt+Shift+arrows
+    if (aiTermKey(e, id)) return false; // Ctrl+Shift+E explain, "# request" + Ctrl+J -> a command
     // When the session is dead, offer MobaXterm-style key options.
     const cur = tabs.get(id);
     if (cur && (cur.status === 'closed' || cur.status === 'error') && !e.ctrlKey && !e.altKey) {
@@ -3031,6 +3047,7 @@ function createLocalTab(opts) {
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== 'keydown') return true;
     if (termScrollKey(term, e, id)) return false; // Ctrl+PageUp/Down, Ctrl+Shift+arrows, Alt+Shift+arrows
+    if (aiTermKey(e, id)) return false; // Ctrl+Shift+E explain, "# request" + Ctrl+J -> a command
     const cur = tabs.get(id);
     if (cur && cur.status === 'closed' && !e.ctrlKey && !e.altKey) {
       if (e.key.toLowerCase() === 'r') {
@@ -7305,6 +7322,7 @@ async function openSettings() {
   updateSlackStatusUI();
   els.settingsGoogleError.textContent = '';
   agentSettingsLoad();
+  aiSettingsLoad();
   const g = await api.googleLoadConfig();
   if (g) {
     els.setGoogleId.value = g.clientId || '';
@@ -11387,7 +11405,10 @@ const MAIL_KEYS = {
   '/': 'search',
   '?': 'help',
   z: 'undo',
-  d: 'dark',
+  // d = delete (to Trash, like # and the Delete key); the reading mode moved to t
+  d: 'trash',
+  Delete: 'trash',
+  t: 'dark',
   // more of Gmail's own
   n: 'msg-next',
   p: 'msg-prev',
@@ -11410,7 +11431,7 @@ const MAIL_KEY_HELP = [
   ['Enter / o', 'open'],
   ['Esc', 'back to the list'],
   ['e', 'archive'],
-  ['#', 'trash'],
+  ['d / Delete / #', 'move to Trash'],
   ['s', 'star'],
   ['Shift+I', 'mark read'],
   ['u / Shift+U / Ctrl+U', 'mark unread'],
@@ -11423,7 +11444,8 @@ const MAIL_KEY_HELP = [
   ['g then i u s t a d', 'go to Inbox, Unread, Starred, Sent, All mail, Drafts'],
   ['g then l', 'pick a label'],
   ['Shift+N', 'refresh'],
-  ['Shift+D', 'agent reply (when set up)'],
+  ['Shift+D', '🤖 agent reply (the fast AI reply when no agent is set up)'],
+  ['Ctrl+J', 'write it with AI (while writing; your words are the brief)'],
   ['r / a / f', 'reply / reply all / forward'],
   ['1 - 9', 'quick reply (open conversation)'],
   [';; or Ctrl+Space', 'insert a snippet (while writing)'],
@@ -11431,7 +11453,7 @@ const MAIL_KEY_HELP = [
   ['c', 'compose'],
   ['/', 'search'],
   ['z', 'undo'],
-  ['d', 'reading: as sent / white on black / green on black'],
+  ['t', 'reading: as sent / white on black / green on black'],
   ['Ctrl+Enter', 'send (while writing)'],
   ['?', 'this list'],
 ];
@@ -11497,10 +11519,17 @@ function createMailTab(opts) {
     '</div>' +
     '<div class="mail-toast hidden"></div>' +
     '<div class="mail-keys hidden"></div>' +
+    '<div class="mail-drop"><div class="md-card"><span class="md-icon">📎</span><span class="md-text"></span></div></div>' +
     '<div class="mail-pop hidden"></div>' +
     '<div class="mail-compose hidden"></div>' +
     '<div class="mail-snips hidden"></div>' +
-    '<button class="mail-selpill hidden" title="Save the highlighted text as a snippet">✂ Save as snippet</button>' +
+    '<div class="mail-selpill hidden">' +
+    '<button class="sp-btn" data-sp="snip" title="Save the highlighted text as a snippet">✂ Snippet</button>' +
+    '<span class="sp-ai" title="Rewrite the highlighted text with AI - Ctrl+Z takes it back"><span class="sp-cap">⚡</span>' +
+    '<button class="sp-btn" data-sp="shorter">Shorter</button><button class="sp-btn" data-sp="friendlier">Friendlier</button>' +
+    '<button class="sp-btn" data-sp="formal">Formal</button><button class="sp-btn" data-sp="german">German</button>' +
+    '<button class="sp-btn" data-sp="english">English</button><button class="sp-btn" data-sp="grammar">Fix grammar</button></span>' +
+    '</div>' +
     '<div class="mail-linkcard hidden"></div>' +
     '<div class="mail-lightbox hidden"></div>';
   const rec = {
@@ -11544,6 +11573,7 @@ function mailReset() {
 function mailWire(rec) {
   const p = rec.paneEl;
   p.addEventListener('keydown', mailKeydown);
+  mailWireDrop(p);
   const search = p.querySelector('.mail-search');
   search.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
@@ -12008,10 +12038,23 @@ function mailRenderThread() {
     '<button class="mail-btn" data-act="unread" title="Mark unread (Shift+U)">✉</button>' +
     '<button class="mail-btn" data-act="label" title="Label (l)">🏷</button>' +
     '<button class="mail-btn mr-darkbtn" data-act="dark"></button>' +
-    (agentReady() ? '<button class="mail-btn mr-agentbtn" data-act="agent" title="Agent reply: the agent drafts an answer in this thread (nothing is sent)">🤖</button>' : '') +
+    (agentReady() || aiReady()
+      ? `<button class="mail-btn mr-agentbtn${mailUseFast() ? ' fast' : ''}" data-act="agent" title="${escapeHtml(mailAgentBtnTitle())}">🤖</button>`
+      : '') +
+    (aiReady()
+      ? `<button class="mail-btn mr-fastbtn${mailAiFast ? ' on' : ''}" data-act="fasttoggle" title="${
+          mailAiFast
+            ? 'AI replies ON: Reply and Reply all come with an answer written by ' + escapeHtml(aiModelShort(aiCfg.model)) + ' - you read it before sending. Click to turn off.'
+            : 'AI replies off. Click so Reply and Reply all come with an answer already written.'
+        }">${mailAiFast ? '⚡ AI on' : '⚡'}</button>`
+      : '') +
+    (aiReady() ? `<button class="mail-btn mr-transbtn" data-act="translate" title="Translate the open mail into ${escapeHtml(aiTranslateTo)} - shown under the original (again: hide it)">🌐</button>` : '') +
     '<span class="mail-spacer"></span>' +
-    '<button class="mail-btn" data-act="reply" title="Reply (r)">↩ Reply</button>' +
-    '<button class="mail-btn" data-act="replyall" title="Reply all (a)">⤶ All</button>' +
+    (mailAiOnReply()
+      ? '<button class="mail-btn mr-ai" data-act="reply" title="Reply (r) - ⚡ the answer is written for you">↩ Reply ⚡</button>' +
+        '<button class="mail-btn mr-ai" data-act="replyall" title="Reply all (a) - ⚡ the answer is written for you">⤶ All ⚡</button>'
+      : '<button class="mail-btn" data-act="reply" title="Reply (r)">↩ Reply</button>' +
+        '<button class="mail-btn" data-act="replyall" title="Reply all (a)">⤶ All</button>') +
     '<button class="mail-btn" data-act="forward" title="Forward (f)">↪ Forward</button>' +
     '</div>' +
     `<div class="mr-subject">${escapeHtml(subj)}</div>` +
@@ -12052,6 +12095,7 @@ function mailMessageEl(m, expanded) {
     '</div>' +
     `<div class="mm-snip">${escapeHtml(mailDecodeEntities(m.snippet))}</div>` +
     '<div class="mm-body"></div>';
+  el._msg = m; // what 🌐 translates
   if ((m.labelIds || []).includes('DRAFT')) el.classList.add('is-draft');
   const editBtn = el.querySelector('.mm-editdraft');
   if (editBtn)
@@ -12245,7 +12289,7 @@ function mailPaintDarkBtn(b) {
   if (!b) return;
   const next = MAIL_READ_MODES[(MAIL_READ_MODES.indexOf(mailReadMode) + 1) % MAIL_READ_MODES.length];
   b.textContent = MAIL_READ_LABEL[mailReadMode][0];
-  b.title = 'Reading: ' + MAIL_READ_LABEL[mailReadMode][1] + ' · click (or d) for ' + MAIL_READ_LABEL[next][1] + ' - remembered for every mail';
+  b.title = 'Reading: ' + MAIL_READ_LABEL[mailReadMode][1] + ' · click (or t) for ' + MAIL_READ_LABEL[next][1] + ' - remembered for every mail';
   b.classList.toggle('on', mailReadMode !== 'off');
 }
 function mailSrcdoc(clean) {
@@ -12282,6 +12326,7 @@ function mailFrameReady(ifr, m) {
   });
   // Keys typed while the mail itself has focus still drive the tab.
   doc.addEventListener('keydown', mailKeydown);
+  mailWireDrop(doc);
   // Hovering a link shows where it really goes.
   doc.addEventListener('mouseover', (e) => {
     const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
@@ -13175,7 +13220,11 @@ async function mailDo(act) {
     case 'forward':
       if (!id) return;
       if (!mbox.thread || mbox.thread.id !== id) await mailOpenThread(id);
-      if (mbox.thread && mbox.thread.id === id) mailCompose(mailReplyDraft(mbox.thread, act));
+      if (mbox.thread && mbox.thread.id === id) {
+        mailCompose(mailReplyDraft(mbox.thread, act));
+        // ⚡ on: the answer is written straight away (a forward is to someone else - no)
+        if (act !== 'forward' && mailAiOnReply() && mbox.draft && mbox.draft.threadId === id) aiWriteInto(mbox.draft);
+      }
       return;
     case 'compose':
       return mailCompose({});
@@ -13183,8 +13232,13 @@ async function mailDo(act) {
       return mailSnippetManager();
     case 'dark':
       return mailSetReadMode();
+    case 'fasttoggle':
+      return mailSetFast(!mailAiFast);
+    case 'translate':
+      return aiTranslateOpen();
     case 'agent':
       if (!id) return;
+      if (mailUseFast()) return mailFastReply(id);
       if (!mbox.thread || mbox.thread.id !== id) await mailOpenThread(id);
       if (mbox.thread && mbox.thread.id === id) agentDialog(agentTargetFromThread(mbox.thread));
       return;
@@ -13610,6 +13664,10 @@ function agentSettingsWire() {
 }
 function agentInit() {
   agentSettingsWire();
+  aiSettingsWire();
+  aiRefreshConfig().then(() => {
+    if (aiReady() && mbox.thread) mailRenderThread();
+  });
   agentRefreshConfig().then(() => {
     agentSyncBoard();
     if (!agentReady()) return; // not set up: leave any saved jobs for when it is
@@ -13633,6 +13691,580 @@ function agentResume() {
   }
   agentSavePending();
   agentPaint();
+}
+
+// ---- fast AI replies (ai-reply.js in main) ----
+// The thread goes straight to a small model and the reply streams into compose in seconds.
+// The ⚡ toggle in the reader bar is "AI writes my replies": while it is on, ↩ Reply and
+// ⤶ Reply all (buttons, r, a) open with the answer already being written. ⚡ in compose
+// (Ctrl+J) writes on demand from what you typed. 🤖 stays the agent service, and is the fast
+// reply only when no agent is set up.
+let aiCfg = null; // { configured, model, defaultModel, style }
+let mailAiFast = false; // the ⚡ toggle (saved): Reply / Reply all come written by the model
+const aiStreams = new Map(); // reqId -> onDelta
+function aiReady() {
+  return !!(aiCfg && aiCfg.configured);
+}
+async function aiRefreshConfig() {
+  try {
+    const r = await api.aiGetConfig();
+    aiCfg = r && r.ok ? r.config : null;
+  } catch (_) {
+    aiCfg = null;
+  }
+  return aiCfg;
+}
+// What 🤖 does: the agent when there is one, else the fast reply.
+function mailUseFast() {
+  return aiReady() && !agentReady();
+}
+// Whether Reply / Reply all write the answer too.
+function mailAiOnReply() {
+  return aiReady() && mailAiFast;
+}
+function aiModelShort(m) {
+  return String(m || '')
+    .replace(/^claude-/, '')
+    .replace(/-\d{8}$/, '');
+}
+function mailAgentBtnTitle() {
+  return mailUseFast()
+    ? 'Fast AI reply: ' + aiModelShort(aiCfg.model) + ' writes a reply here in seconds - you read it and send it (Shift+D)'
+    : 'Agent reply: the agent drafts an answer in this thread (nothing is sent) (Shift+D)';
+}
+// The title-bar button: "⚡ AI reply" (or "⚡ AI write" for a new message), "⏹ Stop" while
+// the model writes.
+function aiPaintBtn(d) {
+  const b = mailEl('.mail-compose .mc-aibtn');
+  if (!b || !d || mbox.draft !== d) return;
+  const reply = !!(d.threadId || d.forwardOf);
+  b.textContent = d.aiBusy ? '⏹ Stop' : reply ? '⚡ AI reply' : '⚡ AI write';
+  b.classList.toggle('busy', !!d.aiBusy);
+  b.title = d.aiBusy
+    ? 'Stop writing - keeps what is there (Esc)'
+    : (reply ? 'Write the reply with AI' : 'Write this message with AI') +
+      ' (Ctrl+J). What you typed above the quote is the brief - a few words are enough; empty works too. Again rewrites.';
+}
+// The bar at the top of compose that says the model is at work, and then that it is done.
+function aiBar(d, state, text, model, noAgain) {
+  const box = mailEl('.mail-compose');
+  if (!box || mbox.draft !== d) return;
+  let bar = box.querySelector('.mc-aibar');
+  if (!state) return bar && bar.remove();
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.className = 'mc-aibar';
+    box.querySelector('.mc-head').after(bar);
+    bar.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-ai]');
+      if (!b || !mbox.draft) return;
+      if (b.dataset.ai === 'stop') aiStop(mbox.draft);
+      else if (b.dataset.ai === 'again') aiWriteInto(mbox.draft);
+      else if (b.dataset.ai === 'hide') bar.remove();
+    });
+  }
+  bar.className = 'mc-aibar ' + state;
+  bar.title = model ? 'Model: ' + model : ''; // the model is here, not in the text
+  bar.innerHTML =
+    '<span class="ai-ico">⚡</span><span class="ai-txt">' +
+    escapeHtml(text) +
+    '</span>' +
+    (state === 'busy'
+      ? '<button class="mail-btn" data-ai="stop" title="Esc">Stop</button>'
+      : (noAgain ? '' : '<button class="mail-btn" data-ai="again" title="Write it again (Ctrl+J) - what is in the message now is the brief">↻ Again</button>') +
+        '<button class="mail-x" data-ai="hide" title="Hide">✕</button>');
+}
+function mailSetFast(on) {
+  mailAiFast = !!on;
+  api.saveSettings({ mailAiFast });
+  if (mbox.thread) mailRenderThread();
+  mailToast(mailAiFast ? '⚡ AI replies on - Reply and Reply all come with the answer written' : '⚡ AI replies off');
+}
+if (api.onAiDelta) {
+  api.onAiDelta(({ reqId, text } = {}) => {
+    const f = aiStreams.get(reqId);
+    if (f && text) f(text);
+  });
+}
+
+// 🤖 in fast mode: a Reply all, written by the model.
+async function mailFastReply(threadId) {
+  if (!mbox.thread || mbox.thread.id !== threadId) await mailOpenThread(threadId);
+  if (!mbox.thread || mbox.thread.id !== threadId) return;
+  mailCompose(mailReplyDraft(mbox.thread, 'replyall'));
+  if (mbox.draft) aiWriteInto(mbox.draft);
+}
+// Where YOUR part of the body ends: the signature separator, "On ... wrote:" or a forward.
+function aiOwnEnd(body) {
+  const i = String(body || '').search(/^(-- |On .+ wrote:|---------- Forwarded message ---------)$/m);
+  return i === -1 ? String(body || '').length : i;
+}
+function aiThreadInput(msgs) {
+  return (msgs || [])
+    .filter((m) => !(m.labelIds || []).some((l) => l === 'DRAFT' || l === 'TRASH'))
+    .map((m) => ({ from: m.from || '', to: m.to || '', cc: m.cc || '', date: mailWhen(m), text: mailBodyText(m) }));
+}
+// Write (or rewrite) the part of the draft above the signature and the quote. What is there
+// now is the brief. The text streams in; the field is read-only meanwhile and Esc stops it.
+async function aiWriteInto(d) {
+  if (!d || d.aiBusy || !aiReady()) return;
+  const box = mailEl('.mail-compose');
+  const ta = box && box.querySelector('.mc-body');
+  if (!ta) return;
+  const before = d.body;
+  const end = aiOwnEnd(before);
+  const brief = before.slice(0, end).trim();
+  const tail = before.slice(end).replace(/^\n*/, before.length > end ? '\n\n' : '');
+  let msgs = [];
+  if (d.threadId) {
+    if (mbox.thread && mbox.thread.id === d.threadId) msgs = mbox.thread.messages;
+    else {
+      const r = await api.mailGetThread(d.threadId);
+      msgs = (r && r.ok && r.messages) || [];
+    }
+  } else if (d.forwardOf) msgs = [d.forwardOf];
+  const input = {
+    messages: aiThreadInput(msgs),
+    me: googleEmail || '',
+    brief,
+    subject: d.subject || '',
+    to: d.to || '',
+  };
+  const reqId = 'ai' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  d.aiBusy = reqId;
+  aiPaintBtn(d);
+  ta.readOnly = true;
+  box.classList.add('ai-writing');
+  mailComposeStatus('');
+  aiBar(d, 'busy', 'Writing your reply… (Esc stops)', aiModelShort(aiCfg.model));
+  let text = '';
+  if (!brief) {
+    // something to look at until the first words arrive (well under a second, usually)
+    d.body = '⚡ …' + tail;
+    ta.value = d.body;
+  }
+  const paint = () => {
+    d.body = text + tail;
+    if (mbox.draft === d) {
+      ta.value = d.body;
+      ta.scrollTop = 0;
+    }
+  };
+  aiStreams.set(reqId, (piece) => {
+    if (mbox.draft !== d) return; // closed meanwhile: the cancel is on its way
+    text += piece;
+    paint();
+  });
+  const r = await api.aiDraft(reqId, input).catch((e) => ({ ok: false, error: String(e) }));
+  aiStreams.delete(reqId);
+  d.aiBusy = null;
+  aiPaintBtn(d);
+  ta.readOnly = false;
+  box.classList.remove('ai-writing');
+  if (mbox.draft !== d) return;
+  if (!r || !r.ok) {
+    d.body = before; // nothing half-written stays behind
+    ta.value = before;
+    aiBar(d, 'bad', mailStaleMain((r && r.error) || 'unknown'));
+    return mailComposeStatus('⚡ ' + mailStaleMain((r && r.error) || 'unknown'), true);
+  }
+  text = r.text || text.trim();
+  if (!text) {
+    d.body = before;
+    ta.value = before;
+    aiBar(d, r.canceled ? 'bad' : 'bad', r.canceled ? 'Stopped before anything was written.' : 'The model sent nothing back - try again.');
+    return mailComposeStatus(r.canceled ? 'Stopped.' : '⚡ The model sent nothing back - try again.', !r.canceled);
+  }
+  paint();
+  d.aiWritten = true;
+  ta.focus();
+  ta.setSelectionRange(text.length, text.length);
+  ta.scrollTop = 0;
+  mailComposeStatus('');
+  aiBar(
+    d,
+    'ok',
+    (r.canceled ? 'Stopped - kept what was written' : 'Answer written in ' + (r.ms / 1000).toFixed(1) + ' s') + ' - read it before you send',
+    aiModelShort(r.model)
+  );
+}
+function aiStop(d) {
+  if (d && d.aiBusy) api.aiCancel(d.aiBusy);
+}
+
+// Settings -> Fast AI reply. The key is write-only, as for the agent.
+async function aiSettingsLoad() {
+  const c = (await aiRefreshConfig()) || {};
+  const $ = (id) => document.getElementById(id);
+  if (!$('set-ai-key')) return;
+  $('set-ai-key').value = '';
+  $('set-ai-key').placeholder = c.keySet ? 'set - type to replace' : 'Anthropic API key';
+  $('set-ai-model').value = c.model && c.model !== c.defaultModel ? c.model : '';
+  $('set-ai-model').placeholder = c.defaultModel || '';
+  $('set-ai-style').value = c.style || '';
+  if ($('set-ai-translate')) $('set-ai-translate').value = aiTranslateTo;
+  $('set-ai-status').textContent = c.configured
+    ? 'Set up - ' + aiModelShort(c.model) + '. ⚡ next to 🤖 in the reader switches between this and the agent.'
+    : 'Not set up. The key is yours and stays encrypted on this computer.';
+}
+function aiSettingsWire() {
+  const $ = (id) => document.getElementById(id);
+  if (!$('set-ai-save')) return;
+  const out = $('set-ai-status');
+  const save = async () => {
+    const p = { model: $('set-ai-model').value.trim(), style: $('set-ai-style').value };
+    const k = $('set-ai-key').value.trim();
+    if (k) p.key = k; // empty = keep
+    const r = await api.aiSetConfig(p);
+    if (!r || !r.ok) {
+      out.textContent = '⚠ ' + mailStaleMain((r && r.error) || 'not saved');
+      return false;
+    }
+    await aiSettingsLoad();
+    if (mbox.thread) mailRenderThread();
+    return true;
+  };
+  $('set-ai-save').addEventListener('click', save);
+  if ($('set-ai-translate'))
+    $('set-ai-translate').addEventListener('change', () => {
+      const v = $('set-ai-translate').value.trim();
+      aiTranslateTo = /^[\p{L} ()-]{2,40}$/u.test(v) ? v : 'English';
+      $('set-ai-translate').value = aiTranslateTo;
+      api.saveSettings({ aiTranslateTo });
+      if (mbox.thread) mailRenderThread();
+    });
+  $('set-ai-test').addEventListener('click', async () => {
+    if (!(await save())) return;
+    out.textContent = 'Asking the model…';
+    const r = await api.aiTest();
+    out.textContent = r && r.ok ? '✓ ' + aiModelShort(r.model) + ' answered in ' + (r.ms / 1000).toFixed(1) + ' s' : '⚠ ' + mailStaleMain((r && r.error) || 'no answer');
+  });
+  $('set-ai-forget').addEventListener('click', async () => {
+    await api.aiSetConfig({ key: '', model: '', style: '' });
+    await aiSettingsLoad();
+    if (mbox.thread) mailRenderThread();
+  });
+}
+
+// ---- the smaller AI jobs: rewrite a selection, translate a mail, explain terminal output,
+// turn "# a request" into a command. Same key and streaming as the fast reply (ai:task).
+let aiTranslateTo = 'English'; // Settings -> Fast AI reply; saved as aiTranslateTo
+const AI_HOW = {
+  shorter: ['Shortening…', 'Shortened'],
+  friendlier: ['Making it friendlier…', 'Made friendlier'],
+  formal: ['Making it formal…', 'Made formal'],
+  german: ['Translating to German…', 'In German now'],
+  english: ['Translating to English…', 'In English now'],
+  grammar: ['Fixing grammar…', 'Grammar fixed'],
+};
+function aiReqId() {
+  return 'ai' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+// One task, streaming into onPiece; resolves with the final answer ({ ok, text, ... }).
+async function aiRunTask(kind, input, onPiece) {
+  const reqId = aiReqId();
+  if (onPiece) aiStreams.set(reqId, onPiece);
+  const p = api.aiTask(reqId, kind, input).catch((e) => ({ ok: false, error: String(e) }));
+  p.reqId = reqId;
+  const r = await p;
+  aiStreams.delete(reqId);
+  return r;
+}
+
+// ---- 1. rewrite the selection in compose (the selection pill) ----
+// The answer replaces the selection ONCE, through insertText, so Ctrl+Z takes it back; the
+// new text stays selected, so a second button can follow (Shorter, then Formal).
+async function aiRewriteSel(src, how) {
+  const d = mbox.draft;
+  const box = mailEl('.mail-compose');
+  if (!src || !src.ta || !d || !box || d.aiBusy || !aiReady() || !AI_HOW[how]) return;
+  const ta = src.ta;
+  const { start, end } = src;
+  const text = ta.value.slice(start, end);
+  if (!text.trim()) return;
+  const reqId = aiReqId();
+  d.aiBusy = reqId;
+  aiPaintBtn(d);
+  ta.readOnly = true; // the range must still be the same text when the answer comes
+  box.classList.add('ai-writing');
+  aiBar(d, 'busy', AI_HOW[how][0] + ' (Esc stops)', aiModelShort(aiCfg.model), true);
+  const r = await api.aiTask(reqId, 'rewrite', { text, how }).catch((e) => ({ ok: false, error: String(e) }));
+  d.aiBusy = null;
+  aiPaintBtn(d);
+  ta.readOnly = false;
+  box.classList.remove('ai-writing');
+  if (mbox.draft !== d) return;
+  if (!r || !r.ok) return aiBar(d, 'bad', mailStaleMain((r && r.error) || 'unknown'), '', true);
+  if (r.canceled || !r.text) return aiBar(d, 'bad', r.canceled ? 'Stopped - nothing changed.' : 'The model sent nothing back - nothing changed.', '', true);
+  // the selection's own leading / trailing blank space stays where it was
+  const out = (text.match(/^\s*/) || [''])[0] + r.text.trim() + (text.match(/\s*$/) || [''])[0];
+  mailInsertAt(ta, start, end, out);
+  ta.setSelectionRange(start, start + out.length);
+  d.aiWritten = true;
+  aiBar(d, 'ok', AI_HOW[how][1] + ' - Ctrl+Z puts the old text back', aiModelShort(r.model), true);
+  const rect = ta.getBoundingClientRect();
+  mailSelCheck(rect.left + 24, rect.top + 10, out, d.to, { ta, start, end: start + out.length }); // chain another one
+}
+
+// ---- 2. "attached" but nothing attached ----
+// Only YOUR words count (the quote below is someone else's), and the subject.
+const MAIL_ATTACH_WORDS =
+  /\b(attach(?:ed|es|ment|ments|ing)?|enclos(?:ed|ing|ure))\b|\bsee the (?:file|document|pdf|spreadsheet|screenshot)\b|\banbei\b|\bim anhang\b|\banh[aä]ng(?:en|e)?\b|\bangeh(?:ä|ae)ngt\b|\bbeigef(?:ü|ue)gt\b|\bin der anlage\b|\bpi[eè]ce jointe\b|\bci-joint\b|\badjunt[oa]s?\b/i;
+function mailMentionsAttachment(d) {
+  return MAIL_ATTACH_WORDS.test(mailOwnText(d.body)) || MAIL_ATTACH_WORDS.test(d.subject || '');
+}
+function mailAttachWarn(d) {
+  const box = mailEl('.mail-compose');
+  if (!box || mbox.draft !== d) return;
+  let bar = box.querySelector('.mc-attwarn');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.className = 'mc-attwarn';
+    box.querySelector('.mc-head').after(bar);
+    bar.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-aw]');
+      if (!b || mbox.draft !== d) return;
+      if (b.dataset.aw === 'attach') mailAttach();
+      else if (b.dataset.aw === 'shell') mailAttachFromShell(b);
+      else if (b.dataset.aw === 'send') {
+        d.skipAttachCheck = true; // asked and answered, for this message
+        bar.remove();
+        mailSend();
+      }
+    });
+  }
+  bar.innerHTML =
+    '<span>📎 You mention an attachment, but nothing is attached.</span>' +
+    '<button class="mail-btn" data-aw="attach">📎 Attach</button>' +
+    '<button class="mail-btn" data-aw="shell">📎 From a terminal</button>' +
+    '<button class="mail-btn" data-aw="send">Send anyway</button>';
+  mailComposeStatus('');
+}
+
+// ---- 3. translate the open mail, under the original ----
+function aiTranslateOpen() {
+  if (!aiReady()) return;
+  const box = mailEl('.mr-msgs');
+  if (!box) return;
+  const open = [...box.querySelectorAll('.mm.open')];
+  // pressed again: the translations go away
+  if (open.some((el) => el.querySelector('.mm-trans'))) {
+    box.querySelectorAll('.mm-trans').forEach((x) => x.remove());
+    return;
+  }
+  for (const el of open) if (el._msg) aiTranslateMsg(el, el._msg);
+}
+async function aiTranslateMsg(el, m) {
+  const body = el.querySelector('.mm-body');
+  if (!body) return;
+  const block = document.createElement('div');
+  block.className = 'mm-trans busy';
+  block.innerHTML =
+    `<div class="mt-head"><span>🌐 ${escapeHtml(aiTranslateTo)} · translated by AI</span><span class="mail-spacer"></span>` +
+    '<button class="mail-x" title="Hide the translation">✕</button></div><div class="mt-text">…</div>';
+  const atts = body.querySelector('.mm-atts');
+  if (atts) body.insertBefore(block, atts);
+  else body.appendChild(block);
+  const out = block.querySelector('.mt-text');
+  let text = '';
+  const reqRef = {};
+  block.querySelector('.mail-x').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (reqRef.id) api.aiCancel(reqRef.id);
+    block.remove();
+  });
+  const reqId = aiReqId();
+  reqRef.id = reqId;
+  aiStreams.set(reqId, (piece) => {
+    text += piece;
+    if (!/^ALREADY/i.test(text.trim())) out.textContent = text; // never flash the marker
+  });
+  const r = await api.aiTask(reqId, 'translate', { text: mailBodyText(m), target: aiTranslateTo }).catch((e) => ({ ok: false, error: String(e) }));
+  aiStreams.delete(reqId);
+  reqRef.id = null;
+  if (!block.isConnected) return;
+  block.classList.remove('busy');
+  if (!r || !r.ok) {
+    block.classList.add('bad');
+    out.textContent = mailStaleMain((r && r.error) || 'unknown');
+  } else if (r.already) {
+    out.textContent = 'This mail is already in ' + aiTranslateTo + '.';
+    block.classList.add('same');
+  } else out.textContent = r.text || text.trim();
+}
+
+// ---- 4 + 5. in a terminal: explain the selection, "# request" + Ctrl+J -> a command ----
+function aiTermOs(rec) {
+  if (rec.kind !== 'local') return 'a remote Unix shell (bash or zsh)';
+  const p = String(navigator.platform || '');
+  return /^Win/.test(p) ? 'Windows PowerShell' : /^Mac/.test(p) ? 'macOS zsh' : 'Linux bash';
+}
+function aiTermContext(rec) {
+  const w = rec.where || {};
+  return { host: w.host || (rec.profile && rec.profile.host) || '', cwd: w.cwd || '', os: aiTermOs(rec), lastCommand: rec.cmdName || '' };
+}
+// the logical line the cursor is on (wrapped rows joined)
+function aiCursorLine(term) {
+  const buf = term.buffer.active;
+  let y = buf.baseY + buf.cursorY;
+  let text = '';
+  const first = buf.getLine(y);
+  if (!first) return '';
+  text = first.translateToString(true);
+  while (y > 0 && buf.getLine(y) && buf.getLine(y).isWrapped) {
+    y--;
+    text = buf.getLine(y).translateToString(true) + text;
+  }
+  return text;
+}
+// what "explain" looks at when nothing is selected: the screen up to the cursor
+function aiRecentOutput(term, n) {
+  const buf = term.buffer.active;
+  const end = buf.baseY + buf.cursorY;
+  const lines = [];
+  for (let y = Math.max(0, end - n); y <= end; y++) {
+    const l = buf.getLine(y);
+    if (l) lines.push(l.translateToString(true));
+  }
+  return lines.join('\n').replace(/\s+$/, '');
+}
+// A request typed as a shell comment at the end of the line: "... # find files over 1 GB".
+// The # must follow a space or start the line - "root@host:~# ls" is a prompt, not a request.
+const AI_CMD_REQ = /(?:^|\s)#\s*([^#\s][^#]*?)\s*$/;
+function aiTermKey(e, id) {
+  if (e.type !== 'keydown' || e.altKey || e.metaKey) return false;
+  const rec = tabs.get(id);
+  if (!rec || !rec.term || !aiReady()) return false;
+  const k = (e.key || '').toLowerCase();
+  if (e.ctrlKey && e.shiftKey && k === 'e') {
+    e.preventDefault();
+    aiExplainTerm(rec);
+    return true;
+  }
+  if (e.ctrlKey && !e.shiftKey && k === 'j') {
+    if (rec.term.buffer.active.type !== 'normal') return false; // a full-screen app owns Ctrl+J
+    const m = AI_CMD_REQ.exec(aiCursorLine(rec.term));
+    if (!m) return false; // no "# request" on the line: Ctrl+J goes to the shell as always
+    e.preventDefault();
+    aiCommandFromLine(rec, m[1]);
+    return true;
+  }
+  return false;
+}
+// The popover in a terminal pane: one at a time, Esc or ✕ closes it.
+function aiTermPop(rec, title, keepFocus) {
+  rec.paneEl.querySelector('.ai-pop')?.remove();
+  const pop = document.createElement('div');
+  pop.className = 'ai-pop busy';
+  pop.tabIndex = -1;
+  pop.innerHTML =
+    `<div class="ap-head"><span>⚡ ${escapeHtml(title)}</span><span class="mail-spacer"></span><button class="mail-x" data-ap="close" title="Close (Esc)">✕</button></div>` +
+    '<div class="ap-text">…</div><div class="ap-cmd hidden"><code></code><div class="ap-acts"></div></div>';
+  rec.paneEl.appendChild(pop);
+  const close = () => {
+    if (pop._reqId) api.aiCancel(pop._reqId);
+    pop.remove();
+    focusTerm(rec);
+  };
+  pop._close = close;
+  pop.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+    }
+  });
+  pop.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-ap]');
+    if (!b) return;
+    if (b.dataset.ap === 'close') close();
+    else if (b.dataset.ap === 'copy') {
+      api.clipboardWrite(pop._command || '');
+      b.textContent = '✓ Copied';
+    } else if (b.dataset.ap === 'type') {
+      // typed, never sent: no newline, so nothing runs until YOU press Enter
+      if (rec.term.buffer.active.type !== 'normal') return;
+      termSend(rec, pop._command || '');
+      close();
+    }
+  });
+  if (!keepFocus) pop.focus();
+  return pop;
+}
+function aiPopCommand(pop, rec, cmd, note) {
+  pop._command = cmd;
+  const box = pop.querySelector('.ap-cmd');
+  box.classList.remove('hidden');
+  box.querySelector('code').textContent = cmd;
+  const multi = cmd.includes('\n');
+  const canType = !multi && rec.term.buffer.active.type === 'normal';
+  box.querySelector('.ap-acts').innerHTML =
+    (canType ? '<button class="mail-btn mail-primary" data-ap="type" title="Types it at the prompt - it runs only when you press Enter">⌨ Type it</button>' : '') +
+    '<button class="mail-btn" data-ap="copy">Copy</button>' +
+    (note ? `<span class="ap-note">${escapeHtml(note)}</span>` : multi ? '<span class="ap-note">Several lines - copy it, typing would run them one by one.</span>' : '');
+}
+async function aiExplainTerm(rec) {
+  if (!aiReady() || !rec || !rec.term) return;
+  const sel = (rec.term.getSelection() || '').trim();
+  const output = sel || aiRecentOutput(rec.term, 40);
+  if (!output) return;
+  const pop = aiTermPop(rec, sel ? 'Explain the selection' : 'Explain the last lines');
+  const txt = pop.querySelector('.ap-text');
+  let got = '';
+  const reqId = aiReqId();
+  pop._reqId = reqId;
+  aiStreams.set(reqId, (piece) => {
+    got += piece;
+    txt.textContent = got.split('```')[0].trim() || '…'; // the command block is shown on its own
+  });
+  const r = await api.aiTask(reqId, 'explain', { output, ...aiTermContext(rec) }).catch((e) => ({ ok: false, error: String(e) }));
+  aiStreams.delete(reqId);
+  pop._reqId = null;
+  if (!pop.isConnected) return;
+  pop.classList.remove('busy');
+  if (!r || !r.ok) {
+    pop.classList.add('bad');
+    txt.textContent = mailStaleMain((r && r.error) || 'unknown');
+    return;
+  }
+  txt.textContent = r.explanation || r.text || '';
+  if (r.command) aiPopCommand(pop, rec, r.command);
+}
+async function aiCommandFromLine(rec, request) {
+  const pop = aiTermPop(rec, 'Command for: ' + request.slice(0, 60), true);
+  pop.classList.add('small');
+  const txt = pop.querySelector('.ap-text');
+  txt.textContent = 'Writing the command…';
+  const reqId = aiReqId();
+  pop._reqId = reqId;
+  const r = await api.aiTask(reqId, 'command', { request, ...aiTermContext(rec) }).catch((e) => ({ ok: false, error: String(e) }));
+  pop._reqId = null;
+  if (!pop.isConnected) return;
+  pop.classList.remove('busy');
+  if (!r || !r.ok) {
+    pop.classList.add('bad');
+    txt.textContent = mailStaleMain((r && r.error) || 'unknown');
+    return;
+  }
+  const cmd = String(r.command || '').trim();
+  if (!cmd || cmd.startsWith('#')) {
+    pop.classList.add('bad');
+    txt.textContent = cmd ? cmd.replace(/^#\s*/, 'Not in one safe line: ') : 'The model sent no command back.';
+    return;
+  }
+  // Only replace the line if it still is the request we read - if you typed on, it waits.
+  const still = AI_CMD_REQ.exec(aiCursorLine(rec.term));
+  if (r.multi || !still || still[1] !== request || rec.term.buffer.active.type !== 'normal') {
+    txt.textContent = r.multi ? 'That needs more than one line:' : 'The line changed meanwhile - here it is:';
+    return aiPopCommand(pop, rec, cmd);
+  }
+  // clear what is typed (PowerShell: Esc; readline shells: Ctrl+U), then type the command
+  const clear = rec.kind === 'local' && /^Win/.test(String(navigator.platform || '')) ? '\x1b' : '\x15';
+  termSend(rec, clear + cmd);
+  focusTerm(rec);
+  txt.textContent = 'Typed at the prompt - check it, then press Enter to run it.';
+  pop._command = cmd;
+  setTimeout(() => pop.isConnected && !pop.matches(':hover') && pop._close(), 4000);
 }
 
 // ---- compose / reply / forward ----
@@ -13786,9 +14418,11 @@ function mailDraftNote() {
   if (!d || !el) return;
   el.textContent = !d.html ? 'Gmail draft' : d.body === d.bodyOrig ? 'Gmail draft · sends with its formatting' : 'Gmail draft · edited, sends as plain text';
 }
+// Save to Gmail Drafts and close: the draft that was opened is updated, anything else becomes a
+// new draft (a reply keeps its thread and threading headers, so it shows up inside the thread).
 async function mailSaveDraftNow() {
   const d = mbox.draft;
-  if (!d || !d.draftId || d.saving) return;
+  if (!d || d.saving) return;
   d.saving = true;
   mailComposeStatus('Saving to Gmail…');
   if (d.pending) await d.pending;
@@ -13894,6 +14528,7 @@ function mailRenderCompose() {
     `<div class="mc-head"><span>${title}</span>` +
     (d.draftId ? '<span class="mc-draftnote"></span>' : '') +
     '<span class="mail-spacer"></span>' +
+    (aiReady() ? '<button class="mail-btn mc-aibtn" data-act="ai-write"></button>' : '') +
     '<button class="mail-x" data-act="close" title="Close (Esc)">✕</button></div>' +
     '<div class="mc-banner hidden">Sending needs one more permission. Reconnect Google in Settings and allow Gmail send - reading keeps working meanwhile. <button class="mail-btn" data-act="settings">Open Settings</button></div>' +
     '<label class="mc-field"><span>To</span><input data-f="to" type="text" spellcheck="false" />' +
@@ -13907,10 +14542,11 @@ function mailRenderCompose() {
     '<button class="mail-btn" data-act="attach" title="Attach a file">📎 Attach</button>' +
     '<button class="mail-btn" data-act="attach-shell" title="Attach a file from a terminal - it comes through the shell, so any ssh depth works">📎 From a terminal</button>' +
     '<button class="mail-btn" data-act="snip" title="Insert a snippet (;; or Ctrl+Space)">✂ Snippet</button>' +
-    (d.draftId
-      ? '<button class="mail-btn" data-act="save-draft" title="Write your changes back to the Gmail draft (Ctrl+S)">💾 Save draft</button>' +
-        '<button class="mail-btn" data-act="del-draft" title="Delete the draft from Gmail">🗑</button>'
-      : '') +
+
+    `<button class="mail-btn" data-act="save-draft" title="${
+      d.draftId ? 'Write your changes back to the Gmail draft and close (Ctrl+S)' : 'Save it to Gmail Drafts and close - finish it later, here or in Gmail (Ctrl+S)'
+    }">💾 Save draft</button>` +
+    (d.draftId ? '<button class="mail-btn" data-act="del-draft" title="Delete the draft from Gmail">🗑</button>' : '') +
     `<span class="mc-undo" title="Undo send - change it in Settings → Google">${mailUndoSec ? '↶ ' + mailUndoSec + ' s to undo' : ''}</span>` +
     '<span class="mc-status"></span></div>' +
     '<div class="mc-suggest hidden"></div>';
@@ -13933,6 +14569,10 @@ function mailRenderCompose() {
     else if (act === 'attach-shell') mailAttachFromShell(b);
     else if (act === 'snip') mailSnippetPicker(box.querySelector('.mc-body'), 0);
     else if (act === 'save-draft') mailSaveDraftNow();
+    else if (act === 'ai-write') {
+      if (d.aiBusy) aiStop(d);
+      else aiWriteInto(d);
+    }
     else if (act === 'del-draft') mailDeleteDraftNow();
     else if (act === 'settings') openSettings();
     else if (act === 'cc') {
@@ -13949,7 +14589,15 @@ function mailRenderCompose() {
       e.preventDefault();
       e.stopPropagation();
       mailSend();
-    } else if ((e.key === 's' || e.key === 'S') && (e.ctrlKey || e.metaKey) && d.draftId) {
+    } else if ((e.key === 'j' || e.key === 'J') && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && aiReady()) {
+      e.preventDefault();
+      e.stopPropagation();
+      aiWriteInto(d);
+    } else if (e.key === 'Escape' && d.aiBusy) {
+      e.preventDefault();
+      e.stopPropagation();
+      aiStop(d); // Esc stops the writing first; a second Esc closes
+    } else if ((e.key === 's' || e.key === 'S') && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       e.stopPropagation();
       mailSaveDraftNow();
@@ -13960,6 +14608,9 @@ function mailRenderCompose() {
     }
   };
   box.classList.remove('hidden');
+  aiPaintBtn(d);
+  mailComposeWireMove(box);
+  mailComposeApplyRect();
   mailRenderAtts();
   mailRenderBanner();
   mailDraftNote();
@@ -13984,10 +14635,129 @@ function mailRenderCompose() {
   }
   delete d.caret;
 }
+// ---- the compose window: drag it by its title bar, resize it from any edge or corner ----
+// Docked bottom right until moved or resized; then it floats at a remembered place and size
+// (px inside the pane, clamped whenever the pane changes). Double-click the title bar to dock
+// it again. The handles are rebuilt with the panel on every render.
+let mailComposeRect = null; // { x, y, w, h } in px, or null = docked
+const MC_MIN_W = 380;
+const MC_MIN_H = 260;
+const MC_CURSOR = { move: 'move', n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize', ne: 'nesw-resize', sw: 'nesw-resize', nw: 'nwse-resize', se: 'nwse-resize' };
+function mailComposeClamp(r, W, H) {
+  const w = Math.round(Math.min(W, Math.max(Math.min(MC_MIN_W, W), r.w)));
+  const h = Math.round(Math.min(H, Math.max(Math.min(MC_MIN_H, H), r.h)));
+  return { x: Math.round(Math.max(0, Math.min(r.x, W - w))), y: Math.round(Math.max(0, Math.min(r.y, H - h))), w, h };
+}
+function mailComposeApplyRect() {
+  const box = mailEl('.mail-compose');
+  const rec = mailRec();
+  if (!box || !rec) return;
+  const pane = rec.paneEl;
+  if (!mailComposeRect) {
+    for (const k of ['left', 'top', 'width', 'height', 'right', 'bottom']) box.style[k] = '';
+    box.classList.remove('floating');
+    return;
+  }
+  if (!pane.clientWidth || !pane.clientHeight) return; // hidden tab: no size to clamp against
+  const r = mailComposeClamp(mailComposeRect, pane.clientWidth, pane.clientHeight);
+  Object.assign(box.style, { left: r.x + 'px', top: r.y + 'px', width: r.w + 'px', height: r.h + 'px', right: 'auto', bottom: 'auto' });
+  box.classList.add('floating');
+}
+function mailComposeWireMove(box) {
+  const rec = mailRec();
+  if (!rec) return;
+  const pane = rec.paneEl;
+  const start = (e, dir) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const pr = pane.getBoundingClientRect();
+    const br = box.getBoundingClientRect();
+    const r0 = { x: br.left - pr.left, y: br.top - pr.top, w: br.width, h: br.height };
+    const sx = e.clientX;
+    const sy = e.clientY;
+    const tgt = e.currentTarget;
+    // first: the frames must let go of the pointer, and the cursor must not flicker
+    pane.style.setProperty('--mc-cursor', MC_CURSOR[dir] || 'move');
+    pane.classList.add('mail-moving');
+    try {
+      tgt.setPointerCapture(e.pointerId);
+    } catch (_) {
+      /* a synthetic pointer the browser does not know */
+    }
+    let moved = false;
+    const move = (ev) => {
+      const dx = ev.clientX - sx;
+      const dy = ev.clientY - sy;
+      if (!moved && Math.abs(dx) + Math.abs(dy) < 3) return; // a click on the title is not a move
+      moved = true;
+      let { x, y, w, h } = r0;
+      if (dir === 'move') {
+        x += dx;
+        y += dy;
+      } else {
+        // Move the dragged edges only, each stopped by the pane's edge and by the minimum
+        // size; the opposite edge never moves. (Clamping the result afterwards would shift
+        // the whole panel instead - a top-left drag past the top pushed the bottom down.)
+        const W = pane.clientWidth;
+        const H = pane.clientHeight;
+        const right = r0.x + r0.w;
+        const bottom = r0.y + r0.h;
+        if (dir.includes('e')) w = Math.max(MC_MIN_W, Math.min(W - r0.x, r0.w + dx));
+        if (dir.includes('s')) h = Math.max(MC_MIN_H, Math.min(H - r0.y, r0.h + dy));
+        if (dir.includes('w')) {
+          x = Math.min(right - MC_MIN_W, Math.max(0, r0.x + dx));
+          w = right - x;
+        }
+        if (dir.includes('n')) {
+          y = Math.min(bottom - MC_MIN_H, Math.max(0, r0.y + dy));
+          h = bottom - y;
+        }
+      }
+      mailComposeRect = mailComposeClamp({ x, y, w, h }, pane.clientWidth, pane.clientHeight);
+      mailComposeApplyRect();
+    };
+    const end = () => {
+      tgt.removeEventListener('pointermove', move);
+      tgt.removeEventListener('pointerup', end);
+      tgt.removeEventListener('pointercancel', end);
+      pane.classList.remove('mail-moving');
+      if (moved) api.saveSettings({ mailComposeRect });
+    };
+    tgt.addEventListener('pointermove', move);
+    tgt.addEventListener('pointerup', end);
+    tgt.addEventListener('pointercancel', end);
+  };
+  const head = box.querySelector('.mc-head');
+  if (head) {
+    head.title = 'Drag to move · double-click to dock it bottom right';
+    head.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('button, input, a')) return;
+      start(e, 'move');
+    });
+    head.addEventListener('dblclick', (e) => {
+      if (e.target.closest('button')) return;
+      mailComposeRect = null;
+      api.saveSettings({ mailComposeRect: null });
+      mailComposeApplyRect();
+    });
+  }
+  for (const dir of ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']) {
+    const h = document.createElement('div');
+    h.className = 'mc-rs mc-rs-' + dir;
+    h.dataset.dir = dir;
+    h.addEventListener('pointerdown', (e) => start(e, dir));
+    box.appendChild(h);
+  }
+}
+// the window (and with it the pane) changed size: keep a floating panel inside
+window.addEventListener('resize', () => {
+  if (mailComposeRect && mbox.draft) mailComposeApplyRect();
+});
 function mailRenderAtts() {
   const d = mbox.draft;
   const box = mailEl('.mc-atts');
   if (!d || !box) return;
+  if (d.attachments.length) mailEl('.mail-compose .mc-attwarn')?.remove(); // the reminder did its job
   box.innerHTML = d.attachments
     .map(
       (a, i) =>
@@ -14008,6 +14778,7 @@ async function mailCheckSend() {
   mailRenderBanner();
 }
 function mailCloseCompose() {
+  if (mbox.draft && mbox.draft.aiBusy) aiStop(mbox.draft);
   const ask = mbox.draft && mbox.draft.draftId ? 'Close without saving? The draft in Gmail stays as it was.' : 'Discard the message you are writing?';
   if (mailDraftDirty() && !window.confirm(ask)) return;
   mbox.draft = null;
@@ -14035,6 +14806,84 @@ async function mailAttach() {
   mailRenderAtts();
   mailComposeStatus('');
 }
+// ---- drag files onto the Mail tab ----
+// Onto a message being written: attached. With none open: a new message, attached. The files
+// are read here (File.arrayBuffer), so it works for anything the OS can drag - no path needed.
+// Wired on the pane AND on every message frame's document, because a drag over a mail is
+// that frame's event; without it the drop there went nowhere.
+let mailDropTimer = null;
+function mailDragHasFiles(e) {
+  const t = e.dataTransfer && e.dataTransfer.types;
+  return !!t && Array.from(t).includes('Files');
+}
+function mailDropShow(on) {
+  const rec = mailRec();
+  if (!rec) return;
+  const p = rec.paneEl;
+  if (on) {
+    const txt = p.querySelector('.mail-drop .md-text');
+    if (txt) txt.textContent = mbox.draft ? 'Drop to attach it to your message' : 'Drop to start a new message with it';
+  }
+  p.classList.toggle('mail-dropping', !!on);
+}
+function mailWireDrop(target) {
+  const over = (e) => {
+    if (!mailDragHasFiles(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    mailDropShow(true);
+    // dragleave fires for every child crossed, so "still over us" is a dragover in the last
+    // moment - they come many times a second while the pointer is over the pane
+    clearTimeout(mailDropTimer);
+    mailDropTimer = setTimeout(() => mailDropShow(false), 250);
+  };
+  target.addEventListener('dragenter', over);
+  target.addEventListener('dragover', over);
+  target.addEventListener('drop', (e) => {
+    if (!mailDragHasFiles(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    clearTimeout(mailDropTimer);
+    mailDropShow(false);
+    // Both lists are emptied when this handler returns: take what is needed now.
+    const files = Array.from(e.dataTransfer.files || []);
+    const kinds = Array.from(e.dataTransfer.items || [])
+      .filter((it) => it.kind === 'file')
+      .map((it) => {
+        const ent = it.webkitGetAsEntry ? it.webkitGetAsEntry() : null;
+        return ent && ent.isDirectory ? 'dir' : 'file';
+      });
+    mailAttachDropped(files, kinds);
+  });
+}
+async function mailAttachDropped(files, kinds) {
+  if (!files.length) return;
+  if (!mbox.draft) mailCompose({});
+  const d = mbox.draft;
+  if (!d) return;
+  let used = d.attachments.reduce((n, a) => n + (a.size || 0), 0);
+  const skipped = [];
+  const taking = [];
+  files.forEach((f, i) => {
+    if (kinds[i] === 'dir') return skipped.push(f.name + ' is a folder');
+    if (used + f.size > MAIL_SEND_MAX) return skipped.push(f.name + ' (' + fmtBytes(f.size) + ') would go past Gmail’s ' + fmtBytes(MAIL_SEND_MAX));
+    used += f.size;
+    const att = { name: f.name, mimeType: f.type || mailGuessMime(f.name), size: f.size, b64: null };
+    d.attachments.push(att); // shown as "fetching…" at once; Send waits for it
+    taking.push([f, att]);
+  });
+  mailRenderAtts();
+  mailComposeStatus(skipped.length ? 'Not attached: ' + skipped.join('; ') : '', !!skipped.length);
+  for (const [f, att] of taking) {
+    try {
+      att.b64 = bytesToB64(new Uint8Array(await f.arrayBuffer()));
+    } catch (_) {
+      att.failed = true; // unreadable (gone, locked): Send leaves it out and says so
+    }
+    if (mbox.draft === d) mailRenderAtts();
+  }
+}
+
 // ---- sending, with undo ----
 // With undo on, the main process holds the message for mailUndoSec and the toast counts
 // down; Undo takes it back into compose untouched. The outcome arrives as an event
@@ -14065,6 +14914,7 @@ async function mailSend() {
     mailRenderBanner();
     return mailComposeStatus('Not allowed to send yet - see above.', true);
   }
+  if (!d.attachments.length && !d.skipAttachCheck && mailMentionsAttachment(d)) return mailAttachWarn(d);
   d.sending = true;
   mailComposeStatus('Sending…');
   if (d.pending) await d.pending;
@@ -14103,7 +14953,7 @@ function mailAfterSent(d, res, sentAtts) {
       // no answer about it at all: a main process older than this page (updated, not restarted)
       (d.draftId && res.draftDeleted === undefined ? ' - the Gmail draft is still there: restart Cockpit to finish updating' : '')
   );
-  const offer = d.mode === 'draft' ? null : mailLearnFromSent(d); // a draft's text is not yours to learn from
+  const offer = d.mode === 'draft' || d.aiWritten ? null : mailLearnFromSent(d); // a draft's (or the model's) text is not yours to learn from
   if (offer && missing <= 0) mailOfferLearn(offer); // a missing-file warning is more important
   logEvent('mail', {
     title: 'sent · ' + (d.subject || '(no subject)'),
@@ -14769,7 +15619,7 @@ function mailHideSelPill() {
   const p = mailEl('.mail-selpill');
   if (p) p.classList.add('hidden');
 }
-function mailSelCheck(x, y, text, to) {
+function mailSelCheck(x, y, text, to, src) {
   const pill = mailEl('.mail-selpill');
   const rec = mailRec();
   const t = String(text || '').trim();
@@ -14777,6 +15627,8 @@ function mailSelCheck(x, y, text, to) {
   if (t.length < MAIL_SEL_MIN) return mailHideSelPill();
   pill._text = t;
   pill._to = to || '';
+  pill._src = src || null; // { ta, start, end } when the selection is in the message being written
+  pill.classList.toggle('with-ai', !!src && aiReady());
   pill.classList.remove('hidden');
   const pr = rec.paneEl.getBoundingClientRect();
   pill.style.left = Math.max(6, Math.min(pr.width - pill.offsetWidth - 6, x - pr.left + 8)) + 'px';
@@ -14789,7 +15641,14 @@ function mailWireSelPill(rec) {
     e.preventDefault(); // keep the selection and the focus where they are
     e.stopPropagation();
   });
-  pill.addEventListener('click', () => mailNewSnippetFrom(pill._text, pill._to));
+  pill.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-sp]');
+    if (!b) return;
+    const src = pill._src;
+    mailHideSelPill();
+    if (b.dataset.sp === 'snip') mailNewSnippetFrom(pill._text, pill._to);
+    else aiRewriteSel(src, b.dataset.sp);
+  });
   // anywhere else: the pill goes (a new selection brings it back)
   p.addEventListener('mousedown', (e) => {
     if (!pill.contains(e.target)) mailHideSelPill();
@@ -14803,7 +15662,12 @@ function mailWireSelPill(rec) {
 }
 // The compose body: your own words, so the recipient's name is generalised.
 function mailWireBodySel(body) {
-  const check = (x, y) => mailSelCheck(x, y, body.value.slice(body.selectionStart, body.selectionEnd), (mbox.draft || {}).to);
+  const check = (x, y) =>
+    mailSelCheck(x, y, body.value.slice(body.selectionStart, body.selectionEnd), (mbox.draft || {}).to, {
+      ta: body,
+      start: body.selectionStart,
+      end: body.selectionEnd,
+    });
   body.addEventListener('mouseup', (e) => setTimeout(() => check(e.clientX, e.clientY), 0));
   body.addEventListener('keyup', (e) => {
     if (!e.shiftKey) return;
@@ -19237,6 +20101,12 @@ setInterval(() => {
   if (settings && MAIL_READ_MODES.includes(settings.mailReadMode)) mailReadMode = settings.mailReadMode;
   else if (settings && settings.mailDarkRead === true) mailReadMode = 'dark';
   if (settings && typeof settings.mailTabBadge === 'boolean') mailTabBadge = settings.mailTabBadge;
+  if (settings && typeof settings.mailAiFast === 'boolean') mailAiFast = settings.mailAiFast;
+  if (settings && typeof settings.aiTranslateTo === 'string' && /^[\p{L} ()-]{2,40}$/u.test(settings.aiTranslateTo)) aiTranslateTo = settings.aiTranslateTo;
+  {
+    const r = settings && settings.mailComposeRect;
+    if (r && ['x', 'y', 'w', 'h'].every((k) => Number.isFinite(r[k])) && r.w > 0 && r.h > 0) mailComposeRect = { x: r.x, y: r.y, w: r.w, h: r.h };
+  }
   if (settings && typeof settings.tmuxOffer === 'boolean') tmuxOffer = settings.tmuxOffer;
   if (settings && Array.isArray(settings.tmuxNeverHosts)) tmuxNeverHosts = settings.tmuxNeverHosts.filter((x) => typeof x === 'string').slice(-200);
   if (settings && typeof settings.clipOn === 'boolean') clipOn = settings.clipOn;

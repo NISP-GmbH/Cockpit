@@ -14,6 +14,7 @@ const { GoogleManager, _mail: mailUtil } = require('./google-manager');
 const { LocalPty } = require('./local-pty');
 const { ClipHistory } = require('./clip-history');
 const { AgentManager } = require('./agent-manager');
+const { AiReply } = require('./ai-reply');
 const { webMenuItems, runWebMenu } = require('./web-menu');
 const { CodeServerManager } = require('./codeserver-manager');
 const { BlackBoxStore } = require('./blackbox-store');
@@ -73,6 +74,7 @@ const PDF_PREVIEW_DIR = path.join(os.tmpdir(), 'cockpit-pdf-preview');
 const clipHistory = new ClipHistory({ clipboard, onChange: (entries) => send('clip:changed', { entries }) });
 const googleMgr = new GoogleManager();
 let agent = null; // AgentManager, created once the store exists (its config is encrypted in it)
+let aiReply = null; // AiReply (fast replies), same
 googleMgr.contactsFile = path.join(app.getPath('userData'), 'mail-contacts.json'); // compose suggestions
 const appTracker = new AppTracker();
 let appStore = null; // AppStore, created lazily once userData path is known (flushed on quit)
@@ -157,6 +159,12 @@ function createWindow() {
   if (saved.maximized) mainWindow.maximize();
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  // A file dropped where no page handler takes it (inside a mail's frame, say) makes Chromium
+  // open it IN this window - Cockpit would be replaced by the file. Nothing navigates the
+  // main window on purpose, so only a reload of the same page is let through.
+  mainWindow.webContents.on('will-navigate', (e, url) => {
+    if (url !== mainWindow.webContents.getURL()) e.preventDefault();
+  });
 
   // Persist geometry as the window is moved/resized (debounced), plus on close —
   // so position survives even if the app is force-killed and never gets 'close'.
@@ -493,6 +501,7 @@ app.whenReady().then(() => {
 
   store = new Store(app.getPath('userData'));
   agent = new AgentManager({ store, encrypt: encryptSecret, decrypt: decryptSecret });
+  aiReply = new AiReply({ store, encrypt: encryptSecret, decrypt: decryptSecret });
 
   // Restore a Google session from stored, encrypted credentials (no browser needed).
   try {
@@ -537,7 +546,7 @@ app.whenReady().then(() => {
   ipcMain.handle('store:save', (_e, sessions) => store.save(sessions));
   // agentConfig (endpoint + key, encrypted) is main-only: the page never sees it, and a page
   // saving the settings it loaded at boot must not put an older copy back.
-  const PRIVATE_SETTINGS = ['agentConfig'];
+  const PRIVATE_SETTINGS = ['agentConfig', 'aiConfig'];
   const withoutPrivate = (s) => {
     const o = { ...(s || {}) };
     for (const k of PRIVATE_SETTINGS) delete o[k];
@@ -759,6 +768,21 @@ app.whenReady().then(() => {
   ipcMain.handle('agent:models', agentWrap(async () => agent.models()));
   ipcMain.handle('agent:start', agentWrap(async (p) => agent.start(p)));
   ipcMain.handle('agent:job', agentWrap(async ({ id }) => ({ job: await agent.job(id) })));
+  // ---- fast AI replies (ai-reply.js): the text streams back as ai:delta events ----
+  ipcMain.handle('ai:getConfig', agentWrap(async () => ({ config: aiReply.publicConfig() })));
+  ipcMain.handle('ai:setConfig', agentWrap(async (p) => ({ config: aiReply.setConfig(p) })));
+  ipcMain.handle('ai:test', agentWrap(async () => aiReply.test()));
+  ipcMain.handle(
+    'ai:draft',
+    agentWrap(async ({ reqId, input }) => aiReply.draft(String(reqId || ''), input || {}, (text) => send('ai:delta', { reqId, text })))
+  );
+  ipcMain.handle(
+    'ai:task',
+    agentWrap(async ({ reqId, kind, input }) =>
+      aiReply.task(String(reqId || ''), String(kind || ''), input || {}, (text) => send('ai:delta', { reqId, text }))
+    )
+  );
+  ipcMain.handle('ai:cancel', (_e, { reqId } = {}) => ({ ok: aiReply.cancel(String(reqId || '')) }));
   // ---- clipboard history ----
   ipcMain.handle('clip:config', (_e, { on, clearSecrets } = {}) => {
     clipHistory.clearSecrets = clearSecrets !== false;
