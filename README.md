@@ -7,6 +7,13 @@ A tabbed, colorful control center for Windows (and Mac/Linux) that puts all of i
 window. Started life as a PuTTY-style SSH client (liked PuTTY, not MobaXterm): full
 ANSI/256/truecolor, SSH-key auth.
 
+## Download
+
+**Windows:** get the portable `.exe` from the
+**[latest release](https://github.com/NISP-GmbH/Cockpit/releases/latest)** and run it - no
+installer. It is not code-signed yet, so SmartScreen may warn on the first start: **More info**
+→ **Run anyway**. **macOS / Linux:** run it from source (see [Run](#run)).
+
 ## Screenshots
 
 **Terminals** - full-color SSH/local tabs with the live message boards in the right sidebar:
