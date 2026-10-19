@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.log
+
+# Windows shortcuts and local snapshots
+*.lnk
+*.zip
+
+# Local Electron bootstrap (manually extracted binary path)
+path.txt
+
+# Keep the local Claude guide out of the public repo
+CLAUDE.md
