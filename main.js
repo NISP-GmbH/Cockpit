@@ -355,19 +355,58 @@ app.on('open-url', (event, url) => {
   deliverSshUrl(url);
 });
 
-// Ensure only one instance runs — prevents two processes fighting over settings.json.
-if (!app.requestSingleInstanceLock()) {
-  app.exit(0);
+// ---- single instance ----
+// Only one Cockpit at a time - two would fight over settings.json. The launchers
+// (cockpit.sh, Cockpit.cmd) loop-restart the app, so how a start ENDS is part of the
+// protocol, and each case has an exit code of its own:
+//   3  another Cockpit is running; it has been asked to show its window
+//   4  this Cockpit quit because a newer start asked for a restart (--restart-running)
+//   5  --restart-running, but nothing was running: the launcher just starts normally
+// A second start used to exit(0) without a word, which the launchers read as "closed" and
+// restarted every 2 s, for ever.
+const EXIT_ALREADY_RUNNING = 3;
+const EXIT_RESTARTED_ELSEWHERE = 4;
+const EXIT_NOTHING_TO_RESTART = 5;
+const wantsRestart = process.argv.includes('--restart-running');
+let quitForRestart = false;
+if (!app.requestSingleInstanceLock({ restart: wantsRestart })) {
+  console.error(
+    wantsRestart
+      ? '[cockpit] asked the running Cockpit to quit, so a fresh one can start.'
+      : '[cockpit] Cockpit is already running - showing that window instead of starting a second copy.'
+  );
+  app.exit(EXIT_ALREADY_RUNNING);
+} else if (wantsRestart) {
+  app.exit(EXIT_NOTHING_TO_RESTART); // a restart request is not a start
 }
-app.on('second-instance', (_e, argv) => {
-  const url = extractSshUrl(argv);
-  if (url) deliverSshUrl(url); // opens a terminal + brings the window forward
-  else if (mainWindow) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
+app.on('second-instance', (_e, argv, _cwd, data) => {
+  // A newer start wants this one gone (after a git pull, say). Quit the normal way, so
+  // before-quit still sends any held (undo-send) mail; will-quit sets the exit code.
+  if ((data && data.restart) || argv.includes('--restart-running')) {
+    quitForRestart = true;
+    // Not at once: the request is answered after this handler returns, and a copy that is
+    // already gone by then lets the requester take the lock and report "nothing to restart".
+    setTimeout(() => app.quit(), 300);
+    return;
   }
+  const url = extractSshUrl(argv);
+  if (url) return deliverSshUrl(url); // opens a terminal + brings the window forward
+  // On a Mac, closing the window leaves the app running with NO window - there is
+  // nothing to bring forward, so open one (that is what clicking the Dock icon does too).
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    if (app.isReady()) createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
 });
+app.on('will-quit', (e) => {
+  if (!quitForRestart) return;
+  e.preventDefault();
+  app.exit(EXIT_RESTARTED_ELSEWHERE); // tells THIS copy's launcher not to restart it
+});
+// ---- /single instance ----
 
 // Distinct taskbar identity/grouping on Windows (also helps the icon show).
 if (process.platform === 'win32') app.setAppUserModelId('com.local.cockpit');

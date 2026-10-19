@@ -161,15 +161,24 @@ Instead of `npm start`, use the bundled launcher, which **relaunches Cockpit whe
 - **Windows:** double-click **`Cockpit.cmd`**
 - **macOS / Linux:** `./cockpit.sh`  (first time: `chmod +x cockpit.sh`)
 
+Only one Cockpit runs at a time. If it is **already running** (on a Mac it keeps running in the
+Dock after you close its window), the launcher brings its window to the front and asks
+**"Restart it now, so it runs the current code? [y/N]"** - yes quits the running one cleanly (any
+mail still waiting in undo send goes out first) and starts a fresh one. Other things it handles:
+- `./cockpit.sh --restart` / `Cockpit.cmd --restart` restarts a running Cockpit without asking.
+- A second launcher window that was looping on the old copy stops instead of starting a third.
+- If Cockpit closes within 5 seconds of starting, 3 times in a row, the launcher stops and says
+  so instead of restarting every 2 seconds for ever - run `npm start` to see the error.
+
 ## Updating
 Cockpit runs from source, so updating is just a pull and a restart:
 ```bash
 git pull
 npm install     # only needed when dependencies changed
-npm start       # or use the auto-restart launcher above
+./cockpit.sh --restart     # Windows: Cockpit.cmd --restart  (or npm start)
 ```
-If you use the auto-restart launcher, quit Cockpit after `git pull` and it comes back on the new
-version automatically.
+`--restart` swaps a running Cockpit for the new version in one step; without a running one it
+simply starts.
 
 ### macOS quick-start (run from source)
 Cockpit is a cross-platform Electron app and runs the same on macOS.
