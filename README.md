@@ -80,7 +80,7 @@ Everything lives in one tabbed window (`Ctrl+Shift+T` new · `Ctrl+Shift+W` clos
   string - is shown masked, never matched by the filter, and **removed after a minute**; if it
   is still on the clipboard then, the clipboard is cleared too (Settings can leave it there).
 - **Send a file here** (tab hover cheat-sheet → 📤) - the mirror of the grab below: pushes a file **into the shell this terminal is in right now**, so on a multi-hop `ssh` it lands on the **last** hop, not the first - and it reaches inside `sudo` or a container too. The bytes are base64 and typed through the terminal in chunks, with the whole exchange hidden, and the size is checked on arrival. Small files only (1 MB cap); use **📁 Files** for anything larger.
-- **📁 Files (SFTP)** (the 📁 button on the top bar, the tab hover cheat-sheet, or ＋ New ▾ → 📁 Files) - browse the host you connected to: **📤 Upload**, download, and move around. You can also **drag files onto the terminal**. SFTP is attached to the first hop, so it does not follow further `ssh` hops - that is what Send a file here is for.
+- **📁 Files (SFTP)** (the 📁 button on the top bar, the tab hover cheat-sheet, or ＋ New ▾ → 📁 Files) - browse the host you connected to: **📤 Upload**, download, and move around. You can also **drag files onto the terminal**. SFTP is attached to the first hop, so it does not follow further `ssh` hops - that is what Send a file here is for. While a file goes over SFTP (either way, from the panel or dropped on a terminal), a card in the bottom left corner shows **which file** (and which of how many), a progress bar, how much is done, the speed and the **time left**; it goes by itself a moment after the end, and a failed transfer stays a little longer with the reason.
 - **Grab / preview a file from here** (tab hover cheat-sheet → 📥 Get a file) - reaches a file straight through the current terminal session, so it works even inside a **nested `ssh`**, `sudo`, `tmux`, or a container where SFTP can't reach. Two options: **👁 Preview** shows the contents in a scrollable viewer (`.json` pretty-prints; **`.log`/`.out`/`.err` jump to the end** so you see the newest lines; binary files are declined), and **📥 Download** saves it. The transfer is hidden from the terminal (a short `[sending file …]` note stands in for the base64), leaving no clutter. The host also reports the file size, and a transfer that arrives a different size is **refused rather than saved** - a long stream can be mangled by anything that redraws the terminal instead of passing bytes through (tmux, screen), and a silently corrupt file is worse than none. Best for small and medium files; use 📁 Files (SFTP) for large ones.
 - **Port forwarding** (tab hover cheat-sheet → 🔀 Port forwarding) - a visual SSH tunnel manager for the active connection. Port forwarding is confusing because it's hard to picture *who listens* and *which way traffic flows*, so each tunnel is drawn as a **three-node diagram** - your PC, the SSH host, the target - with a 📡 LISTENS pin and directional arrows, plus a plain-English sentence, and a live preview updates as you fill the form. Supports **Local (`-L`)** (reach an internal service from your machine), **Remote (`-R`)** (expose something of yours on the server), and **Dynamic (`-D`)** (a built-in SOCKS5 proxy). Each active tunnel shows a status dot, live connection count and bytes up/down, with a Stop button. Optionally **remember** a tunnel per host so it **auto-starts on connect**. An "allow other devices (0.0.0.0)" toggle exposes a local tunnel to your LAN. The panel is **draggable** by its header (double-click the header to re-center).
 - **Host vitals** (Terminal ▾ → 📈 Host vitals, opt-in) - a tiny live CPU / MEM / DISK sparkline strip in the **status bar**, next to the active SSH shell's name, so you can eyeball a box's health without opening `htop`. Each host is polled over a **separate exec channel** (default every 15 s, selectable 5/15/30/60 s in the same menu), so it never disturbs your interactive shell. CPU is load1 ÷ cores; colours go green → amber → red as a metric climbs. **Hover** the strip for absolute figures (e.g. `MEM 29% of 33 GB (9.6 GB used)`, `DISK 82% of 500 GB`, plus load and core count). Linux-oriented (reads `/proc` + `df`); unavailable values show `n/a`.
@@ -102,7 +102,7 @@ paste / select all; anywhere else - back / forward / reload; and always *Inspect
 
 **Messaging** - **Slack** and **WhatsApp** as tabs *and* as live right-sidebar **boards** (latest messages across all channels/chats, click to jump). Slack via Socket Mode; WhatsApp via QR login (no API key). Capture any message to a note.
 
-**Google** - a **📧 Mail tab** (Gmail in a tab: triage from the keyboard, reply / forward, attachments straight into a shell), the Inbox board + **Calendar** bar with countdown, a **centered pop-up that raises the window for an imminent meeting** (with a one-click **Join**), and capture-email-to-note.
+**Google** - a **📧 Mail tab** (Gmail in a tab: triage from the keyboard, reply / forward, attachments straight into a shell), a **📅 Calendar tab** (your week, drag to make or move events), the Inbox board + **Calendar** bar with countdown, a **centered pop-up that raises the window for an imminent meeting** (with a one-click **Join**), and capture-email-to-note.
 
 **Terminal presets** - a terminal that sets itself up. A preset is a name and a list of steps that Cockpit
 types for you: `ssh` somewhere, wait, attach to tmux, set the tab title. You write them once, as plain text,
@@ -113,7 +113,14 @@ in ⚙ → **⚡ Terminal presets** (or ＋ New ▾ → ⚡ Presets → ✎ Edit
 start: local
 title: pen
 ssh admin@pen
-wait: $
+wait-prompt
+tmux attach -t main
+
+[Server]
+ask: host = db1
+title: srv-{host}
+ssh admin@{host}
+wait-prompt
 tmux attach -t main
 
 [Logs]
@@ -127,6 +134,8 @@ A name in brackets starts a preset; then one step per line:
 | Line | What it does |
 |---|---|
 | any other line | typed into the terminal, with Enter |
+| `wait-prompt` | goes on when the shell is back at its prompt - whatever your prompt looks like. If ssh asks for a password or a yes/no on the way, the strip says so: you answer it, the preset goes on after. Waits 2 minutes, `wait-prompt 300` for longer |
+| `ask: host` | asks for a value when the preset starts; `{host}` in any later line is the answer. `ask: host = db1` gives it a default. The answers you gave last time are offered again |
 | `sleep 3` | a pause of 3 seconds, made by Cockpit - nothing is typed |
 | `wait: text` | goes on when that text shows up in the terminal (a prompt, say); gives it 30 s, `wait 60: text` for longer. If it never comes the preset stops there and the rest is **not** typed |
 | `title: Name` | sets the tab title, at the start or between two steps |
@@ -137,7 +146,7 @@ A name in brackets starts a preset; then one step per line:
 
 **Save presets** says what it understood, or names the line with a mistake.
 
-Three ways to use one:
+Four ways to use one:
 
 - **A new tab**: ＋ New ▾ → **⚡ Presets ▸** → the preset. It opens the terminal (or the saved connection - a
   password is still asked for in the usual dialog) and types the steps.
@@ -145,13 +154,28 @@ Three ways to use one:
   pick one from the list beside it (or Shift+click the preset in the ＋ New menu). The steps are typed there -
   for when an ssh has logged out again. A shell that ended or a connection that dropped is started again first.
   `start:` and `cwd:` do not apply here, and the tab keeps its title unless the preset has a `title:` line.
+- **Record one**: hover a terminal's tab and click **⏺ Record a preset**, then work as usual. Every command you
+  run is noted (a red strip counts them) - read from the screen, so tab completion and a line taken from history
+  come out as the shell got them. Input that the shell does not show, a password above all, is never noted.
+  **Save…** shows the preset before it is saved (each command waits for the prompt of the one before; an ssh tab
+  starts in its saved connection, or with its `ssh` line); change the name in the first line, or anything else.
 - **By itself, when Cockpit starts**: every terminal that *belongs to* a preset runs it again after a restart,
-  once its shell or connection is there. A terminal belongs to a preset when it was started with it, or when its
-  **tab title matches**: the preset's name, or one of its `title:` lines (upper and lower case do not matter).
+  once its shell or connection is there. **The tab title decides**: a tab belongs to the preset whose name, or one
+  of whose `title:` lines, is the tab's title (upper and lower case do not matter). Only a title that matches no
+  preset falls back to the preset the tab was last linked to (one you applied to a shell with a name of its own).
   So a tab you named `pen` and a preset with `title: pen` are a match - name your tabs after your presets and
-  the whole set of terminals is back where it was. Renaming a tab while Cockpit runs starts nothing; the match
-  is looked at when Cockpit starts. Switch this off in ⚙ → Terminal presets ("When Cockpit starts, run a preset
+  the whole set of terminals is back where it was. A title with a question in it matches any value there and
+  keeps it: a tab `srv-db2` and a preset with `title: srv-{host}` run with `host` = `db2`. A tab that was started
+  from a preset remembers its answers anyway, so each of several tabs of one preset comes back with its own host.
+  **Renaming a tab** by hand moves its link with the name: a name that matches a preset links the tab to it (the
+  strip shows ▶ Run preset - nothing is typed until the next start or a click), a name that matches none unlinks
+  it. The tab's hover menu (**⚡ Presets ▸**) says which preset a tab is linked to and has **⛓ Unlink**. Switch this off in ⚙ → Terminal presets ("When Cockpit starts, run a preset
   by itself ..."): then such tabs come back with a **▶ Run preset** button and nothing is typed without a click.
+
+**After a restart** one small note in the corner says how the preset tabs did, once they are through: which
+ran through, which **stopped and why** ("$" did not show up in 30 s at step 3 of 5), which still run, and which
+wait for you (running at launch is off, or a question has no answer yet). Click a row to go to that tab. When
+all went through it goes away by itself; otherwise it stays until you close it.
 
 While a preset runs, a small strip in the corner of the terminal shows the step it is at and has **Stop**;
 afterwards it offers **▶ Run again**. Cockpit's own background commands (the where-am-I check, the size
@@ -159,7 +183,7 @@ resync) stay out of a terminal while a preset is typing into it.
 
 One thing to know: a fixed `sleep` does not look at the screen. If `ssh` is still asking for a password when
 the pause is over, the next command is typed into the password prompt. With key login that cannot happen;
-otherwise use `wait:` with the end of your prompt instead of `sleep`. A terminal that is showing a full-screen
+otherwise use `wait-prompt` instead of `sleep`. A terminal that is showing a full-screen
 program (tmux, vim) asks before a preset is typed into it by hand.
 
 **Look** - ⚙ → Look switches the whole app between the standard dark grey and one colour on black:
@@ -373,6 +397,45 @@ Connected before the Mail tab existed? Reading and triage keep working with the 
 have; **sending** needs Gmail send too, so press **Connect & sign in** once more and allow
 it. The compose panel says so when it is missing.
 
+### 📅 The Calendar tab
+**＋ New ▾ → 📅 Calendar**, or a click on the next-meeting chip in the status bar (while it
+flashes for a meeting about to start, that click still just stops the flash), opens your
+**primary** Google calendar as a week: Monday to Sunday, an hour grid with a red line at
+the time now, all-day events (and anything a day or longer) as bars on top. Events that
+overlap share their column. Invitations you have not answered are outlined, a *maybe* is
+striped, a *no* is faded and struck through.
+
+- **Look**: **◀ ▶** or `←` `→` (`k` `j`) for the week before or after, **Today** or `t`. `Ctrl`
+  + wheel makes the hours taller or shorter. **⟳** or `r` reads it again (it also does so
+  every 2 minutes while you look at it).
+- **Other time zones**: *Also:* lists the zones of the 🕐 TZ planner; tick one or two and an
+  extra hour column shows their time next to yours (half-hour zones too). The details of an
+  event show its time there as well. Both are remembered.
+- **Details**: click an event - when, where, **Join**, the organizer, the guests and their
+  answers, the notes (as text; links stay clickable), **Yes / Maybe / No** for an
+  invitation, **Edit**, **Delete**, **Open in Google Calendar**.
+- **Make one**: drag across free time (quarter hours) and type a title, Enter saves. A plain
+  click gives half an hour there; a click in the all-day row gives an all-day event.
+  **More…**, **+ New event** or `n` open the full editor: title, all day, from / to, place,
+  guests (suggested from your mail contacts), a Google Meet link, notes.
+- **Move it**: drag an event to another time or day; drag its lower edge to make it longer
+  or shorter. An event with guests asks first whether they are told (*Send* / *Don't send*),
+  as Google does; so does saving a change in the editor.
+- **Right-click** an event, as in Google Calendar: its **colour** first (the calendar's own and
+  Google's eleven - Lavender to Tomato; only you see it, invitations too), then Yes / Maybe /
+  No for an invitation, Details, Join, Edit, **Duplicate** (the editor with a copy, to put on
+  another day), Open in Google Calendar and Delete. Right-click free time for a new event there,
+  or the all-day row for a new all-day event.
+- **Undo**: a move, a change of length, a colour, a new event and a delete can be taken back for 8
+  seconds (the toast's **Undo**, or `z`). `Delete` deletes the event you clicked last.
+- **What can be changed**: your own events, and those whose organizer lets guests change
+  them. An invitation from someone else can be answered, not moved. A repeating event is
+  changed one occurrence at a time (the series stays as it is - change that in Google
+  Calendar).
+- **Permission**: changing the calendar needs the Calendar **events** permission. Connected
+  before it was asked for? The tab shows your week read-only with a banner; **Connect &
+  sign in** once more (⚙ Settings → Google) and allow it.
+
 ### 📧 The Mail tab
 **＋ New ▾ → 📧 Mail** (or the Home deck, or click a mail on the Inbox board) opens Gmail in
 a tab: search, Inbox / Unread / Starred / Sent / Drafts / All mail, your labels, a thread list and a
@@ -438,6 +501,21 @@ operator like `from:` are searched exactly as typed. The tab comes back on resta
   short one is used only when every recipient is a colleague: one outsider on Cc and the full one
   goes in. It sits above the quoted original after the standard `-- ` line, follows the
   recipients while you type them, and is left alone once you edit it.
+  **Per From address**: when you send as several addresses, Settings → Google lists them, one
+  line each, saying whether it has its own signature or uses the general ones. Click a line and
+  its short and full signature open in a panel beside Settings (empty = the general ones;
+  **Copy from Gmail** takes the one Gmail keeps for that address, **Use the general ones** empties
+  both; `Esc` or ✕ closes the panel). Settings stays short however many addresses you have.
+  Changing the **From** row swaps the signature too. An address with only a full one uses it for
+  colleagues as well - never the other address's.
+  **Formatted signatures**: tick **Formatted: use the signature Gmail has for the address you
+  send from** and the full signature is the one you set up in Gmail (Settings → General →
+  Signature), with its links, images and colours - read from Gmail each time, so a change there
+  follows. Settings shows how it looks. Compose is plain text, so the window shows its text, and
+  **✒ formatted signature** in the bottom bar says the mail goes out formatted (an html part next
+  to the text). Change that text and your text is sent instead. Your own words go into the html as
+  text (links made links, quotes as quote blocks). An address without a signature in Gmail, an
+  address with its own full one, and a short colleague one you wrote keep using text.
 - **Reply, reply all, forward** - plain text with the original quoted, kept in the same Gmail
   thread; reply all leaves you out. Forward brings the attachments along; 📎 adds your own.
 - **The compose window** - drag it by its title bar and resize it from any edge or corner; it

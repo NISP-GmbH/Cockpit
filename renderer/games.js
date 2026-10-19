@@ -1,9 +1,10 @@
-// The games registry. Each game file (chess.js, mahjong.js, sudoku.js) adds one entry:
-//   gameTabs.<kind> = { title, glyph, color, create, onShow, onClose, restore }
-// and renderer.js handles every game tab through it - the tab glyph, showing, closing, the
-// saved tab order, the restart, the 3D overview - so a new game needs no edit there.
-// Loaded before the game files and before renderer.js.
-const gameTabs = {};
+// The registry of tab kinds that live in their own file - the games (chess.js, mahjong.js,
+// sudoku.js) and the calendar (calendar.js). Each adds one entry:
+//   tabKinds.<kind> = { title, glyph, color, create, onShow, onClose, restore }
+// and renderer.js handles every such tab through it - the tab glyph, showing, closing, the
+// saved tab order, the restart, the 3D overview - so a new one needs no edit there.
+// Loaded before those files and before renderer.js.
+const tabKinds = {};
 
 // "Games" in the ＋ New menu opens its own small menu to the right (hover, or a click for touch
 // and keyboard). The click must not reach the main menu, which closes on any click inside it.

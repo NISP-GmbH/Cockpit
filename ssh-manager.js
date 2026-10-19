@@ -277,15 +277,16 @@ class SSHManager {
     return { path: real, entries };
   }
 
-  async sftpDownload(tabId, remotePath, localPath) {
+  // onStep(done, chunk, total): ssh2 reports every piece written, for a progress bar
+  async sftpDownload(tabId, remotePath, localPath, onStep) {
     const sftp = await this._getSftp(tabId);
-    await new Promise((res, rej) => sftp.fastGet(remotePath, localPath, (e) => (e ? rej(e) : res())));
+    await new Promise((res, rej) => sftp.fastGet(remotePath, localPath, onStep ? { step: onStep } : {}, (e) => (e ? rej(e) : res())));
     return true;
   }
 
-  async sftpUpload(tabId, localPath, remotePath) {
+  async sftpUpload(tabId, localPath, remotePath, onStep) {
     const sftp = await this._getSftp(tabId);
-    await new Promise((res, rej) => sftp.fastPut(localPath, remotePath, (e) => (e ? rej(e) : res())));
+    await new Promise((res, rej) => sftp.fastPut(localPath, remotePath, onStep ? { step: onStep } : {}, (e) => (e ? rej(e) : res())));
     return true;
   }
 

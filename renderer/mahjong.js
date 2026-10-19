@@ -966,4 +966,4 @@ function mahMarks() {
 }
 
 document.getElementById('mahjong-btn')?.addEventListener('click', () => createMahjongTab());
-gameTabs.mahjong = { title: 'Mahjong', glyph: '🀄', color: '#3fb97f', create: createMahjongTab, onShow: mahOnShow, onClose: mahOnClose, restore: mahRestoreSettings };
+tabKinds.mahjong = { title: 'Mahjong', glyph: '🀄', color: '#3fb97f', create: createMahjongTab, onShow: mahOnShow, onClose: mahOnClose, restore: mahRestoreSettings };

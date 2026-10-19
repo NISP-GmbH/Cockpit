@@ -23,6 +23,7 @@
             <button id="relax-btn" title="Time Relax - work/break cycles with a bell (F2)">🍵 Time Relax</button>
             <button id="new-tab-btn" title="New connection (Ctrl+Shift+T)">＋ New connection</button>
             <button id="slack-btn" title="Open a Slack channel">＃ Slack</button>
+            <button id="calendar-btn" title="Your Google calendar, a week at a time - drag to make or move events">📅 Calendar</button>
             <button id="mail-btn" title="Gmail in a tab - read, triage from the keyboard, reply">📧 Mail</button>
             <button id="sftp-btn" title="Browse files (SFTP) of the active SSH tab">📁 Files</button>
             <button id="local-term-btn" title="Open a local terminal (run Claude / CDP tools)">🖥 Local terminal</button>
@@ -266,7 +267,7 @@
         </div>
         <button id="blackbox-btn" title="Black Box timeline (F4)">✈️</button>
         <span id="status-vitals" class="hidden"></span>
-        <div id="calendar" class="hidden" title="Hover for upcoming appointments (also stops the flash)"></div>
+        <div id="calendar" class="hidden" title="Hover for upcoming appointments - click to open the calendar (while it flashes, a click stops the flash)"></div>
       </div>
     </div>
 
@@ -692,6 +693,12 @@
             <label>Full (everyone else)
               <textarea id="set-mail-sig-ext" rows="4" placeholder="Name&#10;Title - Company&#10;+49 ..."></textarea>
             </label>
+            <label class="settings-check">
+              <input type="checkbox" id="set-mail-sig-gmail" />
+              Formatted: use the signature Gmail has for the address you send from (links, images) instead of the full one above
+            </label>
+            <div id="set-mail-sig-gmail-info" class="hidden"></div>
+            <div id="set-mail-sig-per" class="hidden"></div>
           </div>
           <div class="settings-status">
             The Mail tab reads and triages with the permission you already gave. Sending needs Gmail
@@ -935,9 +942,12 @@
             Write a name in brackets, then one step per line:
             a command &middot; <code>sleep 3</code> (a pause, in seconds) &middot;
             <code>wait: text</code> (go on when that text shows up, e.g. a prompt; <code>wait 60: text</code> for longer than 30 s) &middot;
+            <code>wait-prompt</code> (go on when the shell is back at its prompt, whatever it looks like) &middot;
+            <code>ask: host</code> or <code>ask: host = db1</code> (asked when it starts; <code>{host}</code> in any line is the answer) &middot;
             <code>title: Name</code> (the tab title) &middot; <code>start: local</code> or <code>start: a saved connection</code> &middot;
             <code>cwd: folder</code> (local only) &middot; <code>run: sleep 3</code> types the line as it is &middot; <code>#</code> a note.
             To run a preset in a terminal that is already open, hover its tab: ⚡ Presets, among the buttons at the top, opens the list.
+            ⏺ Record a preset (same menu) turns what you type into one.
           </div>
           <div class="ssh-hop-row">
             <textarea id="set-term-presets" rows="10" spellcheck="false"
@@ -1085,6 +1095,7 @@
     <script src="mahjong.js"></script>
     <script src="sudoku-engine.js"></script>
     <script src="sudoku.js"></script>
+    <script src="calendar.js"></script>
     <script src="renderer.js"></script>
 </body>
 </html>

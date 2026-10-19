@@ -317,6 +317,7 @@ const els = {
   setMailSigInt: document.getElementById('set-mail-sig-int'),
   setMailSigExt: document.getElementById('set-mail-sig-ext'),
   setMailIntDomains: document.getElementById('set-mail-int-domains'),
+  setMailSigPer: document.getElementById('set-mail-sig-per'),
   setGoogleForget: document.getElementById('set-google-forget'),
   settingsGoogleError: document.getElementById('settings-google-error'),
   setClaudeWatch: document.getElementById('set-claude-watch'),
@@ -399,7 +400,7 @@ function createTabChrome(id, title, kind) {
   tabEl.innerHTML =
     '<span class="kind-glyph"></span><span class="title"></span><span class="unread"></span><span class="close" title="Close">✕</span>';
   tabEl.querySelector('.kind-glyph').textContent =
-    kind === 'slack' ? '#' : kind === 'web' ? '🌐' : kind === 'notes' ? '📝' : kind === 'deck' ? '🏠' : kind === 'mail' ? '📧' : gameTabs[kind] ? gameTabs[kind].glyph : '>_';
+    kind === 'slack' ? '#' : kind === 'web' ? '🌐' : kind === 'notes' ? '📝' : kind === 'deck' ? '🏠' : kind === 'mail' ? '📧' : tabKinds[kind] ? tabKinds[kind].glyph : '>_';
   const titleEl = tabEl.querySelector('.title');
   titleEl.textContent = title;
   titleEl.title = 'Double-click to rename';
@@ -422,20 +423,28 @@ function createTabChrome(id, title, kind) {
     tabEl.classList.remove('dragging');
     syncTabOrderFromDom();
   });
-  // Terminal tabs: hover shows the shortcut cheat-sheet.
+  // Terminal tabs: hover shows the shortcut cheat-sheet - after a moment (tabHoverShow).
   if (kind === 'ssh' || kind === 'local') {
     tabEl.addEventListener('mouseenter', () => {
       // Hovering an attention-flagged tab is enough to acknowledge it (no click needed).
       const r = tabs.get(tabEl.dataset.id);
       if (r) clearTabAttention(r);
-      showTabHelp(tabEl);
+      tabHoverShow(tabEl, showTabHelp, els.tabHelp);
     });
-    tabEl.addEventListener('mouseleave', hideTabHelp);
+    tabEl.addEventListener('mouseleave', () => {
+      clearTimeout(tabHoverTimer);
+      hideTabHelp();
+    });
   } else if (kind === 'web') {
     // Web tabs: hover shows a CDP helper snippet to hand to Claude.
-    tabEl.addEventListener('mouseenter', () => showWebHelp(tabEl));
-    tabEl.addEventListener('mouseleave', hideWebHelp);
+    tabEl.addEventListener('mouseenter', () => tabHoverShow(tabEl, showWebHelp, els.webHelp));
+    tabEl.addEventListener('mouseleave', () => {
+      clearTimeout(tabHoverTimer);
+      hideWebHelp();
+    });
   }
+  // a click on the tab is a click, not a wish for its menu
+  tabEl.addEventListener('mousedown', () => clearTimeout(tabHoverTimer));
   els.tabs.appendChild(tabEl);
 
   const paneEl = document.createElement('div');
@@ -446,6 +455,18 @@ function createTabChrome(id, title, kind) {
   return { tabEl, paneEl };
 }
 
+// A tab's hover menu waits a moment before it opens: passing over the tab strip on the way
+// somewhere else must not pop it up (the user found it came too fast). Once one is open,
+// moving to the next tab swaps it at once.
+const TAB_HOVER_DELAY = 500;
+let tabHoverTimer = null;
+function tabHoverShow(tabEl, show, sheet) {
+  clearTimeout(tabHoverTimer);
+  if (!sheet.classList.contains('hidden')) return show(tabEl);
+  tabHoverTimer = setTimeout(() => {
+    if (tabEl.isConnected && tabEl.matches(':hover')) show(tabEl);
+  }, TAB_HOVER_DELAY);
+}
 let tabHelpTimer = null;
 let tabHelpTabId = null;
 let tabHelpKeys = false; // is the shortcut table folded open?
@@ -3625,8 +3646,8 @@ function activateTab(id) {
       renderDeck(rec); // refresh the dashboard the moment it's shown
     } else if (rec.kind === 'mail') {
       mailOnShow();
-    } else if (gameTabs[rec.kind]) {
-      gameTabs[rec.kind].onShow(); // a canvas could not be measured while the tab was hidden
+    } else if (tabKinds[rec.kind]) {
+      tabKinds[rec.kind].onShow(); // a canvas could not be measured while the tab was hidden
     }
   });
   persistActiveTab();
@@ -3703,7 +3724,7 @@ function closeTab(id) {
   const wasLocal = rec.kind === 'local';
   const wasDeck = rec.kind === 'deck';
   const wasMail = rec.kind === 'mail';
-  const wasGame = gameTabs[rec.kind]; // games.js
+  const wasGame = tabKinds[rec.kind]; // games.js
   rec.tabEl.remove();
   rec.paneEl.remove();
   tabs.delete(id);
@@ -4057,8 +4078,11 @@ function startTabRename(id, titleEl) {
     titleEl.classList.remove('editing');
     rec.tabEl.draggable = true;
     const name = titleEl.textContent.trim();
-    if (commit && name) applyTabRename(rec, name);
-    else titleEl.textContent = rec.customTitle || (rec.profile && rec.profile.name) || name || rec.kind;
+    if (commit && name) {
+      const was = rec.customTitle || '';
+      applyTabRename(rec, name);
+      if (name !== was && typeof presetRenamed === 'function') presetRenamed(rec, name); // a new name: maybe another preset
+    } else titleEl.textContent = rec.customTitle || (rec.profile && rec.profile.name) || name || rec.kind;
     focusTerm(rec); // back to typing where you were
   };
   const onKey = (e) => {
@@ -6748,6 +6772,7 @@ function captureSshCommand(rec, data) {
     if (ch === '\x1b') {
       rec.escSkip = true; // skip arrow keys / CSI sequences
     } else if (ch === '\r' || ch === '\n') {
+      if (rec._presetRec) presetRecordEnter(rec, rec.lineBuffer || ''); // recording a preset
       const line = rec.lineBuffer.trim();
       rec.lineBuffer = '';
       if (line) {
@@ -6795,6 +6820,7 @@ function captureLocalCommand(rec, data) {
     if (ch === '\x1b') {
       rec.escSkip = true;
     } else if (ch === '\r' || ch === '\n') {
+      if (rec._presetRec) presetRecordEnter(rec, rec.lineBuffer || ''); // recording a preset
       const line = (rec.lineBuffer || '').trim();
       rec.lineBuffer = '';
       if (line) {
@@ -6868,7 +6894,7 @@ function tabKey(rec) {
   if (rec.kind === 'notes') return 'notes';
   if (rec.kind === 'deck') return 'deck';
   if (rec.kind === 'mail') return 'mail';
-  if (gameTabs[rec.kind]) return rec.kind; // one tab per game
+  if (tabKinds[rec.kind]) return rec.kind; // one tab per game
   return rec.kind + ':' + rec.id;
 }
 
@@ -6916,12 +6942,15 @@ function persistTabOrder() {
       entry = { kind: 'deck' };
     } else if (rec.kind === 'mail') {
       entry = { kind: 'mail' };
-    } else if (gameTabs[rec.kind]) {
+    } else if (tabKinds[rec.kind]) {
       entry = { kind: rec.kind };
     }
     if (!entry) continue;
     if (rec.customTitle) entry.title = rec.customTitle; // remember a manual rename
-    if (rec.preset && (rec.kind === 'local' || rec.kind === 'ssh')) entry.preset = rec.preset.name;
+    if (rec.preset && (rec.kind === 'local' || rec.kind === 'ssh')) {
+      entry.preset = rec.preset.name;
+      if (rec.preset.vars && Object.keys(rec.preset.vars).length) entry.presetVars = rec.preset.vars; // its ask: answers
+    }
     order.push(entry);
   }
   api.saveSettings({ tabOrder: order });
@@ -7461,6 +7490,9 @@ async function openSettings() {
   els.setMailImgSenders.value = mailImgSenders.join('\n');
   els.setMailSigInt.value = mailSigInternal;
   els.setMailSigExt.value = mailSigExternal;
+  document.getElementById('set-mail-sig-gmail').checked = mailSigGmail;
+  mailSigPerRender();
+  if (googleConnected && !mailSendAs.length) mailLoadSendAs(); // the addresses, for the fields per address
   els.setMailIntDomains.value = mailInternalDomains;
   els.setMailIntDomains.placeholder = mailInternalList().length && !mailInternalDomains
     ? 'your own domain: ' + mailInternalList()[0]
@@ -7611,6 +7643,14 @@ els.setMailImgSenders.addEventListener('change', () => {
   };
   sigSaver(els.setMailSigInt, (v) => api.saveSettings({ mailSigInternal: (mailSigInternal = v) }));
   sigSaver(els.setMailSigExt, (v) => api.saveSettings({ mailSigExternal: (mailSigExternal = v) }));
+  document.getElementById('set-mail-sig-gmail').addEventListener('change', (e) => {
+    mailSigGmail = e.target.checked;
+    api.saveSettings({ mailSigGmail });
+    if (mailSigGmail && googleConnected && !mailSendAs.length) mailLoadSendAs(); // the signatures come with the addresses
+    mailSigPerRender(); // the info under the box and what each address line says
+    const p = mailSigPerPanel();
+    if (p) mailSigPerOpen(p.dataset.addr);
+  });
   sigSaver(els.setMailIntDomains, (v) => api.saveSettings({ mailInternalDomains: (mailInternalDomains = v) }));
 }
 
@@ -7874,6 +7914,7 @@ els.sshHopsSave.addEventListener('click', () => {
 
 function closeSettings() {
   els.settingsOverlay.classList.add('hidden');
+  mailSigPerClose();
 }
 
 els.setSlackConnect.addEventListener('click', async () => {
@@ -7921,6 +7962,7 @@ els.setSlackNotify.addEventListener('change', () => {
 els.settingsCloseBtn.addEventListener('click', closeSettings);
 els.settingsBtn.addEventListener('click', openSettings);
 els.settingsOverlay.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && mailSigPerClose()) return; // the signature panel first
   if (e.key === 'Escape') closeSettings();
 });
 // Click the backdrop (outside the dialog) to close. Use mousedown so a drag that
@@ -10399,6 +10441,7 @@ function renderSftp(rec, entries) {
             : r.canceled
             ? 'Download canceled.'
             : 'Download failed: ' + r.error;
+          if (!r.canceled) xferEnd(rec.id, 'down', !!r.ok, r.ok ? 'Saved ' + label : 'Download failed: ' + r.error);
         });
         actions.appendChild(dl);
       }
@@ -10443,13 +10486,116 @@ function pathsFromDrop(e) {
 async function uploadDropped(rec, paths) {
   if (!rec || !paths.length) return;
   els.sftpStatus.textContent = `Uploading ${paths.length} file(s)…`;
+  xferStart(rec.id, 'up');
   const r = await api.sftpUploadPaths(rec.id, rec.sftpCwd || '.', paths);
   if (r.ok) {
     els.sftpStatus.textContent = 'Uploaded: ' + r.uploaded.join(', ');
+    xferEnd(rec.id, 'up', true, 'Uploaded ' + r.uploaded.join(', '));
     if (rec === activeSshRec()) loadSftp(rec);
   } else {
     els.sftpStatus.textContent = 'Upload failed: ' + r.error;
+    xferEnd(rec.id, 'up', false, 'Upload failed: ' + r.error);
   }
+}
+
+// ---- transfer progress (SFTP up / down) ----
+// A card in the corner while a file goes over SFTP: which file (and which of how many), a bar,
+// how much, how fast and how long still. ssh2 reports every piece (main: sftp:progress); the
+// card is the whole window's, not the Files panel's, so a file dropped on a terminal with the
+// panel closed shows it too. One row per tab and direction; it goes a moment after the end.
+const xfers = new Map(); // `${tabId}:${dir}` -> { rec, dir, name, index, count, done, total, t0, at, bytesAt, rate }
+function xferKey(tabId, dir) {
+  return tabId + ':' + dir;
+}
+function xferStart(tabId, dir) {
+  xfers.set(xferKey(tabId, dir), { tabId, dir, name: '', index: 0, count: 1, done: 0, total: 0, t0: Date.now(), at: Date.now(), bytesAt: 0, rate: 0, state: 'run' });
+  xferRender();
+}
+function xferEnd(tabId, dir, ok, text) {
+  const x = xfers.get(xferKey(tabId, dir));
+  if (!x) return;
+  x.state = ok ? 'ok' : 'bad';
+  x.text = text;
+  if (ok && x.total) x.done = x.total;
+  xferRender();
+  setTimeout(
+    () => {
+      if (xfers.get(xferKey(tabId, dir)) === x) {
+        xfers.delete(xferKey(tabId, dir));
+        xferRender();
+      }
+    },
+    ok ? 2500 : 8000
+  );
+}
+if (api.onSftpProgress) {
+  api.onSftpProgress((p) => {
+    if (!p || !p.tabId) return;
+    const key = xferKey(p.tabId, p.dir);
+    let x = xfers.get(key);
+    if (!x || x.state !== 'run') {
+      xferStart(p.tabId, p.dir);
+      x = xfers.get(key);
+    }
+    const now = Date.now();
+    if (p.name !== x.name || p.index !== x.index) {
+      // the next file: its own clock and speed
+      Object.assign(x, { name: p.name, index: p.index, count: p.count, done: 0, at: now, bytesAt: 0 });
+    }
+    // speed: a smoothed average, so one slow piece does not make the time left jump about
+    const dt = (now - x.at) / 1000;
+    if (dt >= 0.25 && p.done > x.bytesAt) {
+      const r = (p.done - x.bytesAt) / dt;
+      x.rate = x.rate ? x.rate * 0.6 + r * 0.4 : r;
+      x.at = now;
+      x.bytesAt = p.done;
+    }
+    x.done = p.done;
+    x.total = p.total || x.total;
+    xferRender();
+  });
+}
+function xferEta(sec) {
+  if (!isFinite(sec) || sec < 0) return '';
+  if (sec < 60) return Math.max(1, Math.round(sec)) + ' s left';
+  if (sec < 3600) return Math.round(sec / 60) + ' min left';
+  return (sec / 3600).toFixed(1) + ' h left';
+}
+function xferRender() {
+  let box = document.getElementById('xfer-progress');
+  if (!xfers.size) {
+    if (box) box.remove();
+    return;
+  }
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'xfer-progress';
+    document.body.appendChild(box);
+  }
+  box.innerHTML = [...xfers.values()]
+    .map((x) => {
+      const rec = tabs.get(x.tabId);
+      const where = rec && rec.tabEl ? rec.tabEl.querySelector('.title').textContent : '';
+      const pct = x.total ? Math.min(100, (x.done / x.total) * 100) : 0;
+      const verb = x.dir === 'up' ? 'Uploading' : 'Downloading';
+      const head =
+        x.state === 'run'
+          ? (x.dir === 'up' ? '⬆ ' : '⬇ ') + verb + ' ' + (x.name || '…') + (x.count > 1 ? ' (' + (x.index + 1) + ' of ' + x.count + ')' : '')
+          : (x.state === 'ok' ? '✓ ' : '✗ ') + (x.text || '');
+      const facts =
+        x.state === 'run' && x.total
+          ? Math.floor(pct) + ' % · ' + fmtBytes(x.done) + ' of ' + fmtBytes(x.total) + (x.rate ? ' · ' + fmtBytes(x.rate) + '/s · ' + xferEta((x.total - x.done) / x.rate) : '')
+          : x.state === 'run'
+            ? 'starting…'
+            : '';
+      return (
+        '<div class="xf ' + x.state + '"><div class="xf-head"><span>' + escapeHtml(head) + '</span>' + (where ? '<i>' + escapeHtml(where) + '</i>' : '') + '</div>' +
+        '<div class="xf-bar"><b style="width:' + (x.state === 'ok' ? 100 : pct.toFixed(1)) + '%"></b></div>' +
+        (facts ? '<div class="xf-facts">' + escapeHtml(facts) + '</div>' : '') +
+        '</div>'
+      );
+    })
+    .join('');
 }
 
 // Prevent a stray file drop from navigating the whole window.
@@ -10657,10 +10803,11 @@ async function sendFileToHost(rec) {
   if (!rec || rec.kind !== 'ssh') return;
   const dir = rec.sftpCwd || '.';
   els.sftpStatus.textContent = 'Uploading…';
-  const r = await api.sftpUpload(rec.id, dir);
+  const r = await api.sftpUpload(rec.id, dir); // (the file picker comes first; progress follows the pick)
   if (r && r.ok) {
     const names = r.uploaded.join(', ');
     els.sftpStatus.textContent = 'Uploaded: ' + names;
+    xferEnd(rec.id, 'up', true, 'Uploaded ' + names);
     if (rec.term) {
       writeToTerm(rec, '\r\n\x1b[2m[sent ' + names + ' to ' + (dir === '.' ? 'your home directory' : dir) + ']\x1b[0m\r\n');
     }
@@ -10670,6 +10817,7 @@ async function sendFileToHost(rec) {
   } else {
     const msg = (r && r.error) || 'unknown error';
     els.sftpStatus.textContent = 'Upload failed: ' + msg;
+    xferEnd(rec.id, 'up', false, 'Upload failed: ' + msg);
     if (rec.term) writeToTerm(rec, '\r\n\x1b[31m[upload failed: ' + msg + ']\x1b[0m\r\n');
   }
 }
@@ -15543,7 +15691,206 @@ async function mailLoadSendAs() {
   const r = await api.mailSendAs();
   if (!r || !r.ok || !Array.isArray(r.list)) return;
   mailSendAs = r.list.filter((a) => a && a.email);
-  if (mbox.draft) mailRenderCompose(); // a panel open before the list came gets its From row
+  if (mbox.draft) {
+    mailSigRefresh(true); // and its signature: Gmail's formatted one needs the list
+    mailRenderCompose(); // a panel open before the list came gets its From row
+  }
+  mailSigPerRender();
+}
+// Settings -> Google: a short and a full signature for each address you send as - only shown
+// when there is more than one. Empty = the general ones above. In the dialog it is ONE line
+// per address (which has its own, which uses the general ones); a click opens that address's
+// fields in a panel beside the dialog (`#msp-panel`), so five addresses do not make Settings
+// five signature blocks longer. "Copy from Gmail" takes Gmail's signature (as text).
+// A signature as the recipient sees it: Gmail's HTML, cleaned like any mail and shown in a frame
+// that runs no script; its images come through the same checked fetch as "Load images".
+function mailSigPreview(html) {
+  const ifr = document.createElement('iframe');
+  ifr.className = 'msp-preview';
+  ifr.setAttribute('sandbox', 'allow-same-origin');
+  const clean = mailSanitize(html);
+  ifr.srcdoc =
+    '<!doctype html><html><head><meta charset="utf-8">' +
+    '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data:; style-src \'unsafe-inline\'">' +
+    '<style>html,body{margin:0}body{padding:10px 12px;font:13px/1.45 Arial,Helvetica,sans-serif;color:#202124;background:#fff;overflow-wrap:anywhere}img{max-width:100%;height:auto}a{color:#1a5fb4}</style>' +
+    '</head><body' + clean.bodyAttrs + '>' + clean.html + '</body></html>';
+  const fit = () => {
+    const doc = ifr.contentDocument;
+    if (doc && doc.documentElement) ifr.style.height = Math.min(320, doc.documentElement.scrollHeight + 2) + 'px';
+  };
+  ifr._fit = fit;
+  ifr.addEventListener('load', () => {
+    fit();
+    if (clean.remote) mailLoadImages(ifr, null);
+  });
+  return ifr;
+}
+// Settings: under the checkbox, which addresses Gmail has a signature for, and how it looks.
+function mailSigGmailInfo() {
+  const box = document.getElementById('set-mail-sig-gmail-info');
+  if (!box) return;
+  box.classList.toggle('hidden', !mailSigGmail);
+  if (!mailSigGmail) return (box.innerHTML = '');
+  const withSig = mailSendAs.filter((a) => a.signature && a.signature.trim());
+  let note;
+  if (!googleConnected) note = 'Connect Google to use it.';
+  else if (!mailSendAs.length) note = 'Reading your addresses from Gmail…';
+  else if (!withSig.length) note = 'Gmail has no signature for your addresses yet - set one in Gmail (Settings, General, Signature). Until then the full one above is used.';
+  else
+    note =
+      'Gmail has one for ' + withSig.map((a) => a.email).join(', ') +
+      (withSig.length < mailSendAs.length ? '; the others use the full one above' : '') +
+      '. Compose shows it as text; the mail goes out formatted.';
+  box.innerHTML = '<div class="settings-mailsig-cap">' + escapeHtml(note) + '</div>';
+  // the default address's, else the first that has one (each address's own: click its line below)
+  const show = mailGmailSigFor('') ? mailSendAs.find((x) => x.isDefault) || mailSendAs[0] : withSig[0];
+  if (!show) return;
+  box.insertAdjacentHTML('beforeend', '<div class="settings-mailsig-cap">' + escapeHtml(show.email) + ', as it goes out:</div>');
+  box.appendChild(mailSigPreview(show.signature));
+}
+function mailSigPerState(k) {
+  const per = mailSigByFrom[k];
+  if (!per && mailSigGmail && mailGmailSigFor(k)) return 'Gmail\'s formatted one';
+  if (!per) return 'the general signatures';
+  if (per.int && per.int.trim() && per.ext && per.ext.trim()) return 'its own, short and full';
+  return per.ext && per.ext.trim() ? 'its own full one' : 'its own short one';
+}
+function mailSigPerRender() {
+  mailSigGmailInfo();
+  const box = els.setMailSigPer;
+  if (!box) return;
+  if (mailSendAs.length < 2) {
+    box.innerHTML = '';
+    box.classList.add('hidden');
+    mailSigPerClose();
+    return;
+  }
+  box.classList.remove('hidden');
+  const open = mailSigPerPanel() && mailSigPerPanel().dataset.addr;
+  box.innerHTML =
+    '<div class="settings-mailsig-cap">Per From address - click one to give it its own</div>' +
+    mailSendAs
+      .map((a) => {
+        const k = a.email.toLowerCase();
+        return (
+          '<button type="button" class="msp-row' + (k === open ? ' on' : '') + (mailSigByFrom[k] ? ' own' : '') + '" data-addr="' + escapeHtml(k) + '">' +
+          '<span class="msp-who">' + escapeHtml(a.name ? a.name + ' <' + a.email + '>' : a.email) + '</span>' +
+          '<span class="msp-state">' + escapeHtml(mailSigPerState(k)) + '</span><span class="msp-go">▸</span></button>'
+        );
+      })
+      .join('');
+  if (open && !mailSendAs.some((a) => a.email.toLowerCase() === open)) mailSigPerClose();
+}
+function mailSigPerPanel() {
+  const p = document.getElementById('msp-panel');
+  return p && !p.classList.contains('hidden') ? p : null;
+}
+function mailSigPerOpen(k) {
+  const a = mailSendAs.find((x) => x.email.toLowerCase() === k);
+  if (!a) return;
+  let p = document.getElementById('msp-panel');
+  if (!p) {
+    p = document.createElement('div');
+    p.id = 'msp-panel';
+    els.settingsOverlay.appendChild(p); // inside the overlay: hidden with it, and a click in it is not the backdrop
+    mailSigPerWire(p);
+  }
+  const per = mailSigByFrom[k] || {};
+  p.dataset.addr = k;
+  p.innerHTML =
+    '<div class="msp-phead"><b>' + escapeHtml(a.name ? a.name + ' <' + a.email + '>' : a.email) + '</b>' +
+    '<button type="button" class="msp-x" title="Close (Esc)">✕</button></div>' +
+    '<div class="msp-note">Used when you send as this address. Empty = the general signatures in Settings.</div>' +
+    '<label>Short (colleagues)<textarea data-k="int" rows="3" placeholder="empty = the full one of this address">' + escapeHtml(per.int || '') + '</textarea></label>' +
+    '<label>Full (everyone else)<textarea data-k="ext" rows="7" placeholder="' + (mailSigGmail && mailGmailSigFor(k) ? 'empty = Gmail\'s formatted signature (below)' : 'empty = the general full one') + '">' + escapeHtml(per.ext || '') + '</textarea></label>' +
+    '<div class="msp-foot">' +
+    (a.signature && a.signature.trim() ? '<button type="button" class="msp-gmail" title="Put the signature Gmail has for this address into the full one (as text)">Copy from Gmail</button>' : '') +
+    '<button type="button" class="msp-clear" title="Empty both: this address uses the general signatures">Use the general ones</button>' +
+    '<span class="msp-saved"></span></div>' +
+    (mailSigGmail && mailGmailSigFor(k) ? '<div class="msp-note">Gmail\'s formatted signature for this address - sent while Full above is empty:</div>' : '');
+  if (mailSigGmail && mailGmailSigFor(k)) p.appendChild(mailSigPreview(mailGmailSigFor(k)));
+  p.classList.remove('hidden');
+  mailSigPerPlace();
+  els.setMailSigPer.querySelectorAll('.msp-row').forEach((r) => r.classList.toggle('on', r.dataset.addr === k));
+  p.querySelector('[data-k="' + (per.int && !per.ext ? 'int' : 'ext') + '"]').focus();
+}
+function mailSigPerClose() {
+  const p = mailSigPerPanel();
+  if (!p) return false;
+  p.classList.add('hidden');
+  if (els.setMailSigPer) els.setMailSigPer.querySelectorAll('.msp-row.on').forEach((r) => r.classList.remove('on'));
+  return true;
+}
+// Beside the dialog when there is room on its right, else over the dialog's right side.
+function mailSigPerPlace() {
+  const p = mailSigPerPanel();
+  if (!p) return;
+  const d = document.getElementById('settings-dialog').getBoundingClientRect();
+  const w = Math.min(400, window.innerWidth - 32);
+  const room = window.innerWidth - d.right - 16;
+  p.style.width = w + 'px';
+  p.style.left = (room >= w + 12 ? d.right + 12 : Math.max(16, window.innerWidth - w - 16)) + 'px';
+  p.style.top = Math.max(16, d.top) + 'px';
+  p.style.maxHeight = Math.max(240, window.innerHeight - Math.max(16, d.top) - 16) + 'px';
+}
+function mailSigPerSave(addrEl) {
+  const k = addrEl.dataset.addr;
+  const int = addrEl.querySelector('[data-k="int"]').value;
+  const ext = addrEl.querySelector('[data-k="ext"]').value;
+  const next = { ...mailSigByFrom };
+  if (int.trim() || ext.trim()) next[k] = { int, ext };
+  else delete next[k];
+  mailSigByFrom = mailCleanSigByFrom(next);
+  api.saveSettings({ mailSigByFrom });
+  // the line in the dialog says what this address uses now (patched, never rebuilt)
+  const row = els.setMailSigPer && [...els.setMailSigPer.querySelectorAll('.msp-row')].find((r) => r.dataset.addr === k);
+  if (row) {
+    row.classList.toggle('own', !!mailSigByFrom[k]);
+    row.querySelector('.msp-state').textContent = mailSigPerState(k);
+  }
+  const s = addrEl.querySelector('.msp-saved');
+  if (s) s.textContent = 'Saved';
+}
+function mailSigPerWire(p) {
+  let t = null;
+  p.addEventListener('input', () => {
+    clearTimeout(t);
+    p.querySelector('.msp-saved').textContent = '';
+    t = setTimeout(() => mailSigPerSave(p), 400);
+  });
+  p.addEventListener('change', () => {
+    clearTimeout(t);
+    mailSigPerSave(p);
+  });
+  p.addEventListener('click', (e) => {
+    if (e.target.closest('.msp-x')) {
+      mailSigPerClose();
+      return;
+    }
+    if (e.target.closest('.msp-clear')) {
+      p.querySelectorAll('textarea').forEach((x) => (x.value = ''));
+      clearTimeout(t);
+      mailSigPerSave(p);
+      return;
+    }
+    if (!e.target.closest('.msp-gmail')) return;
+    const s = mailSendAs.find((x) => x.email.toLowerCase() === p.dataset.addr);
+    if (!s || !s.signature) return;
+    const ta = p.querySelector('[data-k="ext"]');
+    if (ta.value.trim() && !window.confirm('Replace what is in the full signature of ' + s.email + '?')) return;
+    ta.value = mailHtmlToText(s.signature);
+    clearTimeout(t);
+    mailSigPerSave(p);
+  });
+}
+if (els.setMailSigPer) {
+  els.setMailSigPer.addEventListener('click', (e) => {
+    const r = e.target.closest('.msp-row');
+    if (!r) return;
+    if (r.classList.contains('on')) mailSigPerClose();
+    else mailSigPerOpen(r.dataset.addr);
+  });
+  window.addEventListener('resize', mailSigPerPlace);
 }
 // Every address that is mine: the account's and all it sends as (lower case).
 function mailMyAddrs() {
@@ -15770,9 +16117,9 @@ function mailCompose(init) {
   }
   if (!d.noSig) {
     const kind = mailSigKind(d);
-    const block = mailSigBlock(kind);
+    const { block, html } = mailSigPick(kind, d.from);
     if (block) d.body = mailInsertSig(d.body, block);
-    d.sig = { kind, block };
+    d.sig = { kind, from: d.from || '', block, html };
   }
   d.initial = mailDraftSnap(d);
   mailRenderCompose();
@@ -15824,19 +16171,22 @@ function mailRenderCompose() {
     `<span class="mc-undo" title="Undo send - change it in Settings → Google. Ctrl+Enter sends at once, without the wait.">${
       mailUndoSec ? '↶ ' + mailUndoSec + ' s to undo · Ctrl+Enter: at once' : ''
     }</span>` +
+    '<span class="mc-sigfmt hidden" title="Your signature goes out formatted - the one Gmail keeps for this address, with its links and images. Here you see its text; change that text and your text is sent instead.">✒ formatted signature</span>' +
     '<span class="mc-status"></span></div>' +
     '<div class="mc-suggest hidden"></div>';
   box.querySelectorAll('[data-f]').forEach((inp) => {
     inp.value = d[inp.dataset.f] || '';
     inp.addEventListener('input', () => {
       d[inp.dataset.f] = inp.value;
-      if (/^(to|cc|bcc)$/.test(inp.dataset.f)) mailSigRefresh(); // colleague or not decides the signature
+      if (/^(to|cc|bcc|from)$/.test(inp.dataset.f)) mailSigRefresh(); // colleague or not, and the From address, decide the signature
       else if (inp.dataset.f === 'body') {
         if (d.draftId) mailDraftNote();
         mailPlaceholderSync(d);
+        mailSigFmtSync(d);
       }
     });
   });
+  mailSigFmtSync(d);
   box.onclick = (e) => {
     const b = e.target.closest('[data-act]');
     if (!b) return;
@@ -16563,7 +16913,8 @@ function mailSendPayload(d, atts) {
     references: d.references,
     attachments: atts.map((a) => ({ name: a.name, mimeType: a.mimeType, b64: a.b64 })),
     ...(d.draftId ? { draftId: d.draftId } : {}),
-    ...(d.html && d.body === d.bodyOrig ? { html: d.html } : {}),
+    // an untouched Gmail draft keeps its own html; else the formatted signature makes one
+    ...(d.html && d.body === d.bodyOrig ? { html: d.html } : mailComposeHtml(d) ? { html: mailComposeHtml(d) } : {}),
   };
 }
 // `now`: true = at once (Ctrl+Enter), false = with the undo wait (the Send button). Left out =
@@ -17355,6 +17706,22 @@ function mailWireBodySel(body) {
 let mailSigInternal = '';
 let mailSigExternal = '';
 let mailInternalDomains = '';
+// A signature of its own for an address you send AS (the From row): { 'me@work.example':
+// { int, ext } }. An empty field falls back: the full one of that address before the general
+// ones - a colleague mailed from your other company should not get this company's name.
+let mailSigByFrom = {};
+function mailCleanSigByFrom(v) {
+  const out = {};
+  if (!v || typeof v !== 'object') return out;
+  for (const [k, x] of Object.entries(v)) {
+    const email = String(k).trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+$/.test(email) || !x || typeof x !== 'object') continue;
+    const int = typeof x.int === 'string' ? x.int.slice(0, 4000) : '';
+    const ext = typeof x.ext === 'string' ? x.ext.slice(0, 4000) : '';
+    if (int.trim() || ext.trim()) out[email] = { int, ext };
+  }
+  return out;
+}
 const MAIL_PUBLIC_DOMAINS =
   /^(gmail\.com|googlemail\.com|outlook\.[a-z.]+|hotmail\.[a-z.]+|live\.[a-z.]+|msn\.com|yahoo\.[a-z.]+|ymail\.com|icloud\.com|me\.com|mac\.com|aol\.com|gmx\.[a-z.]+|web\.de|t-online\.de|freenet\.de|posteo\.[a-z]+|mailbox\.org|proton\.me|protonmail\.com|pm\.me|mail\.ru|yandex\.[a-z.]+|zoho\.com|fastmail\.com)$/i;
 const MAIL_SIG_SEP = '-- '; // RFC 3676: dash dash space, on its own line
@@ -17382,11 +17749,83 @@ function mailSigKind(d) {
   if (!all.length || !list.length) return 'external';
   return all.every((x) => mailIsInternal(x, list)) ? 'internal' : 'external';
 }
-// No short one written: colleagues get the full one rather than nothing.
-function mailSigBlock(kind) {
-  const pick = kind === 'internal' ? mailSigInternal || mailSigExternal : mailSigExternal;
-  const t = String(pick || '').replace(/\r\n/g, '\n').replace(/\s+$/, '');
-  return t.trim() ? MAIL_SIG_SEP + '\n' + t : '';
+// Formatted signatures: with `mailSigGmail` on, the FULL signature is the one Gmail keeps for the
+// address the mail goes out as (users.settings.sendAs, HTML - links, images, colours), read
+// live, so a change made in Gmail follows. Compose is plain text, so it shows that signature
+// as TEXT; while that block is untouched the mail also gets an html part with the real one
+// (`mailComposeHtml`). Edit the block and it is your text that goes - same rule as the swap.
+let mailSigGmail = false;
+function mailGmailSigFor(from) {
+  const k = String(mailAddr(from || '') || '').toLowerCase();
+  const a = k ? mailSendAs.find((x) => String(x.email).toLowerCase() === k) : mailSendAs.find((x) => x.isDefault) || mailSendAs[0];
+  return a && typeof a.signature === 'string' && a.signature.trim() ? a.signature : '';
+}
+// -> { block, html }: the text block for the body ("-- \n..."), and the html it stands for
+// (only for Gmail's formatted one). No short one written: colleagues get the full one rather
+// than nothing. `from`: the address the mail goes out as; one with a signature of its own uses
+// that, and an empty field of it falls back to the general ones (Gmail's, when that is on).
+function mailSigPick(kind, from) {
+  const per = from ? mailSigByFrom[String(mailAddr(from)).toLowerCase()] : null;
+  const has = (s) => !!String(s || '').trim();
+  const g = mailSigGmail ? mailGmailSigFor(from) : '';
+  const full = g ? { text: mailHtmlToText(g) || '(signature)', html: g } : { text: mailSigExternal, html: '' };
+  let pick;
+  if (per && has(per.int) && kind === 'internal') pick = { text: per.int, html: '' };
+  else if (per && has(per.ext)) pick = { text: per.ext, html: '' };
+  else if (kind === 'internal' && has(mailSigInternal)) pick = { text: mailSigInternal, html: '' };
+  else pick = full;
+  const t = String(pick.text || '').replace(/\r\n/g, '\n').replace(/\s+$/, '');
+  return t.trim() ? { block: MAIL_SIG_SEP + '\n' + t, html: pick.html } : { block: '', html: '' };
+}
+function mailSigBlock(kind, from) {
+  return mailSigPick(kind, from).block;
+}
+// Still exactly ours: the block is there and ends where it ended (the end of the text, or the
+// gap before the quote). Contained is not enough - "Work GmbH (mobile)" contains "Work GmbH".
+function mailSigIntact(body, block) {
+  const at = String(body).indexOf(block);
+  if (!block || at === -1) return false;
+  const after = String(body).slice(at + block.length);
+  return after === '' || after.startsWith('\n\n') || /^\s*$/.test(after);
+}
+// Plain text -> html for the mail: links, and "> " lines as quote blocks (nested by depth).
+function mailTextToHtml(text) {
+  let out = '';
+  let depth = 0;
+  for (const l of String(text || '').replace(/\r\n/g, '\n').split('\n')) {
+    const m = /^((?:> ?)+)/.exec(l);
+    const d = m ? (m[1].match(/>/g) || []).length : 0;
+    while (depth < d) {
+      out += '<blockquote class="gmail_quote" style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">';
+      depth++;
+    }
+    while (depth > d) {
+      out += '</blockquote>';
+      depth--;
+    }
+    out += mailLinkify(escapeHtml(m ? l.slice(m[1].length) : l)) + '<br>';
+  }
+  while (depth-- > 0) out += '</blockquote>';
+  return out;
+}
+// The html part of a mail whose formatted signature is still as we put it, else ''.
+function mailComposeHtml(d) {
+  const s = d && d.sig;
+  if (!s || !s.html || s.edited || !s.block || !mailSigIntact(d.body, s.block)) return '';
+  const body = String(d.body || '');
+  const at = body.indexOf(s.block);
+  const before = body.slice(0, at).replace(/\s+$/, '');
+  const after = body.slice(at + s.block.length).replace(/^\s+/, '');
+  return (
+    '<div dir="ltr">' + (before ? mailTextToHtml(before) + '<br>' : '') +
+    '<span class="gmail_signature_prefix">-- </span><br><div dir="ltr" class="gmail_signature">' + s.html + '</div></div>' +
+    (after ? '<br>' + mailTextToHtml(after) : '')
+  );
+}
+// The compose foot says when the signature goes out formatted.
+function mailSigFmtSync(d) {
+  const el = mailEl('.mc-sigfmt');
+  if (el) el.classList.toggle('hidden', !(d && d === mbox.draft && mailComposeHtml(d)));
 }
 function mailInsertSig(body, block) {
   const b = String(body || '');
@@ -17396,16 +17835,19 @@ function mailInsertSig(body, block) {
   return b.slice(0, i).replace(/\n+$/, '') + '\n\n' + block + '\n\n' + b.slice(i);
 }
 // Recipients changed: swap the signature if it is still the one we put there.
-function mailSigRefresh() {
+function mailSigRefresh(force) {
   const d = mbox.draft;
   if (!d || !d.sig) return;
   const kind = mailSigKind(d);
-  if (kind === d.sig.kind) return;
-  const next = mailSigBlock(kind);
+  const from = d.from || '';
+  if (!force && kind === d.sig.kind && from === (d.sig.from || '')) return;
+  const pick = mailSigPick(kind, from);
+  const next = pick.block;
   let body = d.body;
   if (d.sig.block) {
-    if (!body.includes(d.sig.block)) {
-      d.sig = { kind, block: d.sig.block, edited: true }; // yours now: never touched again
+    if (!mailSigIntact(body, d.sig.block)) {
+      d.sig = { kind, from, block: d.sig.block, edited: true }; // yours now: never touched again
+      mailSigFmtSync(d);
       return;
     }
     if (d.sig.edited) return;
@@ -17414,8 +17856,8 @@ function mailSigRefresh() {
     if (/(^|\n)-- \n/.test(body)) return; // you wrote a signature of your own
     body = mailInsertSig(body, next);
   }
-  d.sig = { kind, block: next };
-  if (body === d.body) return;
+  d.sig = { kind, from, block: next, html: pick.html };
+  if (body === d.body) return mailSigFmtSync(d);
   const ta = mailEl('.mc-body');
   const pos = ta ? ta.selectionStart : 0; // this runs while you type in To/Cc; the body caret stays put
   d.body = body;
@@ -17423,6 +17865,7 @@ function mailSigRefresh() {
     ta.value = body;
     ta.setSelectionRange(Math.min(pos, body.length), Math.min(pos, body.length));
   }
+  mailSigFmtSync(d); // after the body has the new block
 }
 
 // ---- invitations in the reader ----
@@ -19016,7 +19459,14 @@ function hideCalendarPreview() {
   calPreviewTimer = setTimeout(() => els.calendarPreview.classList.add('hidden'), 200);
 }
 
-els.calendar.addEventListener('click', acknowledgeAlert);
+// A click on the next-meeting chip opens the Calendar tab - except while the chip flashes for
+// a meeting about to start: then the click is "I have seen it", as it always was.
+els.calendar.addEventListener('click', (e) => {
+  if (e.target.closest('.cal-join')) return; // Join has its own handler
+  if (currentAlertId) return acknowledgeAlert();
+  hideCalendarPreview();
+  createCalendarTab();
+});
 els.calendar.addEventListener('mouseenter', showCalendarPreview);
 els.calendar.addEventListener('mouseleave', hideCalendarPreview);
 els.calendarPreview.addEventListener('mouseenter', () => clearTimeout(calPreviewTimer));
@@ -19049,6 +19499,11 @@ els.setGoogleConnect.addEventListener('click', async () => {
     mailLoadLabels();
     mailLoadSendAs();
   }
+  // an open Calendar tab: a reconnect may have brought the permission to change it
+  if (calSt.rec) {
+    calLoadMeta();
+    calLoad(true);
+  }
 });
 
 els.setGoogleForget.addEventListener('click', async () => {
@@ -19064,6 +19519,10 @@ els.setGoogleForget.addEventListener('click', async () => {
     mailCloseReader();
     mailLoad();
   }
+  // the calendar of the account that is gone goes with it
+  calSt.cache.clear();
+  calSt.meta = null;
+  if (calSt.rec) calLoad(false);
 });
 
 els.gmailRefresh.addEventListener('click', async () => {
@@ -19407,7 +19866,7 @@ function buildMeadow(group, opts) {
 function exposeKind(rec) {
   const colors = { ssh: '#4ea1ff', local: '#7ee787', slack: '#c285e0', web: '#3bbf9f', notes: '#f0c674', mail: '#ea8a5c' };
   const glyphs = { ssh: '>_', local: '🖥', slack: '#', web: '🌐', notes: '📝', mail: '📧' };
-  const game = gameTabs[rec.kind];
+  const game = tabKinds[rec.kind];
   if (game) return { color: game.color, glyph: game.glyph };
   return { color: colors[rec.kind] || '#8a8f94', glyph: glyphs[rec.kind] || '?' };
 }
@@ -21901,7 +22360,7 @@ setInterval(() => {
   if (settings && typeof settings.mailUnreadBar === 'boolean') mailUnreadBar = settings.mailUnreadBar;
   if (settings && typeof settings.mailFoldQuotes === 'boolean') mailFoldQuotes = settings.mailFoldQuotes;
   // every game gets its saved state before the tabs come back (games.js)
-  for (const k of Object.keys(gameTabs)) if (settings && settings[k]) gameTabs[k].restore(settings[k]);
+  for (const k of Object.keys(tabKinds)) if (settings && settings[k]) tabKinds[k].restore(settings[k]);
   if (settings && typeof settings.mailBgOverLook === 'boolean') mailBgOverLook = settings.mailBgOverLook;
   if (settings && typeof settings.mailBg === 'string' && (settings.mailBg === '' || /^#[0-9a-f]{6}$/i.test(settings.mailBg))) mailBg = settings.mailBg.toLowerCase();
   if (settings && typeof settings.aiTranslateTo === 'string' && /^[\p{L} ()-]{2,40}$/u.test(settings.aiTranslateTo)) aiTranslateTo = settings.aiTranslateTo;
@@ -21919,6 +22378,8 @@ setInterval(() => {
   if (settings && Array.isArray(settings.mailImgSenders)) mailImgSenders = mailCleanImgSenders(settings.mailImgSenders);
   if (settings && typeof settings.mailSigInternal === 'string') mailSigInternal = settings.mailSigInternal.slice(0, 4000);
   if (settings && typeof settings.mailSigExternal === 'string') mailSigExternal = settings.mailSigExternal.slice(0, 4000);
+  if (settings && settings.mailSigByFrom) mailSigByFrom = mailCleanSigByFrom(settings.mailSigByFrom);
+  if (settings && typeof settings.mailSigGmail === 'boolean') mailSigGmail = settings.mailSigGmail;
   if (settings && typeof settings.mailInternalDomains === 'string') mailInternalDomains = settings.mailInternalDomains.slice(0, 1000);
   if (settings && Array.isArray(settings.mailSentMemory)) {
     mailSentMemory = settings.mailSentMemory
@@ -22037,6 +22498,7 @@ setInterval(() => {
   if (settings && Array.isArray(settings.quickCommands)) quickCommands = settings.quickCommands;
   presetSetText(settings && typeof settings.termPresets === 'string' ? settings.termPresets : '', false);
   if (settings && typeof settings.presetAutoRun === 'boolean') presetAutoRun = settings.presetAutoRun;
+  if (settings && settings.presetLastVars && typeof settings.presetLastVars === 'object') presetLastVars = settings.presetLastVars;
   presetWireMenu();
   if (settings && Number.isFinite(settings.remoteDebugPort)) remoteDebugPort = settings.remoteDebugPort;
   if (settings && typeof settings.terminalCwd === 'string') terminalCwd = settings.terminalCwd;
@@ -22110,14 +22572,15 @@ setInterval(() => {
       else if (t.kind === 'notes') created = !!createNotesTab();
       else if (t.kind === 'deck') created = !!createDeckTab();
       else if (t.kind === 'mail') created = !!createMailTab();
-      else if (gameTabs[t.kind]) created = !!gameTabs[t.kind].create();
+      else if (tabKinds[t.kind]) created = !!tabKinds[t.kind].create();
       else if (t.kind === 'slack' && slackReady && t.channel) created = !!createSlackTab(t.channel);
       // Each create activates the new tab — reapply a manual rename to it.
       if (created && t.title && activeTabId) applyRestoredTitle(activeTabId, t.title);
       // a terminal that belongs to a preset - it was started with one, or its title matches one:
       // the preset runs by itself, or (setting off) waits behind a Run button
-      if (created && (t.kind === 'local' || t.kind === 'ssh') && activeTabId) presetAtLaunch(activeTabId, t.preset);
+      if (created && (t.kind === 'local' || t.kind === 'ssh') && activeTabId) presetAtLaunch(activeTabId, t.preset, t.presetVars);
     }
+    presetLaunchArm(); // one note once the preset tabs are through (presets.js)
   } else {
     // Legacy restore (settings saved before tab order was tracked).
     const savedSsh = (settings && settings.openSshTabs) || [];

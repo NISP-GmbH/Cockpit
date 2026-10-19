@@ -41,6 +41,12 @@ contextBridge.exposeInMainWorld('sshApi', {
     ipcRenderer.invoke('sftp:download', { tabId, remotePath, name }),
   sftpUpload: (tabId, dir) => ipcRenderer.invoke('sftp:upload', { tabId, dir }),
   sftpUploadPaths: (tabId, dir, paths) => ipcRenderer.invoke('sftp:uploadPaths', { tabId, dir, paths }),
+  // { tabId, dir: up|down, name, index, count, done, total } while a transfer runs
+  onSftpProgress: (cb) => {
+    const handler = (_e, p) => cb(p);
+    ipcRenderer.on('sftp:progress', handler);
+    return () => ipcRenderer.removeListener('sftp:progress', handler);
+  },
   sftpDelete: (tabId, path, isDir) => ipcRenderer.invoke('sftp:delete', { tabId, path, isDir }),
   saveBase64: (name, b64) => ipcRenderer.invoke('file:saveBase64', { name, b64 }),
   pickBase64: (maxBytes) => ipcRenderer.invoke('file:pickBase64', { maxBytes }),
@@ -198,6 +204,14 @@ contextBridge.exposeInMainWorld('sshApi', {
   mailResolveUrl: (url) => ipcRenderer.invoke('mail:resolveUrl', { url }),
   mailInviteInfo: (o) => ipcRenderer.invoke('mail:inviteInfo', o),
   mailInviteRespond: (o) => ipcRenderer.invoke('mail:inviteRespond', o),
+  // the Calendar tab
+  calMeta: () => ipcRenderer.invoke('cal:meta'),
+  calEvents: (o) => ipcRenderer.invoke('cal:events', o), // { timeMin, timeMax }
+  calCreate: (o) => ipcRenderer.invoke('cal:create', o),
+  calUpdate: (o) => ipcRenderer.invoke('cal:update', o), // { eventId, patch, sendUpdates }
+  calDelete: (o) => ipcRenderer.invoke('cal:delete', o),
+  calUndelete: (o) => ipcRenderer.invoke('cal:undelete', o),
+  calRespond: (o) => ipcRenderer.invoke('cal:respond', o), // { eventId, response }
   mailInviteImport: (o) => ipcRenderer.invoke('mail:inviteImport', o), // an outside invitation into your calendar
   mailInviteRemove: (o) => ipcRenderer.invoke('mail:inviteRemove', o), // a cancelled one out of it
   // agent replies: config is write-only from here (getConfig says what is SET, never the key)

@@ -1405,4 +1405,4 @@ function chessMarks() {
 }
 
 document.getElementById('chess-btn')?.addEventListener('click', () => createChessTab());
-gameTabs.chess = { title: 'Chess', glyph: '♟', color: '#c9a66b', create: createChessTab, onShow: chessOnShow, onClose: chessOnClose, restore: chessRestoreSettings };
+tabKinds.chess = { title: 'Chess', glyph: '♟', color: '#c9a66b', create: createChessTab, onShow: chessOnShow, onClose: chessOnClose, restore: chessRestoreSettings };

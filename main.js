@@ -685,11 +685,29 @@ app.whenReady().then(() => {
       return { ok: false, error: err.message || String(err) };
     }
   });
+  // How far a transfer is: at most ~8 messages a second, and always the last one (done = total).
+  const sftpProgress = (tabId, dir, name, index, count, total) => {
+    let last = 0;
+    send('sftp:progress', { tabId, dir, name, index, count, done: 0, total: total || 0 });
+    return (done, _chunk, size) => {
+      const now = Date.now();
+      if (now - last < 120 && done < size) return;
+      last = now;
+      send('sftp:progress', { tabId, dir, name, index, count, done, total: size });
+    };
+  };
+  const fileSize = (p) => {
+    try {
+      return fs.statSync(p).size;
+    } catch (_) {
+      return 0;
+    }
+  };
   ipcMain.handle('sftp:download', async (_e, { tabId, remotePath, name }) => {
     try {
       const res = await dialog.showSaveDialog(mainWindow, { defaultPath: name });
       if (res.canceled || !res.filePath) return { ok: false, canceled: true };
-      await ssh.sftpDownload(tabId, remotePath, res.filePath);
+      await ssh.sftpDownload(tabId, remotePath, res.filePath, sftpProgress(tabId, 'down', name || path.basename(remotePath), 0, 1, 0));
       return { ok: true, savedTo: res.filePath };
     } catch (err) {
       return { ok: false, error: err.message || String(err) };
@@ -837,10 +855,10 @@ app.whenReady().then(() => {
       });
       if (res.canceled || !res.filePaths.length) return { ok: false, canceled: true };
       const uploaded = [];
-      for (const local of res.filePaths) {
+      for (const [i, local] of res.filePaths.entries()) {
         const base = path.basename(local);
         const remote = (dir.endsWith('/') ? dir : dir + '/') + base;
-        await ssh.sftpUpload(tabId, local, remote);
+        await ssh.sftpUpload(tabId, local, remote, sftpProgress(tabId, 'up', base, i, res.filePaths.length, fileSize(local)));
         uploaded.push(base);
       }
       return { ok: true, uploaded };
@@ -851,10 +869,11 @@ app.whenReady().then(() => {
   ipcMain.handle('sftp:uploadPaths', async (_e, { tabId, dir, paths }) => {
     try {
       const uploaded = [];
-      for (const local of paths || []) {
+      const list = paths || [];
+      for (const [i, local] of list.entries()) {
         const base = path.basename(local);
         const remote = (dir.endsWith('/') ? dir : dir + '/') + base;
-        await ssh.sftpUpload(tabId, local, remote);
+        await ssh.sftpUpload(tabId, local, remote, sftpProgress(tabId, 'up', base, i, list.length, fileSize(local)));
         uploaded.push(base);
       }
       return { ok: true, uploaded };
@@ -1274,6 +1293,14 @@ app.whenReady().then(() => {
   ipcMain.handle('mail:inviteRespond', mailCall((o) => googleMgr.inviteRespond(o)));
   ipcMain.handle('mail:inviteImport', mailCall((o) => googleMgr.inviteImport(o)));
   ipcMain.handle('mail:inviteRemove', mailCall((o) => googleMgr.inviteRemove(o)));
+  // The Calendar tab (renderer/calendar.js): the primary calendar, a week at a time.
+  ipcMain.handle('cal:meta', mailCall(() => googleMgr.calendarMeta()));
+  ipcMain.handle('cal:events', mailCall((o) => googleMgr.calendarEvents(o)));
+  ipcMain.handle('cal:create', mailCall((o) => googleMgr.calendarCreate(o)));
+  ipcMain.handle('cal:update', mailCall((o) => googleMgr.calendarUpdate(o)));
+  ipcMain.handle('cal:delete', mailCall((o) => googleMgr.calendarDelete(o)));
+  ipcMain.handle('cal:undelete', mailCall((o) => googleMgr.calendarUndelete(o)));
+  ipcMain.handle('cal:respond', mailCall((o) => googleMgr.inviteRespond(o)));
   // Where a tracking link really goes - followed hop by hop, public hosts only, never opened.
   ipcMain.handle('mail:resolveUrl', async (_e, { url }) => {
     try {

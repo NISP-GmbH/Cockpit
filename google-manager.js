@@ -56,6 +56,105 @@ function conferenceLink(e) {
   return urls.find((u) => known.test(u)) || urls[0];
 }
 
+// ---- the Calendar tab ----
+// One Google event, the way the tab needs it. canEdit: you organize it, or the organizer lets
+// guests change it - and it is an ordinary event (a birthday or one Gmail made cannot be).
+function mapCalEvent(e) {
+  const org = e.organizer || {};
+  const atts = (e.attendees || []).map((x) => ({
+    email: x.email || '',
+    name: x.displayName || '',
+    responseStatus: x.responseStatus || 'needsAction',
+    self: !!x.self,
+    organizer: !!x.organizer,
+    optional: !!x.optional,
+    resource: !!x.resource,
+  }));
+  const me = atts.find((x) => x.self);
+  const type = e.eventType || 'default';
+  const ordinary = !['fromGmail', 'birthday'].includes(type);
+  return {
+    id: e.id,
+    summary: e.summary || '(no title)',
+    start: (e.start && (e.start.dateTime || e.start.date)) || null,
+    end: (e.end && (e.end.dateTime || e.end.date)) || null,
+    allDay: !(e.start && e.start.dateTime),
+    location: e.location || '',
+    description: String(e.description || '').slice(0, 20000),
+    htmlLink: e.htmlLink || '',
+    meetLink: conferenceLink(e),
+    status: e.status || 'confirmed',
+    transparency: e.transparency || 'opaque',
+    colorId: e.colorId || '',
+    recurringEventId: e.recurringEventId || '',
+    eventType: type,
+    organizer: { email: org.email || '', name: org.displayName || '', self: !!org.self },
+    attendees: atts.filter((x) => !x.resource),
+    myStatus: me ? me.responseStatus : '',
+    guestsCanModify: !!e.guestsCanModify,
+    canEdit: ordinary && (!!org.self || !!e.guestsCanModify),
+  };
+}
+function calCheckId(id) {
+  if (!id || !/^[\w-]{1,1024}$/.test(String(id))) throw new Error('no such event');
+}
+const CAL_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const CAL_ZONE = /^[A-Za-z_]+(?:\/[A-Za-z0-9_+-]+){0,3}$/;
+// start/end for the API. In a patch the other kind is cleared explicitly (null), or an event
+// that changes from timed to all-day would carry both and be refused.
+function calTimes(o, patch) {
+  if (o.allDay) {
+    if (!CAL_DATE.test(String(o.start)) || !CAL_DATE.test(String(o.end)) || String(o.end) <= String(o.start)) {
+      throw new Error('an all-day event needs its first day and the day after its last');
+    }
+    return { start: { date: o.start, ...(patch ? { dateTime: null } : {}) }, end: { date: o.end, ...(patch ? { dateTime: null } : {}) } };
+  }
+  const a = Date.parse(o.start);
+  const b = Date.parse(o.end);
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) throw new Error('the end must be after the start');
+  const tz = o.timeZone && CAL_ZONE.test(String(o.timeZone)) ? { timeZone: String(o.timeZone) } : {};
+  const side = (t) => ({ dateTime: new Date(t).toISOString(), ...tz, ...(patch ? { date: null } : {}) });
+  return { start: side(a), end: side(b) };
+}
+// Guests: addresses (or {email}), checked, without doubles.
+function calGuests(list) {
+  const out = [];
+  const seen = new Set();
+  for (const x of Array.isArray(list) ? list : []) {
+    const email = String((x && x.email) || x || '').trim();
+    if (!/^[^\s@<>(),;:"]+@[^\s@<>(),;:"]+\.[^\s@<>(),;:"]+$/.test(email) || seen.has(email.toLowerCase())) continue;
+    seen.add(email.toLowerCase());
+    out.push({ email });
+    if (out.length >= 100) break;
+  }
+  return out;
+}
+// The fields that were given, as an API body. `create`: a new event (a title and times are a must).
+function calEventBody(o, create) {
+  const b = {};
+  if (create || o.summary !== undefined) b.summary = String(o.summary || '').trim().slice(0, 1024) || '(no title)';
+  if (o.location !== undefined) b.location = String(o.location || '').slice(0, 1024);
+  if (o.description !== undefined) b.description = String(o.description || '').slice(0, 8000);
+  if (create || o.start !== undefined || o.end !== undefined) Object.assign(b, calTimes(o, !create));
+  if (o.attendees !== undefined) b.attendees = calGuests(o.attendees);
+  // An event colour is one of Google's eleven ids; '' = back to the calendar's colour (null
+  // clears it in a patch). Personal: a guest may recolour an invitation in their own calendar.
+  if (o.colorId !== undefined) {
+    const c = String(o.colorId == null ? '' : o.colorId);
+    if (c && !/^(?:[1-9]|1[01])$/.test(c)) throw new Error('not an event colour: ' + c);
+    b.colorId = c || (create ? undefined : null);
+    if (b.colorId === undefined) delete b.colorId;
+  }
+  return b;
+}
+// A Google Meet link, made by Google when the event is saved.
+function calAddMeet(params) {
+  params.requestBody.conferenceData = {
+    createRequest: { requestId: 'cockpit-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8), conferenceSolutionKey: { type: 'hangoutsMeet' } },
+  };
+  params.conferenceDataVersion = 1;
+}
+
 // Collect every part that has downloadable content (attachments + inline images).
 function collectAttachments(payload) {
   const out = [];
@@ -892,6 +991,7 @@ class GoogleManager {
         isDefault: !!a.isDefault,
         isPrimary: !!a.isPrimary,
         replyTo: String(a.replyToAddress || '').trim(),
+        signature: String(a.signature || '').slice(0, 10000), // Gmail's own, HTML: Settings can copy it over
       }));
   }
 
@@ -1268,6 +1368,100 @@ class GoogleManager {
     return { done: true };
   }
 
+  // ---- the Calendar tab: a week of the PRIMARY calendar, and changing it ----
+  // Times go both ways as ISO strings; an all-day event as dates, its end the day AFTER the
+  // last (Google keeps them that way). Every call checks what the page sends: it is a page.
+  async calendarMeta() {
+    const cal = this._cal();
+    const [list, colors, canEdit] = await Promise.all([
+      cal.calendarList
+        .get({ calendarId: 'primary' })
+        .then((r) => r.data)
+        .catch(() => ({})),
+      cal.colors
+        .get()
+        .then((r) => r.data)
+        .catch(() => ({})),
+      this.canRespond(),
+    ]);
+    const palette = {};
+    for (const [k, v] of Object.entries((colors && colors.event) || {})) palette[k] = { background: v.background, foreground: v.foreground };
+    return { timeZone: list.timeZone || '', color: list.backgroundColor || '', accessRole: list.accessRole || '', palette, canEdit: !!canEdit };
+  }
+  async calendarEvents({ timeMin, timeMax } = {}) {
+    const a = Date.parse(timeMin);
+    const b = Date.parse(timeMax);
+    if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a || b - a > 62 * 86400000) throw new Error('a time range of up to two months is needed');
+    const cal = this._cal();
+    const events = [];
+    let pageToken;
+    for (let page = 0; page < 8; page++) {
+      const res = await cal.events.list({
+        calendarId: 'primary',
+        timeMin: new Date(a).toISOString(),
+        timeMax: new Date(b).toISOString(),
+        singleEvents: true, // a recurring event comes as its occurrences, each with its own id
+        orderBy: 'startTime',
+        maxResults: 250,
+        pageToken,
+      });
+      for (const e of res.data.items || []) if (e.status !== 'cancelled') events.push(mapCalEvent(e));
+      pageToken = res.data.nextPageToken;
+      if (!pageToken) break;
+    }
+    return { events, truncated: !!pageToken };
+  }
+  async calendarCreate(o = {}) {
+    const body = calEventBody(o, true);
+    const guests = (body.attendees || []).length > 0;
+    const params = { calendarId: 'primary', requestBody: body, sendUpdates: guests && o.sendUpdates !== 'none' ? 'all' : 'none' };
+    if (o.meet) calAddMeet(params);
+    const res = await this._cal().events.insert(params);
+    return { event: mapCalEvent(res.data) };
+  }
+  async calendarUpdate({ eventId, patch, sendUpdates } = {}) {
+    calCheckId(eventId);
+    const p = patch || {};
+    const body = calEventBody(p, false);
+    const cal = this._cal();
+    if (body.attendees) {
+      // The page sends addresses; the guests already there keep their answers (a patch
+      // REPLACES the list), and so do you and any room.
+      const cur = (await cal.events.get({ calendarId: 'primary', eventId: String(eventId) })).data;
+      const old = new Map((cur.attendees || []).map((x) => [String(x.email || '').toLowerCase(), x]));
+      body.attendees = body.attendees.map((x) => old.get(x.email.toLowerCase()) || x);
+      for (const x of cur.attendees || []) {
+        if ((x.self || x.resource) && !body.attendees.some((y) => String(y.email).toLowerCase() === String(x.email).toLowerCase())) body.attendees.push(x);
+      }
+    }
+    const params = { calendarId: 'primary', eventId: String(eventId), requestBody: body, sendUpdates: sendUpdates === 'all' ? 'all' : 'none' };
+    if (p.meet) calAddMeet(params);
+    if (!Object.keys(body).length && !p.meet) throw new Error('nothing to change');
+    const res = await cal.events.patch(params);
+    return { event: mapCalEvent(res.data) };
+  }
+  async calendarDelete({ eventId, sendUpdates } = {}) {
+    calCheckId(eventId);
+    try {
+      await this._cal().events.delete({ calendarId: 'primary', eventId: String(eventId), sendUpdates: sendUpdates === 'all' ? 'all' : 'none' });
+    } catch (err) {
+      const code = err && (err.code || err.status);
+      if (code !== 404 && code !== 410) throw err; // gone already: that is what was asked for
+    }
+    return { done: true };
+  }
+  /** The undo for a delete: Google keeps a deleted event for a while, as "cancelled". */
+  async calendarUndelete({ eventId, sendUpdates } = {}) {
+    calCheckId(eventId);
+    const res = await this._cal().events.patch({
+      calendarId: 'primary',
+      eventId: String(eventId),
+      requestBody: { status: 'confirmed' },
+      sendUpdates: sendUpdates === 'all' ? 'all' : 'none',
+    });
+    return { event: mapCalEvent(res.data) };
+  }
+
   /** The thread a message belongs to (Black Box events only remember the message). */
   async threadIdOf(messageId) {
     const res = await this._gmail().users.messages.get({ userId: 'me', id: messageId, format: 'minimal' });
@@ -1305,4 +1499,5 @@ module.exports = {
   GoogleManager,
   // Exported for the scratch harnesses; nothing else needs them.
   _mail: { resolveRedirects, fetchFollow, parseAddress, NOT_A_PERSON, buildMime, encodeHeader, splitAddresses, encodeAddress, walkPayload, parseMessage, summarizeThread, mapLimit, b64url, fetchImageDataUrl, PRIVATE_HOST },
+  _cal: { mapCalEvent, calTimes, calGuests, calEventBody },
 };

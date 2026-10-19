@@ -517,4 +517,4 @@ function sudokuNotePop() {
 }
 
 document.getElementById('sudoku-btn')?.addEventListener('click', () => createSudokuTab());
-gameTabs.sudoku = { title: 'Sudoku', glyph: '🔢', color: '#7fb7ff', create: createSudokuTab, onShow: sudokuOnShow, onClose: sudokuOnClose, restore: sudokuRestoreSettings };
+tabKinds.sudoku = { title: 'Sudoku', glyph: '🔢', color: '#7fb7ff', create: createSudokuTab, onShow: sudokuOnShow, onClose: sudokuOnClose, restore: sudokuRestoreSettings };
