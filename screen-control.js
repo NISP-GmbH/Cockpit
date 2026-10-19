@@ -48,6 +48,7 @@ const RING_MS = 350; // the ring shows this long before a click lands
 const RING_PARK = { x: -20000, y: -20000 }; // where the ring waits, shown, between clicks
 const STEP_TIMEOUT_MS = 120000; // step mode: no answer = the step is skipped
 const STEP_OK_KEY = 'Ctrl+Alt+Return';
+const BUSY_HOLD_MS = 900; // a key press takes 10 ms: the pill stays lit this long after an action
 const CLIP_MAX = 100000; // characters per clipboard read / write
 const WRITE_WAIT_MAX_S = 60; // write_terminal: the longest wait for the answer
 const WEB_TEXT_MAX = 200000; // read_web_tab: characters of page text
@@ -216,6 +217,42 @@ function termKeys(spec) {
 }
 
 // A window placed by name: halves, quarters, the whole work area, or centred at its size.
+// What a request is doing, for the pill while it runs. 'act' changes something (input, windows,
+// typing into a tab) and lights the pill up; 'look' only reads and gets a quieter state. A few
+// instant reads (monitors, cursor, the window list) show nothing. Never the typed text.
+function activityOf(method, a) {
+  a = a || {};
+  const act = (icon, what) => ({ kind: 'act', icon, what });
+  const look = (icon, what) => ({ kind: 'look', icon, what });
+  switch (method) {
+    case 'move': return act('🖱', 'moving the mouse');
+    case 'click': return act('🖱', a.double ? 'double-clicking' : a.button && a.button !== 'left' ? a.button + '-clicking' : 'clicking');
+    case 'drag': return act('🖱', 'dragging');
+    case 'scroll': return act('🖱', 'scrolling');
+    case 'type': return act('⌨', 'typing ' + String(a.text || '').length + ' characters');
+    case 'key': return act('⌨', 'pressing ' + String(a.combo || 'a key').slice(0, 30));
+    case 'focus': return act('🪟', 'switching windows');
+    case 'launch': return act('🚀', 'starting a program');
+    case 'uiAct': return act('🧩', a.action === 'set_value' ? 'filling in a field' : a.action === 'focus' ? 'moving the focus' : 'operating a control');
+    case 'winSet': return act('🪟', 'moving a window');
+    case 'termWrite': return act('⌨', 'typing into ' + (String(a.tab || '').slice(0, 30) || 'a terminal tab'));
+    case 'clip':
+      if (a.action === 'paste') return act('📋', 'pasting');
+      if (a.action === 'copy') return act('📋', 'copying');
+      if (a.action === 'write') return act('📋', 'writing the clipboard');
+      return look('📋', 'reading the clipboard');
+    case 'screenshot': return look('📷', 'looking at the screen');
+    case 'zoom': return look('🔍', 'looking closer');
+    case 'changes': return look('📷', 'looking for changes');
+    case 'ui': return look('🧩', 'reading controls');
+    case 'text': return look('🔤', 'reading the screen');
+    case 'wait': return look('⏳', 'waiting for the screen');
+    case 'term': return look('📄', 'reading ' + (a.window ? 'a window' : 'a terminal'));
+    case 'web': return look('🌐', 'reading a web tab');
+    default: return null; // learn: the teach box says it all
+  }
+}
+
 function snapRect(work, snap, cur) {
   const { x, y, w, h } = work;
   const hw = Math.round(w / 2);
@@ -537,6 +574,10 @@ class ScreenControl {
     this.ring = null;
     this.ringReady = null;
     this.stepAsk = null; // the open step question { id, tabId, what, resolve, timer }
+    this.busy = new Map(); // seq -> what is running now, for the pill ({ kind, icon, what, tabId, at })
+    this.busySeq = 0;
+    this.lastAct = null; // the last finished one, with `end`
+    this.busyTimer = null;
     this.stepSeq = 0;
     this.stepTimeoutMs = STEP_TIMEOUT_MS;
     this.pasteSettleMs = 600;
@@ -726,10 +767,17 @@ class ScreenControl {
         }
       }
       const epoch = this.epoch;
-      const run = () => {
+      const doing = activityOf(method, args);
+      const run = async () => {
         if (epoch !== this.epoch) throw new Error('Stopped by the user.');
         if (!this._granted(tabId)) throw new Error('Screen control for this terminal ended.');
-        return this._methods[method].call(this, m.token, tabId, args, epoch);
+        // marked when it RUNS, not while it waits in the queue
+        const done = doing ? this._busyStart(tabId, doing) : null;
+        try {
+          return await this._methods[method].call(this, m.token, tabId, args, epoch);
+        } finally {
+          if (done) done();
+        }
       };
       const result = OUTSIDE_QUEUE.has(method) ? await run() : await this._step(run);
       return { ok: true, result };
@@ -740,6 +788,35 @@ class ScreenControl {
 
   _step(fn) {
     return (this.queue = this.queue.then(fn, fn));
+  }
+  // The pill shows what runs: lit at the start, and BUSY_HOLD_MS after the end, so a 10 ms key
+  // press is still seen. Returns the end call.
+  _busyStart(tabId, doing) {
+    const id = ++this.busySeq;
+    this.busy.set(id, { ...doing, tabId, at: Date.now(), seq: id });
+    this._paintIndicator();
+    return () => {
+      const b = this.busy.get(id);
+      if (!b) return;
+      this.busy.delete(id);
+      this.lastAct = { ...b, end: Date.now() };
+      clearTimeout(this.busyTimer);
+      this.busyTimer = setTimeout(() => this._paintIndicator(), BUSY_HOLD_MS + 30);
+      this._paintIndicator();
+    };
+  }
+  // What the pill shows now: an action before a read, the newest first; else the last one while
+  // it is held; plus how long ago the last one ended (the 'idle' part).
+  _activity() {
+    const now = Date.now();
+    const run = [...this.busy.values()].sort((x, y) => (x.kind === y.kind ? y.seq - x.seq : x.kind === 'act' ? -1 : 1))[0];
+    const last = this.lastAct;
+    const pick = run || (last && now - last.end < BUSY_HOLD_MS ? last : null);
+    const who = (b) => this.titles.get(b.tabId) || 'a terminal';
+    return {
+      now: pick ? { kind: pick.kind, icon: pick.icon, what: pick.what, who: who(pick), seq: pick.seq, held: !run } : null,
+      last: last ? { what: last.what, who: who(last), ago_s: Math.max(0, Math.round((now - last.end) / 1000)) } : null,
+    };
   }
 
   // ---- grants ----
@@ -1699,6 +1776,7 @@ class ScreenControl {
   // With `cell`, the helper also returns the fingerprint of the same pixels (for what_changed).
   async _capture(rect, cell) {
     const ind = this.indicator && !this.indicator.isDestroyed() && this.indicator.isVisible() ? this.indicator : null;
+    this.capturing = (this.capturing || 0) + 1; // the pill's repaints must not show it mid-capture
     if (ind) {
       ind.hide();
       await new Promise((r) => setTimeout(r, 120));
@@ -1707,6 +1785,7 @@ class ScreenControl {
       const cap = await this.backend.call('capture', { x: rect.x, y: rect.y, w: rect.w, h: rect.h, cell: cell || 0 });
       return { png: Buffer.from(cap.png, 'base64'), grid: cap.grid || null };
     } finally {
+      this.capturing--;
       if (ind && !ind.isDestroyed() && this.grants.size) ind.showInactive();
     }
   }
@@ -2036,7 +2115,7 @@ class ScreenControl {
     if (!BrowserWindow) return;
     if (!this.indicator || this.indicator.isDestroyed()) {
       const wa = screen ? screen.getPrimaryDisplay().workArea : { x: 0, y: 0, width: 1200, height: 800 };
-      const w = 360;
+      const w = 420;
       this.indicator = new BrowserWindow({
         width: w,
         height: 40,
@@ -2058,7 +2137,7 @@ class ScreenControl {
       this.indicator.setAlwaysOnTop(true, 'screen-saver');
       this.indicator.loadFile(path.join(this.appDir, 'renderer', 'screen-indicator.html'));
       this.indicator.once('ready-to-show', () => this.grants.size && this.indicator.showInactive());
-    } else if (!this.indicator.isVisible()) this.indicator.showInactive();
+    } else if (!this.indicator.isVisible() && !this.capturing) this.indicator.showInactive();
     const items = [...this.grants.entries()].map(([tabId, g]) => ({
       title: this.titles.get(tabId) || 'a terminal',
       left: g.until === Infinity ? null : Math.max(0, Math.ceil((g.until - Date.now()) / 60000)),
@@ -2080,11 +2159,14 @@ class ScreenControl {
         }
       : null;
     // the pill grows for a question and shrinks back, staying centred where the user put it
-    const want = step ? { width: 480, height: 132 } : { width: 360, height: 40 };
+    const want = step ? { width: 480, height: 132 } : { width: 420, height: 40 };
     const b = this.indicator.getBounds();
     if (b.width !== want.width || b.height !== want.height) this.indicator.setBounds({ x: Math.round(b.x + (b.width - want.width) / 2), y: b.y, ...want });
     try {
-      this.indicator.webContents.send('screen:indicator', { items, stopKey: 'Ctrl+Alt+Esc', step, stepMode: items.some((i) => i.step) });
+      // while a question is open the box says what waits; the activity would only repeat it
+      const activity = this._activity();
+      if (step) activity.now = null;
+      this.indicator.webContents.send('screen:indicator', { items, stopKey: 'Ctrl+Alt+Esc', step, stepMode: items.some((i) => i.step), activity });
     } catch (_) {
       /* loading */
     }
@@ -2092,6 +2174,7 @@ class ScreenControl {
   dispose() {
     this.stop('Cockpit quit');
     this._disable();
+    clearTimeout(this.busyTimer);
     if (this.indicator && !this.indicator.isDestroyed()) this.indicator.destroy();
     this.indicator = null;
     this._ringDrop();
@@ -2099,4 +2182,4 @@ class ScreenControl {
   }
 }
 
-module.exports = { ScreenControl, WinBackend, toPhysical, fitScale, gridChanges, findText, termKeys, buildRecipe, recipeText, snapRect, STOP_ACCELERATOR };
+module.exports = { ScreenControl, WinBackend, toPhysical, fitScale, gridChanges, findText, termKeys, buildRecipe, recipeText, snapRect, activityOf, STOP_ACCELERATOR };

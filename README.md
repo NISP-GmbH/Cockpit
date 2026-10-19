@@ -838,7 +838,10 @@ list windows, bring one to the front and start apps. Windows for now (macOS late
 
 While a terminal may control the screen:
 - a **red pill** floats at the top of the screen (who, how long still, **Stop**), and the tab has
-  a red mark; its hover menu has **🛑 Stop screen control**;
+  a red mark; its hover menu has **🛑 Stop screen control**. The pill shows **when something really
+  happens**: while it clicks, moves the mouse, types, presses keys or moves a window it **lights up**
+  bright red and says what (*"claude is clicking"*, with a moving mouse or keyboard), a screenshot or
+  a read shows a quieter state, and between actions it says how long it has been idle;
 - **Ctrl+Alt+Esc** ends it for every terminal at once, from anywhere - even what is still queued
   or half typed;
 - **Cockpit's own windows are off limits** (Settings, on by default): a click, keys or typing aimed
