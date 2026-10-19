@@ -4,6 +4,7 @@ const os = require('os');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const { ensurePtyHelperExecutable, ptyHelpFor } = require('./pty-fix');
 
 // Local terminal backend. Prefers requiring node-pty in-process (works when it's
 // been rebuilt for Electron's ABI, e.g. in a packaged build). If that fails — the
@@ -44,19 +45,30 @@ class LocalPty {
     let nodeBin = process.env.npm_node_execpath && fs.existsSync(process.env.npm_node_execpath)
       ? process.env.npm_node_execpath
       : abs.find((p) => fs.existsSync(p)) || 'node';
+    // The fallback only runs because the in-process shell failed; if it cannot start either,
+    // that first reason is the useful one ("posix_spawnp failed" + how to fix it), so keep it.
+    const why = (err) =>
+      'Could not start the local-terminal helper (' + (err.message || err) + ')' +
+      (this._inprocError ? '. The shell itself failed with: ' + this._inprocError : '');
     try {
       this.host = spawn(nodeBin, [script], {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: { ...process.env, PATH: (process.env.PATH || '') + ':/usr/local/bin:/opt/homebrew/bin:/usr/bin' },
       });
     } catch (err) {
-      this._lastError = 'Could not start the local-terminal helper: ' + (err.message || err);
+      this._lastError = why(err);
       return false;
     }
+    this._hostTabs = new Set();
     this.host.stdout.on('data', (c) => this._onHostData(c));
     this.host.stderr.on('data', () => {});
+    // A missing `node` arrives HERE, after spawn() already returned: without this the tabs
+    // waiting on the helper would just stay blank.
     this.host.on('error', (err) => {
-      this._lastError = err.message || String(err);
+      this._lastError = why(err);
+      for (const id of this._hostTabs || []) this.send('pty:exit', { tabId: id, exitCode: -1, error: this._lastError });
+      if (this._hostTabs) this._hostTabs.clear();
+      this.host = null;
     });
     this.host.on('exit', () => {
       this.host = null;
@@ -81,26 +93,34 @@ class LocalPty {
       } catch (_) {
         continue;
       }
+      if (m.type !== 'data' && this._hostTabs) this._hostTabs.delete(m.id); // it answered
       if (m.type === 'data') this.send('pty:data', { tabId: m.id, data: m.data });
       else if (m.type === 'exit') this.send('pty:exit', { tabId: m.id, exitCode: m.exitCode });
       else if (m.type === 'error' || m.type === 'fatal') {
-        this._lastError = m.error;
-        this.send('pty:exit', { tabId: m.id, exitCode: -1, error: m.error });
+        this._lastError = withHelp(m.error);
+        this.send('pty:exit', { tabId: m.id, exitCode: -1, error: this._lastError });
       }
     }
   }
 
   spawn(tabId, opts) {
     opts = opts || {};
+    // Once per run, before the first shell: node-pty 1.1.0 ships its macOS helper without
+    // the executable bit, which is what "posix_spawnp failed" means (see pty-fix.js).
+    if (!this._helperChecked) {
+      this._helperChecked = true;
+      this.helperFix = ensurePtyHelperExecutable();
+    }
     const mode = this._init();
-    const shell = opts.shell || defaultShell();
+    const shell = usableShell(opts.shell || defaultShell());
+    const cwd = usableCwd(opts.cwd);
     if (mode === 'inproc') {
       try {
         const p = this.ptyMod.spawn(shell, [], {
           name: 'xterm-256color',
           cols: opts.cols || 80,
           rows: opts.rows || 24,
-          cwd: opts.cwd || os.homedir(),
+          cwd,
           env: process.env,
         });
         this.inproc.set(tabId, p);
@@ -114,7 +134,8 @@ class LocalPty {
         // In-process node-pty loaded but couldn't launch the shell (common on macOS
         // when its native spawn-helper is quarantined/unsigned). Fall back to the
         // host subprocess, which uses the system Node's (freshly-installed) node-pty.
-        this._lastError = err.message || String(err);
+        this._lastError = withHelp(err.message || String(err));
+        this._inprocError = this._lastError;
         this.mode = 'host';
       }
     }
@@ -122,7 +143,8 @@ class LocalPty {
     if (!this._ensureHost()) {
       return { ok: false, error: this._lastError || 'pty host unavailable' };
     }
-    this._hostSend({ type: 'spawn', id: tabId, shell, cols: opts.cols, rows: opts.rows, cwd: opts.cwd });
+    if (this._hostTabs) this._hostTabs.add(tabId);
+    this._hostSend({ type: 'spawn', id: tabId, shell, cols: opts.cols, rows: opts.rows, cwd });
     return { ok: true, shell, backend: 'host' };
   }
 
@@ -192,4 +214,26 @@ function defaultShell() {
   return process.env.SHELL || '/bin/bash';
 }
 
-module.exports = { LocalPty, defaultShell };
+// A $SHELL that points at a shell since uninstalled (fish, a Homebrew bash) fails the very
+// same way as a broken helper - posix_spawnp - so fall back to one that exists.
+function usableShell(shell) {
+  if (process.platform === 'win32' || !path.isAbsolute(shell || '')) return shell;
+  if (fs.existsSync(shell)) return shell;
+  return ['/bin/zsh', '/bin/bash', '/bin/sh'].find((s) => fs.existsSync(s)) || shell;
+}
+// A remembered folder that is gone (deleted, an unplugged drive, another machine's path):
+// start at home rather than not start at all.
+function usableCwd(cwd) {
+  try {
+    if (cwd && fs.statSync(cwd).isDirectory()) return cwd;
+  } catch (_) {
+    /* gone */
+  }
+  return os.homedir();
+}
+function withHelp(msg) {
+  const hint = ptyHelpFor(msg);
+  return hint ? msg + ' ' + hint : msg;
+}
+
+module.exports = { LocalPty, defaultShell, usableShell, usableCwd };

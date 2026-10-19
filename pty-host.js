@@ -14,6 +14,12 @@
 //      { type:'error', id, error }
 
 const os = require('os');
+// The same repair the main process does, in case this host is started on its own.
+try {
+  require('./pty-fix').ensurePtyHelperExecutable();
+} catch (_) {
+  /* never fatal */
+}
 let pty;
 try {
   pty = require('node-pty');

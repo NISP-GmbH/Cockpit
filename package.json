@@ -5,7 +5,8 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder"
+    "dist": "electron-builder",
+    "postinstall": "node pty-fix.js"
   },
   "author": "",
   "license": "MIT",
@@ -34,11 +35,21 @@
     "productName": "Cockpit",
     "files": [
       "main.js",
+      "preload.js",
+      "webview-preload.js",
+      "store.js",
       "ssh-manager.js",
       "slack-manager.js",
+      "whatsapp-manager.js",
       "google-manager.js",
-      "store.js",
-      "preload.js",
+      "local-pty.js",
+      "pty-host.js",
+      "pty-fix.js",
+      "codeserver-manager.js",
+      "blackbox-store.js",
+      "project-store.js",
+      "app-tracker.js",
+      "app-store.js",
       "renderer/**/*",
       "assets/**/*",
       "node_modules/**/*"
@@ -55,6 +66,11 @@
     "linux": {
       "target": "AppImage",
       "icon": "assets/icon.png"
-    }
+    },
+    "asarUnpack": [
+      "node_modules/node-pty/**",
+      "pty-host.js",
+      "pty-fix.js"
+    ]
   }
 }

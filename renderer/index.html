@@ -630,6 +630,14 @@
             Mail stays quiet during a focus session or a Time Relax work phase (one summary at the break)
           </label>
           <label class="settings-check" style="margin-top: 6px">
+            <input type="checkbox" id="set-mail-learn" />
+            Learn snippets: offer a reply you keep writing as a snippet (off by default - it remembers your last 40 short replies, on this computer only)
+          </label>
+          <label class="settings-check" style="margin-top: 6px">
+            <input type="checkbox" id="set-mail-badge" />
+            Show the unread count on the Mail tab
+          </label>
+          <label class="settings-check" style="margin-top: 6px">
             Undo send: hold each message for
             <select id="set-mail-undo">
               <option value="0">no time (send at once)</option>
@@ -640,6 +648,22 @@
               <option value="30">30 seconds</option>
             </select>
           </label>
+          <label class="settings-check" style="margin-top: 6px">
+            <input type="checkbox" id="set-mail-clean-links" />
+            Open links without their trackers (unwrap redirects, drop utm_ and similar)
+          </label>
+          <div class="settings-mailsig">
+            <div class="settings-mailsig-cap">Signatures - the short one when every recipient is a colleague</div>
+            <label>Colleague domains
+              <input id="set-mail-int-domains" type="text" spellcheck="false" />
+            </label>
+            <label>Short (colleagues)
+              <textarea id="set-mail-sig-int" rows="2" placeholder="empty = use the full one"></textarea>
+            </label>
+            <label>Full (everyone else)
+              <textarea id="set-mail-sig-ext" rows="4" placeholder="Name&#10;Title - Company&#10;+49 ..."></textarea>
+            </label>
+          </div>
           <div class="settings-status">
             The Mail tab reads and triages with the permission you already gave. Sending needs Gmail
             send as well: press <b>Connect &amp; sign in</b> once more and allow it.
