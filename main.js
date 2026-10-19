@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
-const { app, BrowserWindow, ipcMain, dialog, Menu, screen, safeStorage, shell, session, powerMonitor } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, screen, safeStorage, shell, session, powerMonitor, clipboard } = require('electron');
 const { SSHManager } = require('./ssh-manager');
 const { AppTracker } = require('./app-tracker');
 const { AppStore } = require('./app-store');
@@ -12,6 +12,9 @@ const { SlackManager } = require('./slack-manager');
 const { WhatsAppManager } = require('./whatsapp-manager');
 const { GoogleManager, _mail: mailUtil } = require('./google-manager');
 const { LocalPty } = require('./local-pty');
+const { ClipHistory } = require('./clip-history');
+const { AgentManager } = require('./agent-manager');
+const { webMenuItems, runWebMenu } = require('./web-menu');
 const { CodeServerManager } = require('./codeserver-manager');
 const { BlackBoxStore } = require('./blackbox-store');
 const { ProjectStore } = require('./project-store');
@@ -66,7 +69,10 @@ let whatsapp = null; // WhatsAppManager, created lazily once userData path is kn
 const localPty = new LocalPty((ch, payload) => send(ch, payload));
 const codeServer = new CodeServerManager();
 const PDF_PREVIEW_DIR = path.join(os.tmpdir(), 'cockpit-pdf-preview');
+// Clipboard history lives here, where the system clipboard is; memory only (clip-history.js).
+const clipHistory = new ClipHistory({ clipboard, onChange: (entries) => send('clip:changed', { entries }) });
 const googleMgr = new GoogleManager();
+let agent = null; // AgentManager, created once the store exists (its config is encrypted in it)
 googleMgr.contactsFile = path.join(app.getPath('userData'), 'mail-contacts.json'); // compose suggestions
 const appTracker = new AppTracker();
 let appStore = null; // AppStore, created lazily once userData path is known (flushed on quit)
@@ -453,11 +459,40 @@ app.whenReady().then(() => {
         event.preventDefault();
       }
     });
+    // Right-click: images (save, copy, address, open, Lens), links, the selection (copy,
+    // sticky note, search), text fields, navigation, Inspect. Chromium shows no menu of its
+    // own in a webview, so without this a right-click did nothing (or, on a selection,
+    // silently made a note).
+    contents.on('context-menu', (_ev, p) => {
+      const h = contents.navigationHistory; // newer Electron; the old calls are the fallback
+      const nav = {
+        canGoBack: h && h.canGoBack ? h.canGoBack() : contents.canGoBack(),
+        canGoForward: h && h.canGoForward ? h.canGoForward() : contents.canGoForward(),
+        goBack: () => (h && h.goBack ? h.goBack() : contents.goBack()),
+        goForward: () => (h && h.goForward ? h.goForward() : contents.goForward()),
+      };
+      const deps = {
+        clipboard,
+        nav,
+        openTab: (url) => send('web:open-tab', { url, background: false }),
+        note: (text) => send('web:ctx-note', { wcId: contents.id, text }),
+      };
+      const template = webMenuItems(p, nav).map((it) =>
+        it.type ? it : { label: it.label, enabled: it.enabled !== false, click: () => runWebMenu(it, p, contents, deps) }
+      );
+      if (mainWindow) Menu.buildFromTemplate(template).popup({ window: mainWindow });
+    });
+  });
+  // Downloads from web tabs (Save image as, Save link as, a clicked file): the Save dialog
+  // starts in the Downloads folder with the page's own file name.
+  webSession().on('will-download', (_e, item) => {
+    item.setSaveDialogOptions({ defaultPath: path.join(app.getPath('downloads'), item.getFilename() || 'download') });
   });
 
   loadWebExtensions(); // restore any unpacked extensions into the web partition
 
   store = new Store(app.getPath('userData'));
+  agent = new AgentManager({ store, encrypt: encryptSecret, decrypt: decryptSecret });
 
   // Restore a Google session from stored, encrypted credentials (no browser needed).
   try {
@@ -500,8 +535,16 @@ app.whenReady().then(() => {
   // ---- session profile IPC ----
   ipcMain.handle('store:load', () => store.load());
   ipcMain.handle('store:save', (_e, sessions) => store.save(sessions));
-  ipcMain.handle('settings:load', () => store.loadSettings());
-  ipcMain.handle('settings:save', (_e, settings) => store.saveSettings(settings));
+  // agentConfig (endpoint + key, encrypted) is main-only: the page never sees it, and a page
+  // saving the settings it loaded at boot must not put an older copy back.
+  const PRIVATE_SETTINGS = ['agentConfig'];
+  const withoutPrivate = (s) => {
+    const o = { ...(s || {}) };
+    for (const k of PRIVATE_SETTINGS) delete o[k];
+    return o;
+  };
+  ipcMain.handle('settings:load', () => withoutPrivate(store.loadSettings()));
+  ipcMain.handle('settings:save', (_e, settings) => withoutPrivate(store.saveSettings(withoutPrivate(settings))));
   ipcMain.handle('keys:discover', () => SSHManager.discoverKeys());
   ipcMain.handle('app:openExternal', (_e, url) => {
     if (typeof url === 'string' && /^(https?|mailto):/i.test(url)) shell.openExternal(url);
@@ -702,6 +745,39 @@ app.whenReady().then(() => {
     } catch (err) {
       return { ok: false, error: err.message || String(err) };
     }
+  });
+  // ---- agent replies (agent-manager.js; the key never leaves this process) ----
+  const agentWrap = (fn) => async (_e, arg) => {
+    try {
+      return { ok: true, ...(await fn(arg || {})) };
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || String(err) };
+    }
+  };
+  ipcMain.handle('agent:getConfig', agentWrap(async () => ({ config: agent.publicConfig() })));
+  ipcMain.handle('agent:setConfig', agentWrap(async (p) => ({ config: agent.setConfig(p) })));
+  ipcMain.handle('agent:models', agentWrap(async () => agent.models()));
+  ipcMain.handle('agent:start', agentWrap(async (p) => agent.start(p)));
+  ipcMain.handle('agent:job', agentWrap(async ({ id }) => ({ job: await agent.job(id) })));
+  // ---- clipboard history ----
+  ipcMain.handle('clip:config', (_e, { on, clearSecrets } = {}) => {
+    clipHistory.clearSecrets = clearSecrets !== false;
+    if (on) clipHistory.start();
+    else {
+      clipHistory.stop();
+      clipHistory.clear(); // off means nothing is kept, not just not shown
+    }
+    return { ok: true };
+  });
+  ipcMain.handle('clip:list', () => ({ ok: true, entries: clipHistory.list() }));
+  ipcMain.handle('clip:use', (_e, { id }) => ({ ok: true, text: clipHistory.use(id) }));
+  ipcMain.handle('clip:remove', (_e, { id }) => {
+    clipHistory.remove(id);
+    return { ok: true };
+  });
+  ipcMain.handle('clip:clear', () => {
+    clipHistory.clear();
+    return { ok: true };
   });
   ipcMain.handle('file:saveBase64', async (_e, { name, b64 }) => {
     try {
@@ -1147,6 +1223,19 @@ app.whenReady().then(() => {
       return googleMgr.sendLater(msg, delayMs, (r) => send('mail:sendResult', r));
     })
   );
+  ipcMain.handle('mail:getDraft', mailCall((o) => googleMgr.getDraft(o)));
+  ipcMain.handle('mail:saveDraft', mailCall((o) => googleMgr.saveDraft(o)));
+  // by draft id, or by the id of the message a thread shows for it
+  ipcMain.handle(
+    'mail:deleteDraft',
+    mailCall(async ({ id, messageId }) => {
+      const draftId = id || (messageId ? await googleMgr.draftIdOf(messageId) : null);
+      if (!draftId) throw new Error('that draft is gone - it was sent or deleted');
+      return { done: await googleMgr.deleteDraft(draftId) };
+    })
+  );
+  ipcMain.handle('mail:trashMessage', mailCall(async ({ id }) => ({ done: await googleMgr.trashMessage(id) })));
+  ipcMain.handle('mail:untrashMessage', mailCall(async ({ id, addInbox }) => ({ done: await googleMgr.untrashMessage(id, !!addInbox) })));
   ipcMain.handle('mail:cancelSend', (_e, { id }) => ({ ok: googleMgr.cancelPending(id) }));
   ipcMain.handle('mail:sendNow', async (_e, { id }) => {
     const r = await googleMgr.sendPendingNow(id);
@@ -1156,6 +1245,8 @@ app.whenReady().then(() => {
     'mail:contacts',
     mailCall((o) => googleMgr.contacts(o, (list) => send('mail:contacts', { contacts: list })))
   );
+  ipcMain.handle('mail:inviteInfo', mailCall((o) => googleMgr.inviteInfo(o)));
+  ipcMain.handle('mail:inviteRespond', mailCall((o) => googleMgr.inviteRespond(o)));
   // Where a tracking link really goes - followed hop by hop, public hosts only, never opened.
   ipcMain.handle('mail:resolveUrl', async (_e, { url }) => {
     try {
@@ -1196,6 +1287,7 @@ app.on('before-quit', (e) => {
   Promise.race([googleMgr.flushPending(), cap]).finally(() => app.quit());
 });
 app.on('before-quit', () => {
+  clipHistory.stop();
   try {
     fs.rmSync(PDF_PREVIEW_DIR, { recursive: true, force: true }); // previews never outlive the app
   } catch (_) {

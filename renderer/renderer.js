@@ -222,6 +222,10 @@ const els = {
   setMailQuiet: document.getElementById('set-mail-quiet'),
   setMailUndo: document.getElementById('set-mail-undo'),
   setMailBadge: document.getElementById('set-mail-badge'),
+  setTmuxOffer: document.getElementById('set-tmux-offer'),
+  setTmuxReset: document.getElementById('set-tmux-reset'),
+  setClipOn: document.getElementById('set-clip-on'),
+  setClipSecrets: document.getElementById('set-clip-secrets'),
   setMailLearn: document.getElementById('set-mail-learn'),
   setMailCleanLinks: document.getElementById('set-mail-clean-links'),
   setMailSigInt: document.getElementById('set-mail-sig-int'),
@@ -484,6 +488,18 @@ function showTabHelp(tabEl) {
       }
     });
     els.tabHelpPaste.appendChild(sizeBtn);
+
+    // tmux sessions on whatever host this shell is on now - attach, start, or switch.
+    const tmuxBtn = document.createElement('button');
+    tmuxBtn.className = 'th-cmd th-plain';
+    tmuxBtn.textContent = '🪟 tmux sessions';
+    tmuxBtn.title = 'List the tmux sessions on the host this shell is on - attach, start a named one,\nor (inside tmux) switch. Asked in the background; skipped in a full-screen program.';
+    tmuxBtn.addEventListener('click', () => {
+      els.tabHelp.classList.add('hidden');
+      const r = tabs.get(tabHelpTabId);
+      if (r) tmuxPick(r);
+    });
+    els.tabHelpPaste.appendChild(tmuxBtn);
 
     // Capture the current terminal selection into a sticky note, auto-tagged with the
     // host, timestamp, and the command that produced it (Ctrl+Shift+N does the same).
@@ -2768,6 +2784,7 @@ function createTab(profile) {
 
   term.onData((data) => {
     leaveCopyModeIfParked(rec, data); // tmux copy-mode: q first, so this keystroke lands as input
+    tmuxNoteTyping(rec); // typing puts the tmux card away
     api.write(id, data);
     broadcastFrom(rec, data); // mirror keystrokes to other terminals when broadcast is on
     captureSshCommand(rec, data);
@@ -2843,7 +2860,7 @@ function createTab(profile) {
         return false;
       }
       // Let the window-level handler act on these (avoid leaking to the shell).
-      if (k === 'f' || k === 't' || k === 'w') return false;
+      if (k === 'f' || k === 't' || k === 'w' || k === 'h') return false;
     }
     if (e.ctrlKey && !e.shiftKey && !e.altKey) {
       if (e.key === '+' || e.key === '=') {
@@ -2996,6 +3013,7 @@ function createLocalTab(opts) {
 
   term.onData((data) => {
     leaveCopyModeIfParked(rec, data); // tmux copy-mode: q first, so this keystroke lands as input
+    tmuxNoteTyping(rec); // typing puts the tmux card away
     api.ptyWrite(id, data);
     broadcastFrom(rec, data); // mirror keystrokes to other terminals when broadcast is on
     captureLocalCommand(rec, data);
@@ -3038,7 +3056,7 @@ function createLocalTab(opts) {
         captureTermNote(tabs.get(id));
         return false;
       }
-      if (k === 'f' || k === 't' || k === 'w') return false;
+      if (k === 'f' || k === 't' || k === 'w' || k === 'h') return false;
     }
     if (e.ctrlKey && !e.shiftKey && !e.altKey) {
       if (e.key === '+' || e.key === '=') {
@@ -3128,6 +3146,7 @@ async function startLocalShell(rec) {
 api.onPtyData(({ tabId, data }) => {
   const rec = tabs.get(tabId);
   if (rec && rec.term) {
+    rec._lastDataAt = Date.now();
     captureStream(rec, typeof data === 'string' ? data : streamDecode(rec, binaryToUint8(data)));
     const quiet = rec._send || rec._probe || rec._size || rec._ask;
     if (quiet) {
@@ -4315,6 +4334,7 @@ async function onGrabFinished(name, res, opts, rec) {
       'err'
     );
   }
+  if (opts.onBytes) return opts.onBytes(name, res.b64, bytes); // e.g. into a mail being written
   if (opts.preview) {
     let text = null;
     try {
@@ -5306,6 +5326,7 @@ function closeTimeTravel() {
 api.onData(({ tabId, data }) => {
   const rec = tabs.get(tabId);
   if (rec && rec.term) {
+    rec._lastDataAt = Date.now(); // "is the shell quiet yet?" (tmux card)
     const u8 = binaryToUint8(data);
     captureStream(rec, streamDecode(rec, u8)); // ssh: latin1 bytes -> UTF-8 text (history + recorder)
     // The quiet conversations - a send, a where-am-I, a size resync - all swallow
@@ -5477,6 +5498,12 @@ api.onStatus(({ tabId, line }) => {
     setTimeout(() => resyncTermSize(rec), 1500);
     probeWhereSoon(rec, 1200);
     replayStartupCommands(rec);
+    // tmux sessions, once the shell has settled - after any auto-hop has had its turn
+    rec._connectedAt = Date.now();
+    {
+      const hops = autoHopEnabled && rec.serverKey && sshHops[rec.serverKey] ? sshHops[rec.serverKey].length : 0;
+      setTimeout(() => tmuxAutoOffer(rec), 2500 + hops * 1500);
+    }
     // One-shot hop for an ssh:// link opened through a jump/bastion host.
     if (rec.startupCmd) {
       const cmd = rec.startupCmd;
@@ -5756,6 +5783,10 @@ window.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 't') {
     e.preventDefault();
     openDialog();
+  } else if (e.ctrlKey && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'h') {
+    e.preventDefault();
+    if (clipIsOpen()) clipClose(true);
+    else clipOpen(); // clipboard history
   } else if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'w') {
     e.preventDefault();
     if (activeTabId) closeTab(activeTabId);
@@ -5974,6 +6005,27 @@ function openLinkInTab(url, background) {
   const prev = activeTabId;
   createWebTab(url); // always activates the tab it makes
   if (background && prev && prev !== activeTabId && tabs.has(prev)) activateTab(prev);
+}
+// A web tab's right-click "Save as a sticky note": main names the page by its webContents id.
+if (api.onWebCtxNote) {
+  api.onWebCtxNote(({ wcId, text } = {}) => {
+    if (!text) return;
+    let title = 'Web';
+    for (const r of tabs.values()) {
+      if (r.kind !== 'web' || !r.wv) continue;
+      let wid = null;
+      try {
+        wid = r.wv.getWebContentsId();
+      } catch (_) {
+        /* not attached yet */
+      }
+      if (wid === wcId) {
+        title = r.tabEl.querySelector('.title').textContent || r.url || 'Web';
+        break;
+      }
+    }
+    captureToNote({ title: title.slice(0, 120), text });
+  });
 }
 if (api.onWebOpenTab) {
   api.onWebOpenTab((p) => openLinkInTab(p && p.url, p && p.background));
@@ -7252,6 +7304,7 @@ async function openSettings() {
   els.setSlackNotify.value = slackNotify;
   updateSlackStatusUI();
   els.settingsGoogleError.textContent = '';
+  agentSettingsLoad();
   const g = await api.googleLoadConfig();
   if (g) {
     els.setGoogleId.value = g.clientId || '';
@@ -7262,6 +7315,11 @@ async function openSettings() {
   els.setMeetingChime.checked = meetingChime;
   els.setMailQuiet.checked = mailQuietFocus;
   els.setMailBadge.checked = mailTabBadge;
+  els.setTmuxOffer.checked = tmuxOffer;
+  els.setTmuxReset.classList.toggle('hidden', !tmuxNeverHosts.length);
+  els.setTmuxReset.textContent = 'ask again on ' + tmuxNeverHosts.length + ' host' + (tmuxNeverHosts.length === 1 ? '' : 's');
+  els.setClipOn.checked = clipOn;
+  els.setClipSecrets.checked = clipClearSecrets;
   els.setMailLearn.checked = mailLearnSnippets;
   els.setMailCleanLinks.checked = mailCleanLinks;
   els.setMailSigInt.value = mailSigInternal;
@@ -7402,6 +7460,27 @@ els.setMailLearn.addEventListener('change', () => {
   mailLearnSnippets = els.setMailLearn.checked;
   api.saveSettings({ mailLearnSnippets });
   if (!mailLearnSnippets) mailForgetLearning(); // off means nothing is kept, not just not offered
+});
+
+els.setTmuxOffer.addEventListener('change', () => {
+  tmuxOffer = els.setTmuxOffer.checked;
+  api.saveSettings({ tmuxOffer });
+});
+els.setTmuxReset.addEventListener('click', (e) => {
+  e.preventDefault();
+  tmuxNeverHosts = [];
+  api.saveSettings({ tmuxNeverHosts });
+  els.setTmuxReset.classList.add('hidden');
+});
+els.setClipOn.addEventListener('change', () => {
+  clipOn = els.setClipOn.checked;
+  api.saveSettings({ clipOn });
+  clipConfig();
+});
+els.setClipSecrets.addEventListener('change', () => {
+  clipClearSecrets = els.setClipSecrets.checked;
+  api.saveSettings({ clipClearSecrets });
+  clipConfig();
 });
 
 els.setMailBadge.addEventListener('change', () => {
@@ -7886,14 +7965,8 @@ function createWebTab(savedUrl) {
     if (e.channel === 'web-nav') webNavigate(rec, (e.args && e.args[0]) || 'back');
   });
 
-  // Right-click selected text on the page → save it as a sticky note.
-  wv.addEventListener('context-menu', (e) => {
-    const p = e.params || {};
-    const sel = (p.selectionText || '').trim();
-    if (!sel) return;
-    const title = (rec.tabEl.querySelector('.title').textContent || rec.url || 'Web').slice(0, 120);
-    captureToNote({ title, text: sel });
-  });
+  // The right-click menu lives in the main process (web-menu.js); its "Save as a sticky
+  // note" comes back through api.onWebCtxNote.
 
   if (savedUrl) {
     urlInput.value = savedUrl;
@@ -11158,6 +11231,8 @@ async function refreshGmail(asked) {
     });
 
     actions.appendChild(tag);
+    item._msg = m; // for agentSyncBoard
+    if (agentReady() && m.threadId) actions.appendChild(agentBoardBtn(m));
     actions.appendChild(del);
     item.appendChild(subj);
     item.appendChild(from);
@@ -11296,7 +11371,8 @@ const MAIL_KEYS = {
   k: 'prev',
   Enter: 'open',
   o: 'open',
-  u: 'back',
+  // u = unread here, NOT Gmail's "back to the list" - that is Esc (and the ← button).
+  u: 'unread',
   Escape: 'escape',
   e: 'archive',
   '#': 'trash',
@@ -11312,17 +11388,42 @@ const MAIL_KEYS = {
   '?': 'help',
   z: 'undo',
   d: 'dark',
+  // more of Gmail's own
+  n: 'msg-next',
+  p: 'msg-prev',
+  ';': 'expand-all',
+  ':': 'collapse-all',
+  '!': 'spam',
+  ']': 'archive-next',
+  '[': 'archive-prev',
+  '+': 'important',
+  '=': 'important',
+  '-': 'unimportant',
+  N: 'refresh',
+  D: 'agent',
 };
+// g, then a letter: go to a view (Gmail's two-key jumps). 'd' is Drafts, which is a search.
+const MAIL_GO = { i: 'INBOX', u: 'UNREAD', s: 'STARRED', t: 'SENT', a: 'ALL', d: 'drafts', l: 'labels' };
+const MAIL_GO_MS = 1500;
 const MAIL_KEY_HELP = [
   ['j / k', 'next / previous conversation'],
   ['Enter / o', 'open'],
-  ['u / Esc', 'back to the list'],
+  ['Esc', 'back to the list'],
   ['e', 'archive'],
   ['#', 'trash'],
   ['s', 'star'],
   ['Shift+I', 'mark read'],
-  ['Shift+U', 'mark unread'],
+  ['u / Shift+U / Ctrl+U', 'mark unread'],
   ['l', 'label'],
+  ['+ / -', 'mark important / not important'],
+  ['!', 'report spam'],
+  ['[ / ]', 'archive, then the previous / next conversation'],
+  ['n / p', 'next / previous message in the conversation'],
+  ['; / :', 'expand / collapse every message'],
+  ['g then i u s t a d', 'go to Inbox, Unread, Starred, Sent, All mail, Drafts'],
+  ['g then l', 'pick a label'],
+  ['Shift+N', 'refresh'],
+  ['Shift+D', 'agent reply (when set up)'],
   ['r / a / f', 'reply / reply all / forward'],
   ['1 - 9', 'quick reply (open conversation)'],
   [';; or Ctrl+Space', 'insert a snippet (while writing)'],
@@ -11451,6 +11552,12 @@ function mailWire(rec) {
       mailFocus();
     }
   });
+  // Typing searches on Enter; making the box EMPTY is enough to get the list back.
+  const clearedBack = () => {
+    if (!search.value.trim()) mailEndSearch();
+  };
+  search.addEventListener('input', clearedBack);
+  search.addEventListener('search', clearedBack); // the box's own ✕
   p.querySelector('.mail-labels').addEventListener('change', (e) => {
     const v = e.target.value;
     if (v) mailSetView(v);
@@ -11460,7 +11567,7 @@ function mailWire(rec) {
     const b = e.target.closest('[data-act], [data-view]');
     if (!b) return;
     if (b.dataset.view) return mailSetView(b.dataset.view);
-    if (b.dataset.act === 'clear-search') return mailSetView('INBOX');
+    if (b.dataset.act === 'clear-search') return mailEndSearch();
     mailDo(b.dataset.act);
   });
   p.querySelector('.mail-cats').addEventListener('click', (e) => {
@@ -11469,6 +11576,7 @@ function mailWire(rec) {
     mailToggleCategory(b.dataset.cat, e.ctrlKey || e.metaKey || e.shiftKey);
     mailFocus();
   });
+  p.querySelector('.mail-list').addEventListener('scroll', mailAutoMore, { passive: true });
   p.querySelector('.mail-list').addEventListener('click', (e) => {
     if (e.target.closest('[data-act="settings"]')) return openSettings();
     if (e.target.closest('.mail-more')) return mailLoad(true);
@@ -11515,9 +11623,9 @@ function mailWire(rec) {
   lb.addEventListener('click', () => lb.classList.add('hidden'));
   p.querySelector('.mail-keys').addEventListener('click', () => p.querySelector('.mail-keys').classList.add('hidden'));
   p.querySelector('.mail-keys').innerHTML =
-    '<div class="mk-card"><div class="mk-title">Keyboard</div>' +
+    '<div class="mk-card"><div class="mk-title">Keyboard</div><div class="mk-rows">' +
     MAIL_KEY_HELP.map(([k, d]) => `<div class="mk-row"><kbd>${escapeHtml(k)}</kbd><span>${escapeHtml(d)}</span></div>`).join('') +
-    '</div>';
+    '</div></div>';
 }
 
 // The list / reader divider. The width is a pixel value on the pane (--mail-list-w) and is
@@ -11651,15 +11759,26 @@ function mailSetView(view) {
   mbox.sel = 0;
   mbox.threads = [];
   mbox.next = null;
+  mbox.prefetch = null;
+  mbox.autoPauseUntil = 0;
+  const list = mailEl('.mail-list');
+  if (list) list.scrollTop = 0; // a new view starts at its top
   mailCloseReader();
   mailRenderViews();
   mailLoad();
 }
+// A search replaces the list; emptying the box (deleting the text, its ✕, the chip's ✕)
+// puts back the list you were in before - Inbox, Starred, a label - not always the Inbox.
 function mailSearch(q) {
   q = String(q || '').trim();
-  if (!q) return mailSetView('INBOX');
+  if (!q) return mailEndSearch();
+  if (mbox.view !== 'SEARCH') mbox.preSearchView = mbox.view;
   mbox.q = q;
   mailSetView('SEARCH');
+}
+function mailEndSearch() {
+  if (mbox.view !== 'SEARCH') return;
+  mailSetView(mbox.preSearchView || 'INBOX');
 }
 function mailRenderViews() {
   const box = mailEl('.mail-views');
@@ -11667,7 +11786,9 @@ function mailRenderViews() {
   let html = MAIL_VIEWS.map(
     (v) => `<button class="mail-chip${mbox.view === v.key ? ' sel' : ''}" data-view="${v.key}">${v.label}</button>`
   ).join('');
-  const lab = mbox.labels.find((l) => l.id === mbox.view);
+  // A label chip only for a picked LABEL: Gmail's system labels share their ids with the
+  // views (INBOX, STARRED, SENT), which once showed "Inbox" and "🏷 INBOX" both selected.
+  const lab = !MAIL_VIEWS.some((v) => v.key === mbox.view) && mbox.labels.find((l) => l.id === mbox.view);
   if (lab) html += `<button class="mail-chip sel" data-view="${escapeHtml(lab.id)}">🏷 ${escapeHtml(lab.name)}</button>`;
   if (mbox.view === 'SEARCH') {
     html += `<span class="mail-chip sel">🔍 ${escapeHtml(mbox.q)} <button class="mail-x" data-act="clear-search" title="Clear search">✕</button></span>`;
@@ -11694,6 +11815,41 @@ async function mailLoadLabels() {
 }
 
 // ---- the list ----
+// ---- the endless list ----
+// Scrolling down loads the next page by itself, and quickly: every page that arrives starts
+// fetching the NEXT one in the background (one page ahead, never more), so reaching the end
+// usually just shows rows that are already here. Loading starts a screen before the end, and
+// a list too short to scroll keeps loading until it fills the pane. A failed page pauses the
+// automatic part for a while instead of retrying in a loop.
+const MAIL_AUTO_MARGIN = 1.0; // load when within this many list-heights of the end
+const MAIL_AUTO_PAUSE = 10000;
+function mailViewKey() {
+  return JSON.stringify(mailViewQuery());
+}
+function mailPrefetch() {
+  if (!mbox.next || !googleConnected || !mailRec()) return;
+  const key = mailViewKey();
+  const token = mbox.next;
+  if (mbox.prefetch && mbox.prefetch.token === token && mbox.prefetch.key === key) return;
+  const promise = api.mailListThreads({ ...mailViewQuery(), pageToken: token, max: 25 });
+  mbox.prefetch = { key, token, promise };
+  promise.then((res) => {
+    if ((!res || !res.ok) && mbox.prefetch && mbox.prefetch.promise === promise) mbox.prefetch = null; // ask again when needed
+  });
+}
+// The prefetched page, if it is the one wanted now (same view, same next page).
+function mailTakePrefetch() {
+  const pf = mbox.prefetch;
+  if (!pf || pf.token !== mbox.next || pf.key !== mailViewKey()) return null;
+  mbox.prefetch = null;
+  return pf.promise;
+}
+function mailAutoMore() {
+  const list = mailEl('.mail-list');
+  if (!list || !list.offsetParent || !mbox.next || mbox.loading || !googleConnected) return;
+  if (Date.now() < (mbox.autoPauseUntil || 0)) return;
+  if (list.scrollTop + list.clientHeight >= list.scrollHeight - list.clientHeight * MAIL_AUTO_MARGIN) mailLoad(true);
+}
 async function mailLoad(more, silent) {
   if (!mailRec()) return;
   if (!googleConnected) {
@@ -11706,10 +11862,12 @@ async function mailLoad(more, silent) {
   const seq = ++mbox.seq;
   mbox.loading = true;
   if (!silent) mailRenderList();
-  const res = await api.mailListThreads({ ...mailViewQuery(), pageToken: more ? mbox.next : undefined, max: 25 });
+  const early = more ? mailTakePrefetch() : null; // already on its way, or already here
+  const res = await (early || api.mailListThreads({ ...mailViewQuery(), pageToken: more ? mbox.next : undefined, max: 25 }));
   if (seq !== mbox.seq) return; // the view changed while this was on its way
   mbox.loading = false;
   if (!res || !res.ok) {
+    if (more) mbox.autoPauseUntil = Date.now() + MAIL_AUTO_PAUSE; // no retry loop
     if (!silent) mailToast('Could not load mail: ' + ((res && res.error) || 'unknown'), 'err');
     mailRenderList();
     return;
@@ -11724,6 +11882,8 @@ async function mailLoad(more, silent) {
   const k = selId ? mbox.threads.findIndex((t) => t.id === selId) : -1;
   mbox.sel = k !== -1 ? k : Math.min(Math.max(mbox.sel, 0), mbox.threads.length - 1);
   mailRenderList();
+  mailPrefetch(); // the next page, before it is needed
+  setTimeout(mailAutoMore, 0); // a list that does not fill the pane yet, or you are already at the end
 }
 // append: a next page. replace: a fresh view. merge: a background refresh of page one -
 // update what is there, add what is new, and keep the pages the user already loaded,
@@ -11782,9 +11942,18 @@ function mailRenderList() {
   if (mbox.loading) foot = '<div class="mail-note">Loading…</div>';
   else if (!mbox.threads.length) foot = '<div class="mail-note">Nothing here.</div>';
   else if (mbox.next) foot = '<button class="mail-btn mail-more">Load more</button>';
+  const keep = list.scrollTop;
   list.innerHTML = rows.join('') + foot;
-  const selEl = list.querySelector('.mail-row.sel');
-  if (selEl) selEl.scrollIntoView({ block: 'nearest' });
+  list.scrollTop = keep;
+  // Scroll to the selection only when a DIFFERENT thread is selected (j/k, a click, a row
+  // archived away). Doing it on every render yanked you back up each time a page arrived -
+  // and by thread, not position: new mail on top shifts every position by one.
+  const selId = mbox.threads[mbox.sel] ? mbox.threads[mbox.sel].id : null;
+  if (selId !== mbox.shownSelId) {
+    const selEl = list.querySelector('.mail-row.sel');
+    if (selEl) selEl.scrollIntoView({ block: 'nearest' });
+    mbox.shownSelId = selId;
+  }
 }
 
 // ---- the reader ----
@@ -11810,7 +11979,11 @@ async function mailOpenThread(id) {
     reader.innerHTML = `<div class="mail-empty">Could not open it: ${escapeHtml((res && res.error) || 'unknown')}</div>`;
     return;
   }
-  mbox.thread = { id, messages: res.messages || [] };
+  // A thread still returns the messages trashed out of it; like Gmail, show them only when
+  // looking at Trash (or when nothing else is left).
+  const all = res.messages || [];
+  const live = mbox.view === 'TRASH' ? all : all.filter((m) => !(m.labelIds || []).includes('TRASH'));
+  mbox.thread = { id, messages: live.length ? live : all };
   mailRenderThread();
   // Opening reads it, as in Gmail.
   if (mbox.thread.messages.some((m) => (m.labelIds || []).includes('UNREAD'))) mailSetFlag(id, 'UNREAD', false, true);
@@ -11828,13 +12001,14 @@ function mailRenderThread() {
   const starred = mailThreadHas(t.id, 'STARRED');
   reader.innerHTML =
     '<div class="mr-bar">' +
-    '<button class="mail-btn" data-act="back" title="Back to the list (u)">←</button>' +
+    '<button class="mail-btn" data-act="back" title="Back to the list (Esc)">←</button>' +
     '<button class="mail-btn" data-act="archive" title="Archive (e)">🗃 Archive</button>' +
     '<button class="mail-btn" data-act="trash" title="Trash (#)">🗑</button>' +
     `<button class="mail-btn mr-starbtn" data-act="star" title="Star (s)">${starred ? '★' : '☆'}</button>` +
     '<button class="mail-btn" data-act="unread" title="Mark unread (Shift+U)">✉</button>' +
     '<button class="mail-btn" data-act="label" title="Label (l)">🏷</button>' +
     '<button class="mail-btn mr-darkbtn" data-act="dark"></button>' +
+    (agentReady() ? '<button class="mail-btn mr-agentbtn" data-act="agent" title="Agent reply: the agent drafts an answer in this thread (nothing is sent)">🤖</button>' : '') +
     '<span class="mail-spacer"></span>' +
     '<button class="mail-btn" data-act="reply" title="Reply (r)">↩ Reply</button>' +
     '<button class="mail-btn" data-act="replyall" title="Reply all (a)">⤶ All</button>' +
@@ -11849,6 +12023,7 @@ function mailRenderThread() {
   t.messages.forEach((m, i) => box.appendChild(mailMessageEl(m, i === last || (m.labelIds || []).includes('UNREAD'))));
   reader.insertAdjacentHTML('beforeend', mailQuickRowHtml());
   reader.scrollTop = 0;
+  agentPaintReader();
 }
 function mailAddr(s) {
   const m = /<([^>]+)>/.exec(String(s || ''));
@@ -11872,9 +12047,23 @@ function mailMessageEl(m, expanded) {
     `<span class="mm-from">${escapeHtml(shortFrom(m.from) || m.from || '')}</span>` +
     `<span class="mm-addr">${escapeHtml(mailAddr(m.from))}</span>` +
     `<span class="mm-date">${escapeHtml(when)}</span>` +
+    ((m.labelIds || []).includes('DRAFT') ? '<button class="mail-btn mm-editdraft" title="Edit and send it from here">✏ Edit draft</button>' : '') +
+    `<button class="mail-x mm-trash" title="${(m.labelIds || []).includes('DRAFT') ? 'Delete this draft' : 'Move just this message to Trash'}">🗑</button>` +
     '</div>' +
     `<div class="mm-snip">${escapeHtml(mailDecodeEntities(m.snippet))}</div>` +
     '<div class="mm-body"></div>';
+  if ((m.labelIds || []).includes('DRAFT')) el.classList.add('is-draft');
+  const editBtn = el.querySelector('.mm-editdraft');
+  if (editBtn)
+    editBtn.addEventListener('click', (e) => {
+      e.stopPropagation(); // not a fold of the message
+      const job = mbox.thread && agentJobFor(mbox.thread.id);
+      mailEditDraft({ messageId: m.id }, job && job.status === 'done' ? { agentJob: job.id } : null);
+    });
+  el.querySelector('.mm-trash').addEventListener('click', (e) => {
+    e.stopPropagation(); // not a fold of the message
+    mailRemoveMessage(m, el);
+  });
   el.querySelector('.mm-head').addEventListener('click', () => {
     el.classList.toggle('open');
     if (el.classList.contains('open')) mailFillBody(el, m);
@@ -11892,6 +12081,12 @@ function mailFillBody(el, m) {
     d.className = 'mm-to';
     d.textContent = to;
     body.appendChild(d);
+  }
+  if (m.calendar || (m.attachments || []).some((x) => /text\/calendar/i.test(x.mimeType) || /\.ics$/i.test(x.filename || ''))) {
+    const iv = document.createElement('div');
+    iv.className = 'mm-invite';
+    body.appendChild(iv);
+    mailInviteMount(iv, m); // fills itself in, or removes itself if it is not an invitation after all
   }
   if (m.html) {
     const clean = mailSanitize(m.html);
@@ -12485,8 +12680,8 @@ function mailAttachmentsEl(m) {
       `<button class="mail-btn${big ? ' dim' : ''}" data-act="term" title="${
         big
           ? 'Too big to type through a terminal (limit ' + fmtBytes(SEND_MAX_BYTES) + ') - this saves it instead'
-          : "Send to a terminal - it lands in that shell's current directory, at any ssh depth"
-      }">⤴ Terminal</button>`;
+          : "Save into a folder on a server: pick a terminal, then the folder - it goes through that shell, so any ssh depth works"
+      }">📂 To a server</button>`;
     chip.addEventListener('click', (e) => {
       const b = e.target.closest('button[data-act]');
       if (b) mailAttAction(b.dataset.act, m, a, b);
@@ -12497,10 +12692,7 @@ function mailAttachmentsEl(m) {
 }
 async function mailAttAction(act, m, a, btn) {
   if (act === 'term' && a.size > SEND_MAX_BYTES) act = 'save';
-  if (act === 'term') {
-    mailPickTerminal(btn, (target) => mailSendToTerminal(target, m, a));
-    return;
-  }
+  if (act === 'term') return mailSaveToShell(btn, m, a); // pick a terminal, then a folder
   btn.disabled = true;
   const b64 = await mailAttB64(m, a);
   btn.disabled = false;
@@ -12571,18 +12763,6 @@ function mailPickTerminal(anchor, onPick) {
     const r = tabs.get(b.dataset.id);
     if (r) onPick(r);
   };
-}
-async function mailSendToTerminal(target, m, a) {
-  const b64 = await mailAttB64(m, a);
-  if (!b64) return mailToast('Could not fetch ' + a.filename, 'err');
-  const size = mailB64Size(b64);
-  if (size > SEND_MAX_BYTES) {
-    mailToast(a.filename + ' is ' + fmtBytes(size) + ' - too big for a terminal. Use Save instead.', 'err');
-    return;
-  }
-  if (target._grab || target._send) return mailToast('That terminal is busy with another transfer.', 'err');
-  activateTab(target.id); // the [sent ...] line is where the answer is
-  await sendB64InBand(target, { name: mailSafeName(a.filename), size, b64 });
 }
 function mailShowPop(anchor) {
   const pop = mailEl('.mail-pop');
@@ -12672,16 +12852,24 @@ async function mailRemove(id, how) {
     mbox.sel = Math.min(idx, mbox.threads.length - 1);
     mailRenderList();
   };
-  const res = how === 'trash' ? await api.mailTrashThread(id) : await api.mailModifyThread(id, [], ['INBOX']);
+  const res =
+    how === 'trash'
+      ? await api.mailTrashThread(id)
+      : how === 'spam'
+        ? await api.mailModifyThread(id, ['SPAM'], ['INBOX'])
+        : await api.mailModifyThread(id, [], ['INBOX']);
+  const word = { trash: 'Trash', spam: 'Spam', archive: 'Archive' }[how] || 'Archive';
   if (!res || !res.ok) {
     putBack();
-    mailToast((how === 'trash' ? 'Trash' : 'Archive') + ' failed: ' + ((res && res.error) || 'unknown'), 'err');
+    mailToast(word + ' failed: ' + ((res && res.error) || 'unknown'), 'err');
     return;
   }
   mailBadge(true);
-  mailToast(how === 'trash' ? 'Moved to Trash' : 'Archived', null, async () => {
+  mailToast(how === 'trash' ? 'Moved to Trash' : how === 'spam' ? 'Reported as spam' : 'Archived', null, async () => {
     let r;
-    if (how === 'trash') {
+    if (how === 'spam') {
+      r = await api.mailModifyThread(id, hadInbox ? ['INBOX'] : [], ['SPAM']);
+    } else if (how === 'trash') {
       r = await api.mailUntrashThread(id);
       // Untrash does not promise the inbox back; ask for it when it was there.
       if (r && r.ok && hadInbox) r = await api.mailModifyThread(id, ['INBOX'], []);
@@ -12695,6 +12883,53 @@ async function mailRemove(id, how) {
     } else {
       mailToast('Undo failed: ' + ((r && r.error) || 'unknown'), 'err');
     }
+  });
+}
+// One message out of a thread. The only message left is the thread itself, so that goes the
+// thread way (its row leaves the list, same undo). A draft is DELETED - Gmail has no undo
+// for that, so it asks. Otherwise optimistic, like the rest of triage, with an 8 s undo.
+async function mailRemoveMessage(m, el) {
+  const t = mbox.thread;
+  if (!t || !t.messages.includes(m)) return;
+  const isDraft = (m.labelIds || []).includes('DRAFT');
+  if (!isDraft && t.messages.length === 1) return mailRemove(t.id, 'trash');
+  if (isDraft) {
+    if (!window.confirm('Delete this draft? It cannot be undone.')) return;
+    const r = await api.mailDeleteDraft(null, m.id);
+    if (!r || !r.ok) return mailToast('Not deleted: ' + mailStaleMain((r && r.error) || 'unknown'), 'err');
+    if (mbox.draft && mbox.draft.draftId && mbox.draft.draftMsgId === m.id) mbox.draft.draftId = null; // compose keeps the text
+    mailToast('Draft deleted');
+    if (mbox.thread === t) mailOpenThread(t.id);
+    return;
+  }
+  const i = t.messages.indexOf(m);
+  const row = mbox.threads.find((x) => x.id === t.id);
+  t.messages.splice(i, 1);
+  if (el) el.remove();
+  const counted = !!row && row.count > 1; // the row says how many; keep it honest
+  if (counted) row.count -= 1;
+  mailRenderList();
+  let back = false;
+  const putBack = () => {
+    if (back) return;
+    back = true;
+    if (!t.messages.includes(m)) t.messages.splice(Math.min(i, t.messages.length), 0, m);
+    if (mbox.thread === t) mailRenderThread();
+    if (counted) row.count += 1;
+    mailRenderList();
+  };
+  const res = await api.mailTrashMessage(m.id);
+  if (!res || !res.ok) {
+    putBack();
+    return mailToast('Trash failed: ' + mailStaleMain((res && res.error) || 'unknown'), 'err');
+  }
+  const hadInbox = (m.labelIds || []).includes('INBOX');
+  mailToast('Message moved to Trash', null, async () => {
+    const r = await api.mailUntrashMessage(m.id, hadInbox);
+    if (r && r.ok) {
+      putBack();
+      mailToast('Undone');
+    } else mailToast('Undo failed: ' + mailStaleMain((r && r.error) || 'unknown'), 'err');
   });
 }
 function mailLabelPicker(id, anchor) {
@@ -12763,7 +12998,6 @@ function mailToast(text, kind, undo) {
 
 // ---- keyboard ----
 function mailKeydown(e) {
-  if (e.ctrlKey || e.metaKey || e.altKey) return;
   const t = e.target;
   const tag = t && t.tagName;
   // Compose and the pickers own their keys - a focused Send button plus "e" must not archive.
@@ -12777,6 +13011,33 @@ function mailKeydown(e) {
     return;
   }
   if (tag === 'BUTTON' && (e.key === 'Enter' || e.key === ' ')) return; // the button's own click
+  if (e.ctrlKey || e.metaKey || e.altKey) {
+    // Ctrl+U = unread, as in Outlook and Thunderbird. Handled here, so it stops at the mail
+    // pane: the project-time revert only owns Ctrl+U while its overlay has the focus.
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'u' || e.key === 'U')) {
+      e.preventDefault();
+      e.stopPropagation();
+      mailDo('unread');
+    }
+    return;
+  }
+  if (mbox.goAt) {
+    const fresh = Date.now() - mbox.goAt < MAIL_GO_MS;
+    mbox.goAt = 0;
+    const go = fresh && MAIL_GO[e.key];
+    if (go) {
+      e.preventDefault();
+      e.stopPropagation();
+      return mailGo(go);
+    }
+    if (fresh && e.key === 'Escape') return;
+  }
+  if (e.key === 'g') {
+    e.preventDefault();
+    e.stopPropagation();
+    mbox.goAt = Date.now();
+    return;
+  }
   if (/^[1-9]$/.test(e.key) && mbox.openId) {
     e.preventDefault();
     e.stopPropagation();
@@ -12802,9 +13063,74 @@ function mailMove(d) {
   if (mbox.openId && t) mailOpenThread(t.id);
   else mailRenderList();
 }
+function mailGo(where) {
+  if (where === 'labels') {
+    const sel = mailEl('.mail-labels');
+    if (sel && !sel.classList.contains('hidden')) sel.focus();
+    else mailToast('No labels yet - make one in Gmail first.', 'err');
+    return;
+  }
+  if (where === 'drafts') return mailSearch('in:drafts');
+  mailSetView(where);
+  mailFocus();
+}
+// n / p: walk the messages of the open conversation - open the one reached, bring it into
+// view. Starts from the newest, which is the one that is open.
+function mailMsgMove(d) {
+  const box = mailEl('.mr-msgs');
+  const all = box ? [...box.querySelectorAll('.mm')] : [];
+  if (!all.length) return;
+  let i = all.findIndex((x) => x.classList.contains('cur'));
+  if (i === -1) i = all.length - 1;
+  const el = all[Math.max(0, Math.min(all.length - 1, i + d))];
+  all.forEach((x) => x.classList.toggle('cur', x === el));
+  if (!el.classList.contains('open')) el.querySelector('.mm-head').click();
+  el.scrollIntoView({ block: 'start' });
+}
+function mailExpandAll(open) {
+  const box = mailEl('.mr-msgs');
+  if (!box) return;
+  box.querySelectorAll('.mm').forEach((el) => {
+    if (open && !el.classList.contains('open')) el.querySelector('.mm-head').click(); // fills its body
+    else if (!open) el.classList.remove('open');
+  });
+}
+// [ and ]: archive this one, land on its neighbour - opened, if a conversation was open.
+function mailArchiveAndMove(id, dir) {
+  const i = mbox.threads.findIndex((x) => x.id === id);
+  if (i === -1) return;
+  const wasOpen = !!mbox.openId;
+  mailRemove(id, 'archive'); // takes the row out synchronously, the API call runs on
+  const gone = !mbox.threads.some((x) => x.id === id);
+  const n = dir > 0 ? (gone ? i : i + 1) : i - 1;
+  const t = mbox.threads[n];
+  if (!t) return mailRenderList();
+  mbox.sel = n;
+  if (wasOpen) mailOpenThread(t.id);
+  else mailRenderList();
+}
 async function mailDo(act) {
   const id = mailTarget();
   switch (act) {
+    case 'msg-next':
+      return mailMsgMove(1);
+    case 'msg-prev':
+      return mailMsgMove(-1);
+    case 'expand-all':
+      return mailExpandAll(true);
+    case 'collapse-all':
+      return mailExpandAll(false);
+    case 'spam':
+      if (id) mailRemove(id, 'spam');
+      return;
+    case 'archive-next':
+    case 'archive-prev':
+      if (id) mailArchiveAndMove(id, act === 'archive-next' ? 1 : -1);
+      return;
+    case 'important':
+    case 'unimportant':
+      if (id && (await mailSetFlag(id, 'IMPORTANT', act === 'important'))) mailToast(act === 'important' ? 'Marked important' : 'Marked not important');
+      return;
     case 'next':
       return mailMove(1);
     case 'prev':
@@ -12857,6 +13183,11 @@ async function mailDo(act) {
       return mailSnippetManager();
     case 'dark':
       return mailSetReadMode();
+    case 'agent':
+      if (!id) return;
+      if (!mbox.thread || mbox.thread.id !== id) await mailOpenThread(id);
+      if (mbox.thread && mbox.thread.id === id) agentDialog(agentTargetFromThread(mbox.thread));
+      return;
     case 'refresh':
       mailLoadLabels();
       mailBadge(true);
@@ -12882,6 +13213,426 @@ async function mailDo(act) {
       }
       return;
   }
+}
+
+// ---- agent replies (agent-manager.js in main) ----
+// An external agent service of the user's own drafts a reply INSIDE the thread; nothing is
+// sent. Where it lives and its key are set in Settings and stay in the main process - this
+// side only learns whether it is set up (agentCfg), and the 🤖 buttons exist only then.
+let agentCfg = null; // { configured, endpointHost, keySet, defaultModel, operator }
+const agentJobs = new Map(); // job_id -> { id, threadId, subject, status, at, hint, model, dry, ...final fields }
+const AGENT_POLL_MS = 6000;
+const AGENT_GIVE_UP_MS = 30 * 60 * 1000; // a job may queue 15 min behind another, then run
+const AGENT_STORE = 'cockpit.agentJobs'; // running job ids, so a restart keeps watching them
+const AGENT_STATUS = {
+  sending: ['⏳', 'Sending the request…'],
+  queued: ['⏳', 'Queued - waiting for the agent'],
+  running: ['🤖', 'The agent is writing a draft…'],
+  done: ['✅', 'Draft ready in the thread'],
+  'dry-run': ['🧪', 'Dry run - the service did not start the agent'],
+  failed: ['⚠', 'The agent failed - no draft'],
+  timeout: ['⚠', 'The agent ran out of time - no draft'],
+  'lock-timeout': ['⚠', 'Waited too long behind another job - no draft'],
+  lost: ['❔', 'Stopped watching - check the thread in a while'],
+  error: ['⚠', 'Could not start it'],
+};
+const agentFinal = (s) => ['done', 'dry-run', 'failed', 'timeout', 'lock-timeout', 'lost', 'error'].includes(s);
+
+async function agentRefreshConfig() {
+  try {
+    const r = await api.agentGetConfig();
+    agentCfg = r && r.ok ? r.config : null;
+  } catch (_) {
+    agentCfg = null;
+  }
+  return agentCfg;
+}
+function agentReady() {
+  return !!(agentCfg && agentCfg.configured);
+}
+function agentJobFor(threadId) {
+  let best = null;
+  for (const j of agentJobs.values()) if (j.threadId === threadId && (!best || j.at > best.at)) best = j;
+  return best;
+}
+function agentSavePending() {
+  try {
+    const keep = [...agentJobs.values()]
+      .filter((j) => !agentFinal(j.status) && j.id)
+      .map(({ id, threadId, subject, at, model }) => ({ id, threadId, subject, at, model }));
+    localStorage.setItem(AGENT_STORE, JSON.stringify(keep));
+  } catch (_) {
+    /* only a convenience */
+  }
+}
+
+// What to answer in an open thread: the newest message that is not ours and not a draft -
+// the one a reply is FOR. Falls back to the last message.
+function agentTargetFromThread(thread) {
+  const msgs = (thread && thread.messages) || [];
+  const me = String(googleEmail || '').toLowerCase();
+  const real = msgs.filter((m) => !(m.labelIds || []).includes('DRAFT'));
+  const theirs = real.filter((m) => !me || mailAddr(m.from).toLowerCase() !== me);
+  const m = theirs[theirs.length - 1] || real[real.length - 1] || msgs[msgs.length - 1];
+  if (!m) return null;
+  return {
+    gmail_id: m.id,
+    thread_id: m.threadId || thread.id,
+    message_id: m.messageId || '',
+    subject: m.subject || (msgs[0] && msgs[0].subject) || '',
+    from: m.from || '',
+    to: m.to || '',
+    cc: m.cc || '',
+    date: m.date || '',
+  };
+}
+
+// The dialog: guidance, model, dry run. One at a time.
+async function agentDialog(target) {
+  if (!target) return;
+  await agentRefreshConfig();
+  if (!agentReady()) {
+    openSettings();
+    return;
+  }
+  document.getElementById('agent-overlay')?.remove();
+  const prev = agentJobFor(target.thread_id);
+  const ov = document.createElement('div');
+  ov.id = 'agent-overlay';
+  ov.innerHTML =
+    '<div class="agent-dlg" role="dialog" aria-label="Agent reply">' +
+    '<div class="agent-head">🤖 Agent reply</div>' +
+    `<div class="agent-ctx"><b>${escapeHtml(target.subject || '(no subject)')}</b><br />` +
+    `${escapeHtml(shortFrom(target.from) || target.from || '')}</div>` +
+    '<label class="agent-lab">Guidance for the reply <span class="agent-count"></span></label>' +
+    '<textarea class="agent-hint" rows="6" maxlength="4000" placeholder="Empty = the agent works out what the sender needs.&#10;e.g. thank them, confirm the order, ask for the host id"></textarea>' +
+    '<div class="agent-row">' +
+    '<label class="agent-lab">Model <select class="agent-model"><option value="">loading…</option></select></label>' +
+    '<label class="agent-check"><input type="checkbox" class="agent-dry" /> Dry run (an internal note, nothing for the sender)</label>' +
+    '</div>' +
+    '<div class="agent-err"></div>' +
+    '<div class="agent-foot">' +
+    '<span class="agent-note">It leaves a draft in the thread - nothing is sent.</span>' +
+    '<button class="mail-btn" data-a="cancel">Cancel</button>' +
+    '<button class="mail-btn mail-primary" data-a="go" title="Ctrl+Enter">Draft it</button>' +
+    '</div></div>';
+  document.body.appendChild(ov);
+  const $ = (s) => ov.querySelector(s);
+  const hint = $('.agent-hint');
+  const count = $('.agent-count');
+  const sel = $('.agent-model');
+  const err = $('.agent-err');
+  const go = $('[data-a="go"]');
+  // A retry starts from what was asked last time.
+  if (prev && prev.hint) hint.value = prev.hint;
+  if (prev && prev.dry) $('.agent-dry').checked = true;
+  const paintCount = () => {
+    const n = hint.value.length;
+    count.textContent = n ? n + ' / 4000' : '';
+  };
+  hint.addEventListener('input', paintCount);
+  paintCount();
+  const close = () => ov.remove();
+  ov.addEventListener('mousedown', (e) => {
+    if (e.target === ov) close();
+  });
+  ov.addEventListener('keydown', (e) => {
+    e.stopPropagation(); // the mail keys and global shortcuts stay out of the dialog
+    if (e.key === 'Escape') close();
+    else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) go.click();
+  });
+  $('[data-a="cancel"]').addEventListener('click', close);
+  go.addEventListener('click', async () => {
+    go.disabled = true;
+    err.textContent = '';
+    const ok = await agentStart(target, { hint: hint.value.trim(), model: sel.value, dry: $('.agent-dry').checked });
+    if (ok === true) close();
+    else {
+      err.textContent = ok;
+      go.disabled = false;
+    }
+  });
+  setTimeout(() => hint.focus(), 0);
+  // The dropdown comes from the service, so a model it adds shows up without an update here.
+  const r = await api.agentModels().catch((e) => ({ ok: false, error: String(e) }));
+  if (!ov.isConnected) return;
+  sel.innerHTML = '';
+  if (!r || !r.ok) {
+    sel.innerHTML = '<option value="">the service default</option>';
+    err.textContent = 'Could not load the models: ' + ((r && r.error) || 'unknown');
+    return;
+  }
+  const want = (prev && prev.model) || agentCfg.defaultModel || r.default || '';
+  const entries = Object.entries(r.models || {});
+  if (!entries.length) sel.innerHTML = '<option value="">the service default</option>';
+  for (const [key, id] of entries) {
+    const o = document.createElement('option');
+    o.value = key;
+    o.textContent = key + (id && id !== key ? '  (' + id + ')' : '') + (id === r.default ? '  - default' : '');
+    if (want === key || want === id) o.selected = true;
+    sel.appendChild(o);
+  }
+}
+
+// Returns true, or the reason it did not start.
+async function agentStart(target, { hint, model, dry }) {
+  const payload = { ...target, dry_run: !!dry };
+  if (hint) payload.hint = hint;
+  if (model) payload.model = model;
+  const r = await api.agentStart(payload).catch((e) => ({ ok: false, error: String(e) }));
+  if (!r || !r.ok) return (r && r.error) || 'unknown error';
+  const job = agentJobs.get(r.job_id) || {
+    id: r.job_id,
+    threadId: target.thread_id,
+    subject: target.subject,
+    at: Date.now(),
+  };
+  Object.assign(job, { status: job.status && !agentFinal(job.status) ? job.status : 'queued', hint, model: model || r.model, dry: !!dry, already: r.already });
+  agentJobs.set(job.id, job);
+  agentSavePending();
+  agentPaint();
+  if (!job.polling) agentPoll(job, 3000);
+  return true;
+}
+
+function agentPoll(job, delay) {
+  job.polling = true;
+  setTimeout(async () => {
+    if (Date.now() - job.at > AGENT_GIVE_UP_MS) {
+      job.status = 'lost';
+      job.polling = false;
+      agentSavePending();
+      return agentPaint();
+    }
+    const r = await api.agentJob(job.id).catch((e) => ({ ok: false, error: String(e) }));
+    if (r && r.ok && r.job) {
+      job.fails = 0;
+      const was = job.status;
+      Object.assign(job, {
+        status: r.job.status || job.status,
+        summary: r.job.summary || '',
+        draft: r.job.draft || '',
+        cost: r.job.cost_usd,
+        duration: r.job.duration_s,
+        modelUsed: r.job.model_used || r.job.model || job.model,
+      });
+      if (r.job.final) {
+        job.polling = false;
+        agentSavePending();
+        agentPaint();
+        return agentFinished(job);
+      }
+      if (was !== job.status) agentPaint();
+    } else if (/unknown job/i.test((r && r.error) || '')) {
+      job.status = 'lost';
+      job.polling = false;
+      agentSavePending();
+      return agentPaint();
+    } else {
+      job.fails = (job.fails || 0) + 1; // the network blinks; keep watching, just slower
+      job.lastError = (r && r.error) || '';
+    }
+    agentPoll(job, AGENT_POLL_MS * Math.min(4, 1 + (job.fails || 0)));
+  }, delay);
+}
+
+function agentFinished(job) {
+  // A draft in the open thread: load it again so the draft is right there.
+  if (job.status === 'done' && mbox.thread && mbox.thread.id === job.threadId) mailOpenThread(job.threadId);
+  const looking = document.hasFocus() && mailRec() && activeTabId === mailRec().id && mbox.openId === job.threadId;
+  if (looking) return;
+  const good = job.status === 'done';
+  try {
+    const n = new Notification((good ? '🤖 Draft ready - ' : '🤖 No draft - ') + (job.subject || '(no subject)'), {
+      body: job.summary || AGENT_STATUS[job.status][1],
+      silent: true,
+    });
+    n.onclick = () => {
+      api.focusWindow();
+      if (good && job.draft) agentReview(job);
+      else createMailTab({ threadId: job.threadId });
+    };
+  } catch (_) {
+    /* notifications off */
+  }
+}
+
+// The draft the agent left, in compose: the thread beside it, edit, send with undo.
+async function agentReview(job) {
+  if (!job || !job.draft) return;
+  const rec = mailRec();
+  if (!rec) createMailTab();
+  else if (activeTabId !== rec.id) activateTab(rec.id);
+  if (!mbox.thread || mbox.thread.id !== job.threadId) await mailOpenThread(job.threadId);
+  return mailEditDraft({ draftId: job.draft }, { agentJob: job.id });
+}
+// One painter for every place a job shows: the reader strip and the sidebar buttons.
+function agentPaint() {
+  agentPaintReader();
+  document.querySelectorAll('.gmail-agent[data-thread]').forEach((b) => agentPaintBoardBtn(b));
+}
+function agentBoardBtn(m) {
+  const ag = document.createElement('button');
+  ag.className = 'gmail-tag gmail-agent';
+  ag.dataset.thread = m.threadId;
+  agentPaintBoardBtn(ag);
+  ag.addEventListener('click', (e) => {
+    e.stopPropagation(); // don't open the email
+    hideGmailPreview();
+    agentDialog({ gmail_id: m.id, thread_id: m.threadId, subject: m.subject, from: m.from });
+  });
+  return ag;
+}
+// The board can paint before the config has arrived (boot), or outlive it (Forget):
+// add or drop the buttons on the rows already there instead of waiting for the next fetch.
+function agentSyncBoard() {
+  for (const item of document.querySelectorAll('#gmail-items .gmail-item')) {
+    const has = item.querySelector('.gmail-agent');
+    if (!agentReady()) {
+      if (has) has.remove();
+    } else if (!has && item._msg && item._msg.threadId) {
+      const acts = item.querySelector('.gmail-actions');
+      if (acts) acts.insertBefore(agentBoardBtn(item._msg), acts.querySelector('.gmail-del'));
+    }
+  }
+}
+function agentPaintBoardBtn(b) {
+  const j = agentJobFor(b.dataset.thread);
+  const s = j ? j.status : '';
+  b.textContent = !j ? '🤖' : agentFinal(s) ? (s === 'done' ? '✓' : '⚠') : '⏳';
+  b.title = j ? AGENT_STATUS[s][1] + (j.summary ? '\n' + j.summary : '') + '\nClick: ask again' : 'Agent reply: draft an answer';
+}
+function agentPaintReader() {
+  const reader = mailEl('.mail-reader');
+  if (!reader || !mbox.thread) return;
+  const btn = reader.querySelector('.mr-agentbtn');
+  const j = agentJobFor(mbox.thread.id);
+  if (btn) btn.classList.toggle('busy', !!j && !agentFinal(j.status));
+  let strip = reader.querySelector('.mr-agent');
+  if (!j || j.hidden) return strip && strip.remove();
+  if (!strip) {
+    strip = document.createElement('div');
+    strip.className = 'mr-agent';
+    const subj = reader.querySelector('.mr-subject');
+    if (subj) subj.after(strip);
+    else reader.prepend(strip);
+    strip.addEventListener('click', (e) => {
+      const a = e.target.closest('[data-ag]');
+      if (!a) return;
+      const job = agentJobs.get(strip.dataset.job);
+      if (!job) return;
+      if (a.dataset.ag === 'hide') {
+        job.hidden = true;
+        strip.remove();
+      } else if (a.dataset.ag === 'again') agentDialog(agentTargetFromThread(mbox.thread));
+      else if (a.dataset.ag === 'gmail') api.openExternal('https://mail.google.com/mail/u/0/#all/' + job.threadId);
+      else if (a.dataset.ag === 'reload') mailOpenThread(job.threadId);
+      else if (a.dataset.ag === 'review') agentReview(job);
+    });
+  }
+  strip.dataset.job = j.id;
+  const bar = reader.querySelector('.mr-bar');
+  if (bar && bar.offsetHeight) reader.style.setProperty('--mr-bar-h', bar.offsetHeight + 'px'); // sticky offset
+  const [icon, text] = AGENT_STATUS[j.status] || ['🤖', j.status];
+  const fin = agentFinal(j.status);
+  const facts = [
+    j.modelUsed || j.model,
+    j.duration ? Math.round(j.duration) + ' s' : '',
+    typeof j.cost === 'number' ? '$' + j.cost.toFixed(2) : '',
+    j.already ? 'same request as before - its job' : '',
+    !fin && j.fails ? 'the service is not answering, still trying' : '',
+  ].filter(Boolean);
+  strip.className = 'mr-agent ' + (j.status === 'done' ? 'ok' : fin ? 'bad' : 'run');
+  strip.innerHTML =
+    `<span class="ag-icon">${icon}</span><div class="ag-text"><b>${escapeHtml(text)}</b>` +
+    (j.dry ? ' <span class="ag-tag">dry run</span>' : '') +
+    (j.summary ? `<div class="ag-sum">${escapeHtml(j.summary)}</div>` : '') +
+    (facts.length ? `<div class="ag-facts">${escapeHtml(facts.join(' · '))}</div>` : '') +
+    '</div><span class="ag-acts">' +
+    (j.status === 'done' && j.draft ? '<button class="mail-btn mail-primary" data-ag="review" title="Open the draft to edit and send it here">✏ Review</button>' : '') +
+    (j.status === 'done' ? '<button class="mail-btn" data-ag="reload" title="Load the thread again">↻ Show</button><button class="mail-btn" data-ag="gmail">Gmail ↗</button>' : '') +
+    (fin && j.status !== 'done' ? '<button class="mail-btn" data-ag="again">Try again</button>' : '') +
+    (fin ? '<button class="mail-btn" data-ag="hide" title="Hide">✕</button>' : '') +
+    '</span>';
+}
+
+// Settings -> Agent reply. The key field is write-only: it shows whether a key is set, never it.
+async function agentSettingsLoad() {
+  const c = (await agentRefreshConfig()) || {};
+  const $ = (id) => document.getElementById(id);
+  if (!$('set-agent-endpoint')) return;
+  $('set-agent-endpoint').value = '';
+  $('set-agent-endpoint').placeholder = c.endpointSet ? 'set (' + c.endpointHost + ') - type to replace' : 'https://…';
+  $('set-agent-key').value = '';
+  $('set-agent-key').placeholder = c.keySet ? 'set - type to replace' : 'API key';
+  $('set-agent-model').value = c.defaultModel || '';
+  $('set-agent-operator').value = c.operator || '';
+  $('set-agent-status').textContent = c.configured
+    ? 'Set up for ' + c.endpointHost + '. The 🤖 button is in the mail reader and on the Inbox board.'
+    : 'Not set up. Only you have the address and the key - they are stored encrypted on this computer.';
+}
+function agentSettingsWire() {
+  const $ = (id) => document.getElementById(id);
+  if (!$('set-agent-save')) return;
+  const out = $('set-agent-status');
+  const save = async () => {
+    const p = { defaultModel: $('set-agent-model').value.trim(), operator: $('set-agent-operator').value.trim() };
+    const e = $('set-agent-endpoint').value.trim();
+    const k = $('set-agent-key').value.trim();
+    if (e) p.endpoint = e; // empty = keep what is stored
+    if (k) p.key = k;
+    const r = await api.agentSetConfig(p);
+    if (!r || !r.ok) {
+      out.textContent = '⚠ ' + ((r && r.error) || 'not saved');
+      return false;
+    }
+    await agentSettingsLoad();
+    if (mbox.thread) mailRenderThread();
+    agentSyncBoard();
+    return true;
+  };
+  $('set-agent-save').addEventListener('click', save);
+  $('set-agent-test').addEventListener('click', async () => {
+    if (!(await save())) return;
+    out.textContent = 'Asking the service…';
+    const r = await api.agentModels();
+    out.textContent =
+      r && r.ok
+        ? '✓ Connected. Models: ' + Object.keys(r.models || {}).join(', ') + (r.default ? ' (default ' + r.default + ')' : '')
+        : '⚠ ' + ((r && r.error) || 'no answer');
+  });
+  $('set-agent-forget').addEventListener('click', async () => {
+    await api.agentSetConfig({ endpoint: '', key: '', defaultModel: '', operator: '' });
+    await agentSettingsLoad();
+    if (mbox.thread) mailRenderThread();
+    agentSyncBoard();
+  });
+}
+function agentInit() {
+  agentSettingsWire();
+  agentRefreshConfig().then(() => {
+    agentSyncBoard();
+    if (!agentReady()) return; // not set up: leave any saved jobs for when it is
+    if (mbox.thread) mailRenderThread();
+    agentResume();
+  });
+}
+// Jobs that were running when Cockpit last closed: the service kept going, so keep watching.
+function agentResume() {
+  let saved = [];
+  try {
+    saved = JSON.parse(localStorage.getItem(AGENT_STORE) || '[]') || [];
+  } catch (_) {
+    saved = [];
+  }
+  for (const s of saved) {
+    if (!s || !s.id || agentJobs.has(s.id) || Date.now() - (s.at || 0) > AGENT_GIVE_UP_MS) continue;
+    const job = { ...s, status: 'queued' };
+    agentJobs.set(job.id, job);
+    agentPoll(job, 4000);
+  }
+  agentSavePending();
+  agentPaint();
 }
 
 // ---- compose / reply / forward ----
@@ -12931,7 +13682,9 @@ function mailQuote(m) {
 // own address and anyone already in To, and never lists an address twice.
 function mailReplyDraft(thread, mode) {
   const msgs = thread.messages || [];
-  const last = msgs[msgs.length - 1] || {};
+  // A draft in the thread (an agent's, say) is not what a reply answers.
+  const real = msgs.filter((m) => !(m.labelIds || []).includes('DRAFT'));
+  const last = real[real.length - 1] || msgs[msgs.length - 1] || {};
   const me = String(googleEmail || '').toLowerCase();
   const addr = (s) => mailAddr(s).toLowerCase();
   const subj = last.subject || (msgs[0] && msgs[0].subject) || '';
@@ -12975,6 +13728,102 @@ function mailReplyDraft(thread, mode) {
     body: '\n\n' + mailQuote(last),
   };
 }
+// ---- a Gmail draft in compose (an agent's, or any draft in the thread) ----
+// Opens the draft itself: its recipients, subject, text, threading headers and files. Send
+// goes through the normal path (undo-send included) and the main process deletes the Gmail
+// draft once the mail has really gone. `html` is the draft's own formatting; it is sent only
+// while the text is untouched - compose edits plain text, and an edited text next to the old
+// HTML would be two different messages in one.
+async function mailEditDraft(ref, extra) {
+  if (!mailRec()) createMailTab();
+  if (mbox.draft && mailDraftDirty() && !window.confirm('Discard the message you are writing?')) return false;
+  const r = await api.mailGetDraft(ref);
+  if (!r || !r.ok) {
+    mailToast('Could not open the draft: ' + mailStaleMain((r && r.error) || 'unknown'), 'err');
+    return false;
+  }
+  const m = r.message || {};
+  let inReplyTo = m.inReplyTo || '';
+  let references = m.references || '';
+  if (!inReplyTo && mbox.thread && mbox.thread.id === m.threadId) {
+    // a draft written without threading headers still answers the thread's last real mail
+    const real = mbox.thread.messages.filter((x) => !(x.labelIds || []).includes('DRAFT'));
+    const last = real[real.length - 1];
+    if (last) {
+      inReplyTo = last.messageId || '';
+      references = [last.references, last.messageId].filter(Boolean).join(' ').trim();
+    }
+  }
+  const body = mailBodyText(m);
+  mbox.draft = null; // asked above; mailCompose must not ask again
+  mailCompose({
+    mode: 'draft',
+    to: m.to || '',
+    cc: m.cc || '',
+    bcc: m.bcc || '',
+    subject: m.subject || '',
+    body,
+    bodyOrig: body,
+    html: m.html && !/\bcid:/i.test(m.html) ? m.html : '', // inline pictures cannot be carried over
+    threadId: m.threadId || '',
+    inReplyTo,
+    references,
+    draftId: r.draftId,
+    draftMsgId: m.id,
+    attachFrom: m,
+    noSig: true, // it has its own
+    ...(extra || {}),
+  });
+  return true;
+}
+// An update reloads the page but not the main process: its new handlers are missing until a restart.
+function mailStaleMain(err) {
+  return /No handler registered/i.test(String(err || '')) ? 'Cockpit was updated - restart it to finish' : err;
+}
+function mailDraftNote() {
+  const d = mbox.draft;
+  const el = mailEl('.mc-draftnote');
+  if (!d || !el) return;
+  el.textContent = !d.html ? 'Gmail draft' : d.body === d.bodyOrig ? 'Gmail draft · sends with its formatting' : 'Gmail draft · edited, sends as plain text';
+}
+async function mailSaveDraftNow() {
+  const d = mbox.draft;
+  if (!d || !d.draftId || d.saving) return;
+  d.saving = true;
+  mailComposeStatus('Saving to Gmail…');
+  if (d.pending) await d.pending;
+  // A file that could not be fetched would be missing from what gets written back - and the
+  // Gmail draft still has it. Saving must never lose it quietly.
+  const lost = d.attachments.filter((a) => a.failed);
+  if (lost.length) {
+    d.saving = false;
+    return mailComposeStatus('Not saved: could not fetch ' + lost.map((a) => a.name).join(', ') + ' - saving would drop it from the draft.', true);
+  }
+  const atts = d.attachments.filter((a) => a.b64);
+  const r = await api.mailSaveDraft(mailSendPayload(d, atts));
+  d.saving = false;
+  if (!r || !r.ok) return mbox.draft === d && mailComposeStatus('Not saved: ' + mailStaleMain((r && r.error) || 'unknown'), true);
+  // Saved is done: the edit window closes, the thread shows the saved draft.
+  if (mbox.draft === d) {
+    mbox.draft = null;
+    mailRenderCompose();
+    mailFocus();
+  }
+  mailToast('Saved to Gmail Drafts');
+  if (mbox.openId && mbox.openId === d.threadId) mailOpenThread(mbox.openId);
+}
+async function mailDeleteDraftNow() {
+  const d = mbox.draft;
+  if (!d || !d.draftId) return;
+  if (!window.confirm('Delete this draft from Gmail?')) return;
+  const r = await api.mailDeleteDraft(d.draftId);
+  if (!r || !r.ok) return mailComposeStatus('Not deleted: ' + mailStaleMain((r && r.error) || 'unknown'), true);
+  if (mbox.draft === d) mbox.draft = null;
+  mailRenderCompose();
+  mailToast('Draft deleted');
+  if (mbox.openId && mbox.openId === d.threadId) mailOpenThread(mbox.openId);
+  mailFocus();
+}
 function mailDraftSnap(d) {
   return JSON.stringify([d.to, d.cc, d.bcc, d.subject, d.body, d.attachments.length]);
 }
@@ -13000,9 +13849,10 @@ function mailCompose(init) {
   const d = Object.assign({ mode: 'new', to: '', cc: '', bcc: '', subject: '', body: '', attachments: [] }, init || {});
   d.attachments = [];
   mbox.draft = d;
-  // Forwarding brings the original's files along; fetch them now, send waits for them.
-  if (d.forwardOf) {
-    const src = d.forwardOf;
+  // Forwarding brings the original's files along, and a draft keeps its own; fetch them
+  // now, send waits for them.
+  if (d.forwardOf || d.attachFrom) {
+    const src = d.forwardOf || d.attachFrom;
     const files = (src.attachments || []).filter((a) => !a.inline);
     let total = 0;
     for (const a of files) {
@@ -13037,10 +13887,13 @@ function mailRenderCompose() {
     box.innerHTML = '';
     return;
   }
-  const title = d.mode === 'reply' ? 'Reply' : d.mode === 'replyall' ? 'Reply all' : d.mode === 'forward' ? 'Forward' : 'New message';
+  const title =
+    d.mode === 'reply' ? 'Reply' : d.mode === 'replyall' ? 'Reply all' : d.mode === 'forward' ? 'Forward' : d.mode === 'draft' ? (d.agentJob ? '🤖 Agent draft' : '✏ Draft') : 'New message';
   const showCc = !!(d.cc || d.bcc);
   box.innerHTML =
-    `<div class="mc-head"><span>${title}</span><span class="mail-spacer"></span>` +
+    `<div class="mc-head"><span>${title}</span>` +
+    (d.draftId ? '<span class="mc-draftnote"></span>' : '') +
+    '<span class="mail-spacer"></span>' +
     '<button class="mail-x" data-act="close" title="Close (Esc)">✕</button></div>' +
     '<div class="mc-banner hidden">Sending needs one more permission. Reconnect Google in Settings and allow Gmail send - reading keeps working meanwhile. <button class="mail-btn" data-act="settings">Open Settings</button></div>' +
     '<label class="mc-field"><span>To</span><input data-f="to" type="text" spellcheck="false" />' +
@@ -13052,7 +13905,12 @@ function mailRenderCompose() {
     '<div class="mc-atts"></div>' +
     '<div class="mc-foot"><button class="mail-btn mail-primary" data-act="send" title="Send (Ctrl+Enter)">Send</button>' +
     '<button class="mail-btn" data-act="attach" title="Attach a file">📎 Attach</button>' +
+    '<button class="mail-btn" data-act="attach-shell" title="Attach a file from a terminal - it comes through the shell, so any ssh depth works">📎 From a terminal</button>' +
     '<button class="mail-btn" data-act="snip" title="Insert a snippet (;; or Ctrl+Space)">✂ Snippet</button>' +
+    (d.draftId
+      ? '<button class="mail-btn" data-act="save-draft" title="Write your changes back to the Gmail draft (Ctrl+S)">💾 Save draft</button>' +
+        '<button class="mail-btn" data-act="del-draft" title="Delete the draft from Gmail">🗑</button>'
+      : '') +
     `<span class="mc-undo" title="Undo send - change it in Settings → Google">${mailUndoSec ? '↶ ' + mailUndoSec + ' s to undo' : ''}</span>` +
     '<span class="mc-status"></span></div>' +
     '<div class="mc-suggest hidden"></div>';
@@ -13061,6 +13919,7 @@ function mailRenderCompose() {
     inp.addEventListener('input', () => {
       d[inp.dataset.f] = inp.value;
       if (/^(to|cc|bcc)$/.test(inp.dataset.f)) mailSigRefresh(); // colleague or not decides the signature
+      else if (inp.dataset.f === 'body' && d.draftId) mailDraftNote();
     });
   });
   box.onclick = (e) => {
@@ -13071,7 +13930,10 @@ function mailRenderCompose() {
     if (act === 'close') mailCloseCompose();
     else if (act === 'send') mailSend();
     else if (act === 'attach') mailAttach();
+    else if (act === 'attach-shell') mailAttachFromShell(b);
     else if (act === 'snip') mailSnippetPicker(box.querySelector('.mc-body'), 0);
+    else if (act === 'save-draft') mailSaveDraftNow();
+    else if (act === 'del-draft') mailDeleteDraftNow();
     else if (act === 'settings') openSettings();
     else if (act === 'cc') {
       box.querySelectorAll('[data-row]').forEach((r) => r.classList.remove('hidden'));
@@ -13087,6 +13949,10 @@ function mailRenderCompose() {
       e.preventDefault();
       e.stopPropagation();
       mailSend();
+    } else if ((e.key === 's' || e.key === 'S') && (e.ctrlKey || e.metaKey) && d.draftId) {
+      e.preventDefault();
+      e.stopPropagation();
+      mailSaveDraftNow();
     } else if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
@@ -13096,6 +13962,7 @@ function mailRenderCompose() {
   box.classList.remove('hidden');
   mailRenderAtts();
   mailRenderBanner();
+  mailDraftNote();
   const body = box.querySelector('.mc-body');
   body.addEventListener('keydown', mailBodyKeydown);
   body.addEventListener('input', mailBodyInput);
@@ -13141,7 +14008,8 @@ async function mailCheckSend() {
   mailRenderBanner();
 }
 function mailCloseCompose() {
-  if (mailDraftDirty() && !window.confirm('Discard the message you are writing?')) return;
+  const ask = mbox.draft && mbox.draft.draftId ? 'Close without saving? The draft in Gmail stays as it was.' : 'Discard the message you are writing?';
+  if (mailDraftDirty() && !window.confirm(ask)) return;
   mbox.draft = null;
   mailRenderCompose();
   mailFocus();
@@ -13185,6 +14053,8 @@ function mailSendPayload(d, atts) {
     inReplyTo: d.inReplyTo,
     references: d.references,
     attachments: atts.map((a) => ({ name: a.name, mimeType: a.mimeType, b64: a.b64 })),
+    ...(d.draftId ? { draftId: d.draftId } : {}),
+    ...(d.html && d.body === d.bodyOrig ? { html: d.html } : {}),
   };
 }
 async function mailSend() {
@@ -13198,6 +14068,11 @@ async function mailSend() {
   d.sending = true;
   mailComposeStatus('Sending…');
   if (d.pending) await d.pending;
+  const coming = d.attachments.filter((a) => a.b64 == null && !a.failed);
+  if (coming.length) {
+    d.sending = false;
+    return mailComposeStatus('Still fetching ' + coming.map((a) => a.name).join(', ') + ' - send once it is attached.', true);
+  }
   const atts = d.attachments.filter((a) => a.b64);
   const res = await api.mailSend({ ...mailSendPayload(d, atts), delayMs: Math.max(0, mailUndoSec) * 1000 });
   d.sending = false;
@@ -13221,8 +14096,14 @@ async function mailSend() {
 }
 function mailAfterSent(d, res, sentAtts) {
   const missing = d.attachments.length - sentAtts;
-  mailToast('Sent' + (missing > 0 ? ' - without ' + missing + ' file(s) that could not be fetched' : ''));
-  const offer = mailLearnFromSent(d);
+  mailToast(
+    'Sent' +
+      (missing > 0 ? ' - without ' + missing + ' file(s) that could not be fetched' : '') +
+      (res.draftDeleted === false ? ' - the Gmail draft is still there, delete it by hand' : '') +
+      // no answer about it at all: a main process older than this page (updated, not restarted)
+      (d.draftId && res.draftDeleted === undefined ? ' - the Gmail draft is still there: restart Cockpit to finish updating' : '')
+  );
+  const offer = d.mode === 'draft' ? null : mailLearnFromSent(d); // a draft's text is not yours to learn from
   if (offer && missing <= 0) mailOfferLearn(offer); // a missing-file warning is more important
   logEvent('mail', {
     title: 'sent · ' + (d.subject || '(no subject)'),
@@ -14009,6 +14890,1015 @@ function mailSigRefresh() {
     ta.value = body;
     ta.setSelectionRange(Math.min(pos, body.length), Math.min(pos, body.length));
   }
+}
+
+// ---- invitations in the reader ----
+// A mail with a calendar invitation (a text/calendar part, or an .ics file) gets a card:
+// what, when in YOUR time, where, who - whether it clashes with your calendar - and
+// Accept / Maybe / Decline. With the calendar-events permission the answer goes on your
+// Google Calendar copy (which tells the organizer); without it, or for an event Gmail did
+// not put in your calendar, it goes as the standard iTIP REPLY by mail to the organizer.
+// Outlook names its zones the Windows way; the usual ones, mapped to what Intl knows.
+const MAIL_WIN_ZONES = {
+  'W. Europe Standard Time': 'Europe/Berlin',
+  'Central Europe Standard Time': 'Europe/Budapest',
+  'Central European Standard Time': 'Europe/Warsaw',
+  'Romance Standard Time': 'Europe/Paris',
+  'GMT Standard Time': 'Europe/London',
+  'Greenwich Standard Time': 'Atlantic/Reykjavik',
+  'E. Europe Standard Time': 'Europe/Chisinau',
+  'FLE Standard Time': 'Europe/Kiev',
+  'GTB Standard Time': 'Europe/Bucharest',
+  'Russian Standard Time': 'Europe/Moscow',
+  'Turkey Standard Time': 'Europe/Istanbul',
+  'Israel Standard Time': 'Asia/Jerusalem',
+  'South Africa Standard Time': 'Africa/Johannesburg',
+  'Arabian Standard Time': 'Asia/Dubai',
+  'India Standard Time': 'Asia/Kolkata',
+  'China Standard Time': 'Asia/Shanghai',
+  'Singapore Standard Time': 'Asia/Singapore',
+  'Tokyo Standard Time': 'Asia/Tokyo',
+  'Korea Standard Time': 'Asia/Seoul',
+  'W. Australia Standard Time': 'Australia/Perth',
+  'AUS Eastern Standard Time': 'Australia/Sydney',
+  'New Zealand Standard Time': 'Pacific/Auckland',
+  'Eastern Standard Time': 'America/New_York',
+  'Central Standard Time': 'America/Chicago',
+  'Mountain Standard Time': 'America/Denver',
+  'US Mountain Standard Time': 'America/Phoenix',
+  'Pacific Standard Time': 'America/Los_Angeles',
+  'Alaskan Standard Time': 'America/Anchorage',
+  'Hawaiian Standard Time': 'Pacific/Honolulu',
+  'Atlantic Standard Time': 'America/Halifax',
+  'E. South America Standard Time': 'America/Sao_Paulo',
+  UTC: 'UTC',
+};
+const MAIL_RSVP = {
+  accept: { google: 'accepted', partstat: 'ACCEPTED', word: 'Accepted', did: 'accepted' },
+  maybe: { google: 'tentative', partstat: 'TENTATIVE', word: 'Tentatively accepted', did: 'said maybe to' },
+  decline: { google: 'declined', partstat: 'DECLINED', word: 'Declined', did: 'declined' },
+};
+function mailIcsUnescape(v) {
+  return String(v || '').replace(/\\([\\;,nN])/g, (_, c) => (c === 'n' || c === 'N' ? '\n' : c));
+}
+// NAME;P1=a;P2="b;c":value - the value starts at the first ':' outside quotes.
+function mailIcsProp(line) {
+  let q = false;
+  let i = 0;
+  for (; i < line.length; i++) {
+    if (line[i] === '"') q = !q;
+    else if (line[i] === ':' && !q) break;
+  }
+  const head = line.slice(0, i);
+  const value = line.slice(i + 1);
+  const parts = [];
+  let cur = '';
+  q = false;
+  for (const ch of head) {
+    if (ch === '"') q = !q;
+    if (ch === ';' && !q) {
+      parts.push(cur);
+      cur = '';
+    } else cur += ch;
+  }
+  parts.push(cur);
+  const params = {};
+  for (const p of parts.slice(1)) {
+    const k = p.indexOf('=');
+    if (k > 0) params[p.slice(0, k).toUpperCase()] = p.slice(k + 1).replace(/^"|"$/g, '');
+  }
+  return { name: parts[0].toUpperCase(), params, value, raw: line };
+}
+function mailIcsPerson(p) {
+  return { email: String(p.value || '').replace(/^mailto:/i, '').trim().toLowerCase(), name: p.params.CN || '', partstat: (p.params.PARTSTAT || '').toUpperCase() };
+}
+function mailParseIcs(text) {
+  const lines = String(text || '').replace(/\r\n/g, '\n').replace(/\n[ \t]/g, '').split('\n'); // unfold first
+  const out = { method: '', events: [], vtz: {}, vtimezoneLines: [] };
+  const stack = [];
+  let ev = null;
+  let tz = null;
+  let tzPart = null;
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const p = mailIcsProp(line);
+    if (p.name === 'BEGIN') {
+      stack.push(p.value.toUpperCase());
+      if (p.value.toUpperCase() === 'VEVENT') ev = { attendees: [], raw: {} };
+      if (p.value.toUpperCase() === 'VTIMEZONE') tz = { lines: [], parts: [] };
+      if (tz) {
+        tz.lines.push(line);
+        if (/^(STANDARD|DAYLIGHT)$/i.test(p.value)) tzPart = { kind: p.value.toUpperCase() };
+      }
+      continue;
+    }
+    if (p.name === 'END') {
+      const what = stack.pop();
+      if (tz) {
+        tz.lines.push(line);
+        if (tzPart && (what === 'STANDARD' || what === 'DAYLIGHT')) {
+          tz.parts.push(tzPart);
+          tzPart = null;
+        }
+        if (what === 'VTIMEZONE') {
+          if (tz.tzid) out.vtz[tz.tzid] = tz;
+          out.vtimezoneLines.push(...tz.lines);
+          tz = null;
+        }
+      }
+      if (what === 'VEVENT' && ev) {
+        out.events.push(ev);
+        ev = null;
+      }
+      continue;
+    }
+    const top = stack[stack.length - 1];
+    if (tz) {
+      tz.lines.push(line);
+      if (tzPart) {
+        if (p.name === 'TZOFFSETTO') {
+          const m = /^([+-])(\d{2})(\d{2})/.exec(p.value.trim());
+          if (m) tzPart.offset = (m[1] === '-' ? -1 : 1) * (+m[2] * 60 + +m[3]);
+        }
+        // the month the change happens: Outlook writes DTSTART 16010101 and puts it in the rule
+        if (p.name === 'DTSTART' && !tzPart.byMonth) tzPart.month = +p.value.slice(4, 6);
+        if (p.name === 'RRULE') {
+          const bm = /BYMONTH=(\d+)/.exec(p.value);
+          if (bm) tzPart.month = tzPart.byMonth = +bm[1];
+        }
+      } else if (p.name === 'TZID') tz.tzid = p.value.trim();
+      continue;
+    }
+    if (top === 'VCALENDAR' && p.name === 'METHOD') out.method = p.value.trim().toUpperCase();
+    if (!ev || top !== 'VEVENT') continue; // VALARM and the like carry props of their own
+    if (p.name === 'UID') ev.uid = p.value.trim();
+    else if (p.name === 'SUMMARY') ev.summary = mailIcsUnescape(p.value);
+    else if (p.name === 'LOCATION') ev.location = mailIcsUnescape(p.value);
+    else if (p.name === 'SEQUENCE') ev.sequence = parseInt(p.value, 10) || 0;
+    else if (p.name === 'RRULE') ev.rrule = p.value;
+    else if (p.name === 'STATUS') ev.status = p.value.trim().toUpperCase();
+    else if (p.name === 'DURATION') ev.duration = p.value.trim();
+    else if (p.name === 'ORGANIZER') {
+      ev.organizer = mailIcsPerson(p);
+      ev.raw.organizer = line;
+    } else if (p.name === 'ATTENDEE') ev.attendees.push(mailIcsPerson(p));
+    else if (p.name === 'DTSTART' || p.name === 'DTEND' || p.name === 'RECURRENCE-ID') {
+      ev.raw[p.name] = line;
+      ev['_' + p.name] = p;
+    }
+  }
+  for (const e of out.events) {
+    e.start = e._DTSTART ? mailIcsTime(e._DTSTART, out.vtz) : null;
+    e.end = e._DTEND ? mailIcsTime(e._DTEND, out.vtz) : null;
+    if (!e.end && e.start && e.duration) e.end = { ...e.start, ms: e.start.ms + mailIcsDuration(e.duration) };
+    if (!e.end && e.start) e.end = { ...e.start, ms: e.start.ms + (e.start.allDay ? 86400000 : 3600000) };
+  }
+  return out;
+}
+function mailIcsDuration(d) {
+  const m = /^([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(String(d || ''));
+  if (!m) return 0;
+  const ms = (((+m[2] || 0) * 7 + (+m[3] || 0)) * 86400 + (+m[4] || 0) * 3600 + (+m[5] || 0) * 60 + (+m[6] || 0)) * 1000;
+  return m[1] === '-' ? -ms : ms;
+}
+function mailValidZone(z) {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: z });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+// Minutes east of UTC that `zone` is at the instant `ms`.
+function mailZoneOffset(zone, ms) {
+  const f = new Intl.DateTimeFormat('en-US', {
+    timeZone: zone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+  const p = {};
+  for (const x of f.formatToParts(new Date(ms))) p[x.type] = x.value;
+  const asUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second);
+  return Math.round((asUtc - Math.floor(ms / 1000) * 1000) / 60000);
+}
+// A wall-clock time in `zone` -> the instant. Two passes settle the DST edges.
+function mailZonedToMs(y, mo, d, h, mi, s, zone) {
+  const guess = Date.UTC(y, mo - 1, d, h, mi, s);
+  let ms = guess - mailZoneOffset(zone, guess) * 60000;
+  ms = guess - mailZoneOffset(zone, ms) * 60000;
+  return ms;
+}
+function mailIcsZone(tzid, vtz, month) {
+  if (!tzid) return null;
+  const t = String(tzid).replace(/^"|"$/g, '');
+  const tail = t.replace(/^\/[^/]+\/[^/]+\//, ''); // "/mozilla.org/20050126_1/Europe/Berlin"
+  for (const z of [t, tail]) if (mailValidZone(z)) return { zone: z };
+  if (MAIL_WIN_ZONES[t]) return { zone: MAIL_WIN_ZONES[t] };
+  // an unknown name: use the event's own VTIMEZONE offsets, summer or winter by month
+  const v = vtz && vtz[t];
+  if (v && v.parts.length) {
+    const std = v.parts.find((x) => x.kind === 'STANDARD');
+    const dst = v.parts.find((x) => x.kind === 'DAYLIGHT');
+    let pick = std || dst;
+    if (std && dst && std.month && dst.month && std.month !== dst.month && month) {
+      const inDst = dst.month < std.month ? month >= dst.month && month < std.month : month >= dst.month || month < std.month;
+      pick = inDst ? dst : std;
+    }
+    if (pick && pick.offset != null) return { offset: pick.offset, approx: true };
+  }
+  return null;
+}
+function mailIcsTime(prop, vtz) {
+  const v = String(prop.value || '').trim();
+  if (prop.params.VALUE === 'DATE' || /^\d{8}$/.test(v)) {
+    return { ms: new Date(+v.slice(0, 4), +v.slice(4, 6) - 1, +v.slice(6, 8)).getTime(), allDay: true };
+  }
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})?(Z)?$/.exec(v);
+  if (!m) return null;
+  const [y, mo, d, h, mi, s] = [m[1], m[2], m[3], m[4], m[5], m[6] || '0'].map(Number);
+  if (m[7]) return { ms: Date.UTC(y, mo - 1, d, h, mi, s) };
+  const z = mailIcsZone(prop.params.TZID, vtz, mo);
+  // no zone at all is "floating" (local by definition); a zone we cannot place is a guess
+  if (!z) return { ms: new Date(y, mo - 1, d, h, mi, s).getTime(), approx: !!prop.params.TZID };
+  if (z.zone) return { ms: mailZonedToMs(y, mo, d, h, mi, s, z.zone) };
+  return { ms: Date.UTC(y, mo - 1, d, h, mi, s) - z.offset * 60000, approx: true };
+}
+function mailInviteWhen(ev) {
+  if (!ev.start) return '';
+  const t = (ms) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  const day = (ms) => new Date(ms).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short', year: new Date(ms).getFullYear() === new Date().getFullYear() ? undefined : 'numeric' });
+  let s;
+  if (ev.start.allDay) {
+    const lastDay = ev.end ? ev.end.ms - 86400000 : ev.start.ms;
+    s = day(ev.start.ms) + (lastDay > ev.start.ms ? ' - ' + day(lastDay) : '') + ', all day';
+  } else {
+    const same = ev.end && new Date(ev.end.ms).toDateString() === new Date(ev.start.ms).toDateString();
+    s = day(ev.start.ms) + ', ' + t(ev.start.ms) + (ev.end ? '-' + (same ? t(ev.end.ms) : day(ev.end.ms) + ' ' + t(ev.end.ms)) : '');
+  }
+  if (ev.start.approx || (ev.end && ev.end.approx)) s += ' (time zone guessed)';
+  const f = /FREQ=(\w+)/.exec(ev.rrule || '');
+  if (f) s += ' · repeats ' + ({ DAILY: 'daily', WEEKLY: 'weekly', MONTHLY: 'monthly', YEARLY: 'yearly' }[f[1]] || f[1].toLowerCase());
+  return s;
+}
+// Where things stand: from the calendar when we have it, else from the invitation.
+function mailInviteMine(ics, ev, st) {
+  if (st.answered) return st.answered.kind;
+  const g = st.info && st.info.event && st.info.event.myStatus;
+  if (g === 'accepted') return 'accept';
+  if (g === 'tentative') return 'maybe';
+  if (g === 'declined') return 'decline';
+  const me = String(googleEmail || '').toLowerCase();
+  const a = ev.attendees.find((x) => x.email === me);
+  return a ? { ACCEPTED: 'accept', TENTATIVE: 'maybe', DECLINED: 'decline' }[a.partstat] || null : null;
+}
+function mailInviteCardHtml(ics, ev, st) {
+  const cancelled = ics.method === 'CANCEL' || ev.status === 'CANCELLED';
+  const isReply = ics.method === 'REPLY';
+  const head = cancelled ? '❌ Cancelled' : isReply ? '📅 Answer to your invitation' : '📅 Invitation';
+  const rows = [];
+  rows.push(`<div class="iv-when">${escapeHtml(mailInviteWhen(ev))}</div>`);
+  const who = ev.organizer ? ev.organizer.name || ev.organizer.email : '';
+  const meta = [ev.location && '📍 ' + ev.location, who && 'from ' + who, ev.attendees.length > 1 && ev.attendees.length + ' guests'].filter(Boolean);
+  if (meta.length) rows.push(`<div class="iv-meta">${escapeHtml(meta.join('  ·  '))}</div>`);
+  if (isReply) {
+    for (const a of ev.attendees.filter((x) => x.partstat)) {
+      const word = { ACCEPTED: 'accepted', TENTATIVE: 'said maybe', DECLINED: 'declined', 'NEEDS-ACTION': 'has not answered yet' }[a.partstat] || a.partstat.toLowerCase();
+      rows.push(`<div class="iv-reply">${escapeHtml((a.name || a.email) + ' ' + word)}</div>`);
+    }
+  }
+  if (!cancelled && !isReply && !ev.start.allDay) {
+    if (st.busy === undefined) rows.push('<div class="iv-note">Checking your calendar…</div>');
+    else if (Array.isArray(st.busy) && st.busy.length) {
+      const t = (iso) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+      rows.push(
+        '<div class="iv-clash">⚠ Overlaps with ' +
+          st.busy.slice(0, 3).map((b) => escapeHtml(b.summary) + ' (' + t(b.start) + '-' + t(b.end) + ')').join(', ') +
+          (st.busy.length > 3 ? ' +' + (st.busy.length - 3) : '') +
+          '</div>'
+      );
+    } else if (Array.isArray(st.busy)) rows.push('<div class="iv-free">✓ Nothing else in your calendar then</div>');
+  }
+  if (!cancelled && !isReply) {
+    const mine = mailInviteMine(ics, ev, st);
+    rows.push(
+      '<div class="iv-actions">' +
+        [['accept', '✓ Accept'], ['maybe', '? Maybe'], ['decline', '✗ Decline']]
+          .map(([k, label]) => `<button class="mail-btn iv-btn${mine === k ? ' sel' : ''}" data-rsvp="${k}"${st.answering ? ' disabled' : ''}>${label}</button>`)
+          .join('') +
+        '</div>'
+    );
+    let how;
+    if (st.info && st.info.event && st.info.canRespond) how = 'Answering updates your Google Calendar and tells the organizer.';
+    else if (st.info && st.info.event) how = 'Your answer goes to the organizer by mail. Reconnect Google (Settings) to have it put in your calendar too.';
+    else how = 'Your answer goes to the organizer by mail.';
+    if (st.answering) how = 'Answering…';
+    if (st.answered) how = '✓ You ' + MAIL_RSVP[st.answered.kind].did + ' it' + (st.answered.via === 'calendar' ? ' - saved in your calendar, the organizer is told.' : ' - sent to the organizer.');
+    rows.push(`<div class="iv-note">${escapeHtml(how)}</div>`);
+    if (st.error) rows.push(`<div class="iv-err">${escapeHtml(st.error)}</div>`);
+  }
+  return `<div class="iv-head">${head}: <b>${escapeHtml(ev.summary || '(no title)')}</b></div>` + rows.join('');
+}
+// RFC 5545 lines are at most 75 octets; longer ones continue on a line starting with a space.
+function mailIcsFold(line) {
+  const out = [];
+  let cur = '';
+  let bytes = 0;
+  for (const ch of line) {
+    const n = new TextEncoder().encode(ch).length;
+    if (bytes + n > (out.length ? 74 : 75)) {
+      out.push(cur);
+      cur = '';
+      bytes = 0;
+    }
+    cur += ch;
+    bytes += n;
+  }
+  out.push(cur);
+  return out.join('\r\n ');
+}
+// The iTIP REPLY an organizer's calendar understands: the same UID and times, just us.
+function mailIcsReply(ics, ev, partstat) {
+  const esc = (t) => String(t || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\n/g, '\\n');
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+  const me = String(googleEmail || '').toLowerCase();
+  const mine = ev.attendees.find((a) => a.email === me);
+  const cn = mine && mine.name ? ';CN="' + mine.name.replace(/"/g, '') + '"' : '';
+  const lines = [
+    'BEGIN:VCALENDAR',
+    'PRODID:-//Cockpit//Mail//EN',
+    'VERSION:2.0',
+    'CALSCALE:GREGORIAN',
+    'METHOD:REPLY',
+    ...ics.vtimezoneLines,
+    'BEGIN:VEVENT',
+    'UID:' + ev.uid,
+    'SEQUENCE:' + (ev.sequence || 0),
+    'DTSTAMP:' + stamp,
+    ev.raw.DTSTART,
+    ev.raw.DTEND,
+    ev.raw['RECURRENCE-ID'],
+    ev.raw.organizer,
+    'ATTENDEE;PARTSTAT=' + partstat + cn + ':mailto:' + me,
+    'SUMMARY:' + esc(ev.summary),
+    'END:VEVENT',
+    'END:VCALENDAR',
+  ].filter(Boolean);
+  return lines.map(mailIcsFold).join('\r\n') + '\r\n';
+}
+// Find the invitation in a message: the inline part, or an .ics / text/calendar file.
+async function mailInviteText(m) {
+  if (m.calendar) return m.calendar;
+  const a = (m.attachments || []).find((x) => /text\/calendar/i.test(x.mimeType) || /\.ics$/i.test(x.filename || ''));
+  if (!a) return null;
+  const b64 = await mailAttB64(m, a);
+  if (!b64) return null;
+  try {
+    return new TextDecoder('utf-8').decode(b64ToBytes(b64));
+  } catch (_) {
+    return null;
+  }
+}
+async function mailInviteMount(el, m) {
+  const text = await mailInviteText(m);
+  if (!text) return el.remove();
+  const ics = mailParseIcs(text);
+  const ev = ics.events[0];
+  if (!ev || !ev.start) return el.remove();
+  const st = { busy: undefined, info: null };
+  el.className = 'mm-invite' + (ics.method === 'CANCEL' || ev.status === 'CANCELLED' ? ' iv-cancelled' : '');
+  const draw = () => (el.innerHTML = mailInviteCardHtml(ics, ev, st));
+  draw();
+  el.onclick = (e) => {
+    const b = e.target.closest('[data-rsvp]');
+    if (b && !st.answering) mailRsvp(m, ics, ev, b.dataset.rsvp, st, draw);
+  };
+  if (!googleConnected) {
+    st.busy = null;
+    return draw();
+  }
+  const r = await api.mailInviteInfo({ uid: ev.uid, start: ev.start.ms, end: ev.end ? ev.end.ms : ev.start.ms + 3600000 });
+  if (r && r.ok) {
+    st.info = r;
+    st.busy = r.busy;
+  } else st.busy = null;
+  draw();
+}
+async function mailRsvp(m, ics, ev, kind, st, draw) {
+  const how = MAIL_RSVP[kind];
+  if (!how) return;
+  st.answering = kind;
+  st.error = null;
+  draw();
+  let res = null;
+  let via = 'mail';
+  if (st.info && st.info.event && st.info.canRespond) {
+    via = 'calendar';
+    res = await api.mailInviteRespond({ eventId: st.info.event.id, response: how.google });
+    if (res && res.ok) st.info.event.myStatus = how.google;
+  } else if (!ev.organizer || !ev.organizer.email) {
+    st.error = 'This invitation names no organizer to answer.';
+  } else if (mbox.canSend === false) {
+    st.error = 'Answering by mail needs the Gmail send permission - reconnect Google in Settings.';
+  } else {
+    res = await api.mailSend({
+      to: ev.organizer.name ? '"' + ev.organizer.name.replace(/"/g, '') + '" <' + ev.organizer.email + '>' : ev.organizer.email,
+      subject: how.word + ': ' + (ev.summary || '(no title)'),
+      text: how.word + ': ' + (ev.summary || '') + '\n' + mailInviteWhen(ev) + '\n',
+      threadId: m.threadId,
+      inReplyTo: m.messageId || '',
+      references: [m.references, m.messageId].filter(Boolean).join(' '),
+      calendar: { method: 'REPLY', ics: mailIcsReply(ics, ev, how.partstat) },
+    });
+  }
+  if (res && res.ok) {
+    st.answered = { kind, via };
+    logEvent('mail', { title: how.word + ' · ' + (ev.summary || 'invitation'), detail: mailInviteWhen(ev), ref: { type: 'mail', threadId: m.threadId } });
+  } else if (res) st.error = 'Could not answer: ' + (res.error || 'unknown');
+  st.answering = null;
+  draw();
+}
+
+// ---- attach a file from a terminal ----
+// A little browser over a shell's own folder, read in-band like the download: it works at
+// any ssh depth, inside sudo, tmux or a container. The shell is never cd'd anywhere - paths
+// are relative to where it already is - and nothing is typed while a full-screen program
+// has the terminal. The file comes back through the same verified sliced download.
+function mailShellTitle(rec) {
+  const t = rec.tabEl && rec.tabEl.querySelector('.title');
+  return (t && t.textContent) || (rec.profile && rec.profile.name) || 'terminal';
+}
+// dir is '' (the shell's folder) or a relative path ending in '/'
+function mailShellUp(dir) {
+  if (!dir || /^(\.\.\/)+$/.test(dir)) return dir + '../';
+  return dir.replace(/[^/]+\/$/, '');
+}
+// One line per entry: "d<TAB>name/" or "f<TAB>size<TAB>name". POSIX sh, bash and zsh alike
+// (no globs - zsh fails a glob that matches nothing); ls to a pipe prints names unquoted.
+function mailShellListCmd(dir) {
+  const q = shQuote(dir || '.');
+  return (
+    '{ pwd; ls -1pA -- ' + q + ' 2>/dev/null | head -n 400 | while IFS= read -r f; do case "$f" in */) printf "d\\t%s\\n" "$f" ;; ' +
+    '*) printf "f\\t%s\\t%s\\n" "$(wc -c < ' + q + '/"$f" 2>/dev/null | tr -d " ")" "$f" ;; esac; done; }'
+  );
+}
+function mailShellParse(out) {
+  const lines = String(out || '').replace(/\r/g, '').split('\n');
+  while (lines.length > 1 && !lines[0].trim()) lines.shift(); // a stray blank line is not the folder
+  const cwd = (lines.shift() || '').trim();
+  const dirs = [];
+  const files = [];
+  for (const l of lines) {
+    const p = l.split('\t');
+    if (p[0] === 'd' && p[1]) dirs.push(p[1]);
+    else if (p[0] === 'f' && p.length >= 3) files.push({ name: p.slice(2).join('\t'), size: parseInt(p[1], 10) || 0 });
+  }
+  return { cwd, dirs, files };
+}
+function mailAttachFromShell(anchor) {
+  if (!mbox.draft) return;
+  mailPickTerminal(anchor, (rec) => mailShellBrowse(rec, '', anchor));
+}
+async function mailShellBrowse(rec, dir, anchor) {
+  const pop = mailEl('.mail-pop');
+  if (!pop || !mbox.draft) return;
+  if (!rec.term || rec.term.buffer.active.type !== 'normal') {
+    mailHidePop();
+    return mailComposeStatus(mailShellTitle(rec) + ': a full-screen program has the terminal - leave it first.', true);
+  }
+  if (rec._grab || rec._send) {
+    mailHidePop();
+    return mailComposeStatus(mailShellTitle(rec) + ' is busy with another transfer.', true);
+  }
+  pop.innerHTML = '<div class="mp-cap">Reading the folder in ' + escapeHtml(mailShellTitle(rec)) + ' …</div>';
+  pop.onclick = null;
+  mailShowPop(anchor);
+  const free = await new Promise((r) => whenInBandFree(rec, () => r(true), () => r(false)));
+  const out = free ? await inBandAsk(rec, mailShellListCmd(dir), 15000) : null;
+  if (out === null) {
+    pop.innerHTML = '<div class="mp-cap">No answer from that shell. Is it at a prompt?</div>';
+    return;
+  }
+  const ls = mailShellParse(out);
+  const here = (ls.cwd || '?') + (dir ? '/' + dir.replace(/\/$/, '') : '');
+  const draw = (filter) => {
+    const f = String(filter || '').toLowerCase();
+    const show = (n) => !f || n.toLowerCase().includes(f);
+    return (
+      `<button class="mp-item" data-up="1">⬆ ..</button>` +
+      ls.dirs.filter(show).map((d) => `<button class="mp-item" data-dir="${escapeHtml(d)}">📁 ${escapeHtml(d)}</button>`).join('') +
+      ls.files
+        .filter((x) => show(x.name))
+        .map((x) => `<button class="mp-item mp-file" data-file="${escapeHtml(x.name)}" data-size="${x.size}">📄 ${escapeHtml(x.name)} <span class="mp-size">${fmtBytes(x.size)}</span></button>`)
+        .join('') +
+      (!ls.dirs.length && !ls.files.length ? '<div class="mp-cap">(empty)</div>' : '')
+    );
+  };
+  pop.innerHTML =
+    `<div class="mp-cap" title="${escapeHtml(here)}">📂 ${escapeHtml(here)}</div>` +
+    '<input class="mp-filter" type="text" spellcheck="false" placeholder="Filter, or type a path + Enter" />' +
+    `<div class="mp-list mp-shell">${draw('')}</div>`;
+  mailShowPop(anchor);
+  const input = pop.querySelector('.mp-filter');
+  const list = pop.querySelector('.mp-list');
+  input.addEventListener('input', () => (list.innerHTML = draw(input.value)));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      mailHidePop();
+      return;
+    }
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const shown = [...list.querySelectorAll('.mp-file')];
+    const v = input.value.trim();
+    if (shown.length === 1 && !/[/]/.test(v)) shown[0].click();
+    else if (v) {
+      const p = grabNormPath(v);
+      mailShellGrab(rec, /^[/~]/.test(p) ? p : dir + p, p.split('/').pop(), 0);
+    }
+  });
+  pop.onclick = (e) => {
+    const b = e.target.closest('.mp-item');
+    if (!b) return;
+    if (b.dataset.up) return mailShellBrowse(rec, mailShellUp(dir), anchor);
+    if (b.dataset.dir) return mailShellBrowse(rec, dir + b.dataset.dir, anchor);
+    if (b.dataset.file) mailShellGrab(rec, dir + b.dataset.file, b.dataset.file, +b.dataset.size || 0);
+  };
+  setTimeout(() => input.focus(), 0);
+}
+function mailShellGrab(rec, path, name, size) {
+  const d = mbox.draft;
+  mailHidePop();
+  if (!d) return;
+  const used = d.attachments.reduce((n, a) => n + (a.size || 0), 0);
+  if (size && used + size > MAIL_SEND_MAX) {
+    return mailComposeStatus(name + ' is ' + fmtBytes(size) + ' - Gmail takes ' + fmtBytes(MAIL_SEND_MAX) + ' in all.', true);
+  }
+  const att = { name: mailSafeName(name), mimeType: mailGuessMime(name), size, b64: null, fromShell: true };
+  d.attachments.push(att);
+  mailRenderAtts();
+  const where = mailShellTitle(rec);
+  beginGrab(rec, path, {
+    onStatus: (msg, kind) => {
+      if (mbox.draft !== d) return;
+      if (kind === 'err' || kind === 'warn') {
+        if (kind === 'err') {
+          d.attachments = d.attachments.filter((x) => x !== att); // it is not coming
+          mailRenderAtts();
+        }
+        return mailComposeStatus(where + ': ' + msg, kind === 'err');
+      }
+      mailComposeStatus(where + ': ' + msg);
+    },
+    onBytes: (_n, b64, bytes) => {
+      if (mbox.draft !== d) return;
+      if (used + bytes > MAIL_SEND_MAX) {
+        d.attachments = d.attachments.filter((x) => x !== att);
+        mailRenderAtts();
+        return mailComposeStatus(name + ' is ' + fmtBytes(bytes) + ' - too big to send by Gmail.', true);
+      }
+      att.b64 = b64;
+      att.size = bytes;
+      mailRenderAtts();
+      mailComposeStatus('📎 ' + att.name + ' (' + fmtBytes(bytes) + ') attached from ' + where);
+    },
+  });
+}
+
+// ---- save an attachment into a server folder (through a terminal) ----
+// The reverse of "attach from a terminal": pick a terminal, browse its shell's folders, and
+// the file is typed through the shell into the one you chose - at any ssh depth, like "Send
+// a file here". A name that is taken asks first (Replace / Keep both). You stay in the mail;
+// the confirmation comes here, and the terminal keeps a one-line record.
+function mailSaveToShell(anchor, m, a) {
+  if (a.size > SEND_MAX_BYTES) {
+    return mailToast(a.filename + ' is ' + fmtBytes(a.size) + ' - too big to type through a terminal (' + fmtBytes(SEND_MAX_BYTES) + '). Use Save instead.', 'err');
+  }
+  mailPickTerminal(anchor, (rec) => mailSaveBrowse(rec, '', anchor, m, a));
+}
+async function mailSaveBrowse(rec, dir, anchor, m, a) {
+  const pop = mailEl('.mail-pop');
+  if (!pop) return;
+  const where = mailShellTitle(rec);
+  if (!rec.term || rec.term.buffer.active.type !== 'normal') {
+    mailHidePop();
+    return mailToast(where + ': a full-screen program has the terminal - leave it first.', 'err');
+  }
+  if (rec._grab || rec._send) {
+    mailHidePop();
+    return mailToast(where + ' is busy with another transfer.', 'err');
+  }
+  pop.onclick = null;
+  pop.innerHTML = '<div class="mp-cap">Reading the folder in ' + escapeHtml(where) + ' …</div>';
+  mailShowPop(anchor);
+  const free = await new Promise((r) => whenInBandFree(rec, () => r(true), () => r(false)));
+  const out = free ? await inBandAsk(rec, mailShellListCmd(dir), 15000) : null;
+  if (out === null) {
+    pop.innerHTML = '<div class="mp-cap">No answer from that shell. Is it at a prompt?</div>';
+    return;
+  }
+  const ls = mailShellParse(out);
+  const here = (ls.cwd || '?') + (dir ? '/' + dir.replace(/\/$/, '') : '');
+  pop.innerHTML =
+    `<div class="mp-cap" title="${escapeHtml(here)}">Save into 📂 ${escapeHtml(here)}</div>` +
+    '<div class="mp-list mp-shell">' +
+    '<button class="mp-item" data-up="1">⬆ ..</button>' +
+    ls.dirs.map((d) => `<button class="mp-item" data-dir="${escapeHtml(d)}">📁 ${escapeHtml(d)}</button>`).join('') +
+    ls.files.map((x) => `<div class="mp-item mp-dim" title="already there">📄 ${escapeHtml(x.name)} <span class="mp-size">${fmtBytes(x.size)}</span></div>`).join('') +
+    '</div>' +
+    '<div class="mp-save"><input class="mp-filter mp-savename" type="text" spellcheck="false" />' +
+    '<button class="mail-btn mail-primary" data-save="1">💾 Save here</button></div>' +
+    '<div class="mp-cap mp-saveask hidden"></div>';
+  mailShowPop(anchor);
+  const nameEl = pop.querySelector('.mp-savename');
+  nameEl.value = mailSafeName(a.filename);
+  const ask = pop.querySelector('.mp-saveask');
+  const go = async (name, replace) => {
+    name = mailSafeName(name);
+    const path = dir + name;
+    if (!replace) {
+      // taken? then say so, and offer the next free "name (1).ext"
+      const alts = [path];
+      const dot = name.lastIndexOf('.');
+      const base = dot > 0 ? name.slice(0, dot) : name;
+      const ext = dot > 0 ? name.slice(dot) : '';
+      for (let i = 1; i <= 20; i++) alts.push(dir + base + ' (' + i + ')' + ext);
+      const probe = 'for f in ' + alts.map(shQuote).join(' ') + '; do [ -e "$f" ] || { printf "%s" "$f"; break; }; done';
+      const freeName = await inBandAsk(rec, probe, 10000);
+      if (freeName === null) {
+        ask.textContent = 'No answer from that shell.';
+        ask.classList.remove('hidden');
+        return;
+      }
+      const firstFree = String(freeName).replace(/\r|\n/g, '');
+      if (firstFree !== path) {
+        const keep = firstFree ? firstFree.slice(dir.length) : '';
+        ask.innerHTML =
+          escapeHtml(name) + ' is already there. ' +
+          '<button class="mail-btn" data-replace="1">Replace it</button>' +
+          (keep ? `<button class="mail-btn" data-keep="${escapeHtml(keep)}">Keep both (${escapeHtml(keep)})</button>` : '');
+        ask.classList.remove('hidden');
+        return;
+      }
+    }
+    mailHidePop();
+    const b64 = await mailAttB64(m, a);
+    if (!b64) return mailToast('Could not fetch ' + a.filename, 'err');
+    const size = mailB64Size(b64);
+    if (size > SEND_MAX_BYTES) return mailToast(a.filename + ' is ' + fmtBytes(size) + ' - too big for a terminal. Use Save instead.', 'err');
+    mailToast('Saving ' + name + ' into ' + here + ' …');
+    const ok = await sendB64InBand(rec, { name: path, size, b64 });
+    if (ok) mailToast('💾 Saved ' + name + ' (' + fmtBytes(size) + ') into ' + here + ' on ' + where);
+    else mailToast('Could not save ' + name + ' there - the terminal ' + where + ' says why.', 'err');
+  };
+  nameEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      go(nameEl.value, false);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      mailHidePop();
+    }
+  });
+  pop.onclick = (e) => {
+    const b = e.target.closest('[data-up], [data-dir], [data-save], [data-replace], [data-keep]');
+    if (!b) return;
+    if (b.dataset.up) return mailSaveBrowse(rec, mailShellUp(dir), anchor, m, a);
+    if (b.dataset.dir) return mailSaveBrowse(rec, dir + b.dataset.dir, anchor, m, a);
+    if (b.dataset.save) return go(nameEl.value, false);
+    if (b.dataset.replace) return go(nameEl.value, true);
+    if (b.dataset.keep) return go(b.dataset.keep, true);
+  };
+  setTimeout(() => {
+    nameEl.focus();
+    const dot = nameEl.value.lastIndexOf('.');
+    nameEl.setSelectionRange(0, dot > 0 ? dot : nameEl.value.length); // the name, not the extension
+  }, 0);
+}
+
+// ---- tmux sessions on connect ----
+// When an SSH tab connects to a host that has tmux sessions, a small card offers them:
+// attach, start a named new one, or skip. It asks the shell in-band (hidden), only when the
+// shell is idle at a prompt, you have not started typing, and it is not already inside tmux.
+// Typing in the terminal puts the card away. The hover sheet opens it on demand (any tab,
+// any depth - inside tmux it switches sessions instead).
+let tmuxOffer = true;
+let tmuxNeverHosts = [];
+const TMUX_LS =
+  'if command -v tmux >/dev/null 2>&1; then ' +
+  'if [ -n "$TMUX" ]; then printf "@inside:%s\\n" "$(tmux display-message -p "#S" 2>/dev/null)"; else echo "@tmux"; fi; ' +
+  'tmux ls -F "#{session_name}:#{session_windows}:#{session_attached}:#{session_activity}" 2>/dev/null; ' +
+  'else echo "@none"; fi';
+// tmux names cannot hold "." or ":" (it would read them as window/pane addresses).
+function tmuxName(v) {
+  return String(v || '')
+    .trim()
+    .replace(/[.:]/g, '-')
+    .replace(/\s+/g, '-')
+    .slice(0, 40);
+}
+function tmuxParse(out) {
+  const lines = String(out || '').replace(/\r/g, '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const head = lines.shift() || '';
+  if (head === '@none' || !head) return { state: 'none', sessions: [] };
+  const inside = /^@inside:/.test(head) ? head.slice(8) : null;
+  const sessions = lines
+    .map((l) => {
+      // the name is everything before the LAST three fields (names cannot contain ":")
+      const p = l.split(':');
+      if (p.length < 4) return null;
+      return { name: p.slice(0, p.length - 3).join(':'), windows: +p[p.length - 3] || 0, attached: +p[p.length - 2] || 0, activity: +p[p.length - 1] || 0 };
+    })
+    .filter(Boolean)
+    .sort((x, y) => y.activity - x.activity);
+  return { state: inside != null ? 'inside' : 'ok', current: inside, sessions };
+}
+function tmuxHostKey(rec) {
+  return (rec.where && rec.where.host) || tabKey(rec);
+}
+function tmuxAgo(sec) {
+  if (!sec) return '';
+  const d = Math.max(0, Math.round(Date.now() / 1000 - sec));
+  if (d < 90) return 'active now';
+  if (d < 3600) return 'active ' + Math.round(d / 60) + ' min ago';
+  if (d < 86400) return 'active ' + Math.round(d / 3600) + ' h ago';
+  return 'active ' + Math.round(d / 86400) + ' d ago';
+}
+async function tmuxAsk(rec) {
+  if (!rec || !rec.term || rec.term.buffer.active.type !== 'normal') return null;
+  if (rec._grab || rec._send) return null;
+  const free = await new Promise((r) => whenInBandFree(rec, () => r(true), () => r(false)));
+  if (!free) return null;
+  const out = await inBandAsk(rec, TMUX_LS, 8000);
+  return out === null ? null : tmuxParse(out);
+}
+function tmuxType(rec, cmd) {
+  tmuxClose(rec);
+  if (rec.kind === 'local') api.ptyWrite(rec.id, cmd + '\r');
+  else api.write(rec.id, cmd + '\r');
+  focusTerm(rec);
+}
+function tmuxClose(rec) {
+  if (rec && rec._tmuxCard) {
+    rec._tmuxCard.remove();
+    rec._tmuxCard = null;
+  }
+}
+// Keystrokes into the shell: you have chosen to work - the card steps aside.
+function tmuxNoteTyping(rec) {
+  if (!rec) return;
+  rec._typedAt = Date.now();
+  if (rec._tmuxCard && !rec._tmuxCard.contains(document.activeElement)) tmuxClose(rec);
+}
+function tmuxShowCard(rec, info, manual) {
+  tmuxClose(rec);
+  const card = document.createElement('div');
+  card.className = 'tmux-pick';
+  const inside = info.state === 'inside';
+  const list = info.sessions.filter((s) => !(inside && s.name === info.current));
+  const verb = inside ? 'Switch to' : 'Attach';
+  card.innerHTML =
+    '<div class="tp-head"><span>🪟 tmux' + (inside ? ' - you are in <b>' + escapeHtml(info.current || '?') + '</b>' : ' on this host') + '</span>' +
+    '<button class="mail-x" data-close="1" title="Not now (or just start typing)">✕</button></div>' +
+    list
+      .map(
+        (s) =>
+          `<button class="tp-item" data-attach="${escapeHtml(s.name)}" title="${verb} ${escapeHtml(s.name)}">▶ <b>${escapeHtml(s.name)}</b>` +
+          `<span class="tp-meta">${s.windows} window${s.windows === 1 ? '' : 's'}${s.attached ? ' · open elsewhere' : ''}${s.activity ? ' · ' + tmuxAgo(s.activity) : ''}</span></button>`
+      )
+      .join('') +
+    (list.length ? '' : '<div class="tp-meta tp-none">' + (inside ? 'No other sessions.' : 'No sessions yet.') + '</div>') +
+    '<div class="tp-new"><input class="tp-name" type="text" spellcheck="false" placeholder="new session name" />' +
+    '<button class="mail-btn" data-new="1">＋ Start</button></div>' +
+    (manual ? '' : '<button class="tp-never" data-never="1">Do not ask on this host</button>');
+  card.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-close], [data-attach], [data-new], [data-never]');
+    if (!b) return;
+    if (b.dataset.close) {
+      tmuxClose(rec);
+      return focusTerm(rec);
+    }
+    if (b.dataset.attach) return tmuxType(rec, (inside ? 'tmux switch-client -t ' : 'tmux attach -t ') + shQuote(b.dataset.attach));
+    if (b.dataset.new) {
+      const n = tmuxName(card.querySelector('.tp-name').value);
+      if (inside) return tmuxType(rec, n ? 'tmux new-session -d -s ' + shQuote(n) + ' && tmux switch-client -t ' + shQuote(n) : 'tmux switch-client -t "$(tmux new-session -d -P -F "#S")"');
+      return tmuxType(rec, n ? 'tmux new -s ' + shQuote(n) : 'tmux new');
+    }
+    if (b.dataset.never) {
+      const k = tmuxHostKey(rec);
+      if (!tmuxNeverHosts.includes(k)) tmuxNeverHosts = tmuxNeverHosts.concat(k).slice(-200);
+      api.saveSettings({ tmuxNeverHosts });
+      tmuxClose(rec);
+      focusTerm(rec);
+    }
+  });
+  card.querySelector('.tp-name').addEventListener('keydown', (e) => {
+    e.stopPropagation(); // the terminal must not see these keys
+    if (e.key === 'Enter') card.querySelector('[data-new]').click();
+    if (e.key === 'Escape') {
+      tmuxClose(rec);
+      focusTerm(rec);
+    }
+  });
+  rec.paneEl.appendChild(card);
+  rec._tmuxCard = card;
+}
+// From the hover sheet: always answers, even with no sessions (it offers a new one).
+async function tmuxPick(rec) {
+  const info = await tmuxAsk(rec);
+  if (!info) return writeToTerm(rec, '\r\n\x1b[2m[no answer from the shell - is it at a prompt?]\x1b[0m\r\n');
+  if (info.state === 'none') return writeToTerm(rec, '\r\n\x1b[2m[tmux is not installed on this host]\x1b[0m\r\n');
+  tmuxShowCard(rec, info, true);
+}
+// After a connect: only if there IS something to offer, and never while you are busy.
+function tmuxAutoOffer(rec, tries) {
+  if (!tmuxOffer || !rec || rec.kind !== 'ssh' || !tabs.has(rec.id) || rec.status !== 'connected') return;
+  if (tmuxNeverHosts.includes(tmuxHostKey(rec))) return;
+  if (rec._typedAt && rec._typedAt > (rec._connectedAt || 0)) return; // you started working
+  const quietFor = Date.now() - (rec._lastDataAt || 0);
+  if (quietFor < 700 || inBandBusy(rec)) {
+    if ((tries || 0) < 8) setTimeout(() => tmuxAutoOffer(rec, (tries || 0) + 1), 700); // output still coming (auto-hop, motd)
+    return;
+  }
+  tmuxAsk(rec).then((info) => {
+    if (!info || info.state !== 'ok' || !info.sessions.length) return;
+    if (rec._typedAt && rec._typedAt > (rec._connectedAt || 0)) return;
+    tmuxShowCard(rec, info, false);
+  });
+}
+
+// ---- clipboard history ----
+// The history itself is kept in the main process (clip-history.js, memory only); this is
+// the panel: Ctrl+Shift+H, the 📋 in the status bar, or the command palette. Enter or a
+// click pastes into where you were - the terminal, or the text field you had focus in.
+let clipOn = true;
+let clipClearSecrets = true;
+let clipEntries = [];
+let clipTarget = null; // { tabId, el } - where to paste
+let clipSel = 0;
+let clipTick = null;
+if (api.onClipChanged) {
+  api.onClipChanged((p) => {
+    clipEntries = (p && p.entries) || [];
+    if (clipIsOpen()) clipRender();
+  });
+}
+function clipConfig() {
+  if (api.clipConfig) api.clipConfig({ on: clipOn, clearSecrets: clipClearSecrets });
+}
+function clipIsOpen() {
+  const p = document.getElementById('clip-panel');
+  return !!p && !p.classList.contains('hidden');
+}
+function clipPreview(t) {
+  const s = String(t).replace(/\r\n/g, '\n');
+  const lines = s.split('\n');
+  const first = lines[0].length > 140 ? lines[0].slice(0, 139) + '…' : lines[0];
+  return { first, more: lines.length - 1 };
+}
+function clipAgo(ms) {
+  const d = Math.round((Date.now() - ms) / 1000);
+  if (d < 60) return d + ' s ago';
+  if (d < 3600) return Math.round(d / 60) + ' min ago';
+  return Math.round(d / 3600) + ' h ago';
+}
+function clipShown() {
+  const f = String((document.getElementById('clip-filter') || {}).value || '').toLowerCase();
+  // a filter never searches inside secrets: typing part of a password must not find it
+  return clipEntries.filter((e) => !f || (!e.secret && e.text.toLowerCase().includes(f)));
+}
+function clipRender() {
+  const list = document.getElementById('clip-list');
+  if (!list) return;
+  const shown = clipShown();
+  clipSel = Math.max(0, Math.min(clipSel, shown.length - 1));
+  list.innerHTML = shown.length
+    ? shown
+        .map((e, i) => {
+          const pv = clipPreview(e.text);
+          const left = e.secret ? Math.max(0, Math.ceil((e.expires - Date.now()) / 1000)) : 0;
+          return (
+            `<div class="clip-item${i === clipSel ? ' sel' : ''}${e.secret ? ' secret' : ''}" data-id="${e.id}" data-i="${i}">` +
+            (e.secret
+              ? `<span class="clip-text">🔒 •••••••• <span class="clip-meta">${escapeHtml(e.secret)} · gone in ${left} s</span></span>`
+              : `<span class="clip-text">${escapeHtml(pv.first) || '<i>(spaces)</i>'}${pv.more ? ` <span class="clip-meta">+${pv.more} line${pv.more === 1 ? '' : 's'}</span>` : ''}</span>`) +
+            `<span class="clip-meta">${clipAgo(e.at)}</span>` +
+            `<button class="mail-x" data-copy="${e.id}" title="Copy only">⧉</button>` +
+            `<button class="mail-x" data-rm="${e.id}" title="Forget this one">✕</button></div>`
+          );
+        })
+        .join('')
+    : `<div class="clip-empty">${clipOn ? 'Nothing copied yet this session.' : 'Clipboard history is off (Settings).'}</div>`;
+  const cur = list.querySelector('.sel');
+  if (cur) cur.scrollIntoView({ block: 'nearest' });
+}
+async function clipOpen() {
+  const panel = document.getElementById('clip-panel');
+  if (!panel) return;
+  // remember where you were, to paste back there
+  const rec = activeTabId ? tabs.get(activeTabId) : null;
+  const el = document.activeElement;
+  const field = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable) && el.offsetParent !== null && !el.closest('#cmd-palette');
+  clipTarget = { tabId: activeTabId, el: field ? el : null, term: rec && rec.term ? rec.id : null };
+  const r = api.clipList ? await api.clipList() : null;
+  clipEntries = (r && r.entries) || [];
+  clipSel = 0;
+  panel.classList.remove('hidden');
+  const f = document.getElementById('clip-filter');
+  f.value = '';
+  clipRender();
+  f.focus();
+  clearInterval(clipTick);
+  clipTick = setInterval(() => (clipIsOpen() ? clipRender() : clearInterval(clipTick)), 1000); // the secret countdown
+}
+function clipClose(refocus) {
+  const panel = document.getElementById('clip-panel');
+  if (panel) panel.classList.add('hidden');
+  clearInterval(clipTick);
+  if (refocus && clipTarget) {
+    const rec = clipTarget.term ? tabs.get(clipTarget.term) : null;
+    if (clipTarget.el && document.contains(clipTarget.el)) clipTarget.el.focus();
+    else if (rec) focusTerm(rec);
+  }
+}
+async function clipPick(id, pasteIt) {
+  const r = api.clipUse ? await api.clipUse(id) : null;
+  const text = r && r.text;
+  if (text == null) return clipClose(true);
+  const t = clipTarget || {};
+  clipClose(false);
+  if (!pasteIt) {
+    const rec = t.term ? tabs.get(t.term) : null;
+    if (t.el && document.contains(t.el)) t.el.focus();
+    else if (rec) focusTerm(rec);
+    return;
+  }
+  if (t.el && document.contains(t.el)) {
+    t.el.focus();
+    try {
+      document.execCommand('insertText', false, text);
+    } catch (_) {
+      /* the clipboard has it anyway */
+    }
+    return;
+  }
+  const rec = t.term ? tabs.get(t.term) : null;
+  if (rec && rec.term) {
+    rec.term.paste(text); // bracketed paste, like any paste
+    focusTerm(rec);
+  }
+}
+function clipWire() {
+  const panel = document.getElementById('clip-panel');
+  if (!panel) {
+    // Not parsed yet (markup after the scripts): wire it once the page is complete, rather
+    // than silently leaving a panel whose filter, keys and buttons do nothing.
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', clipWire, { once: true });
+    return;
+  }
+  const f = document.getElementById('clip-filter');
+  f.addEventListener('input', () => {
+    clipSel = 0;
+    clipRender();
+  });
+  f.addEventListener('keydown', (e) => {
+    const shown = clipShown();
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (shown.length) clipSel = (clipSel + (e.key === 'ArrowDown' ? 1 : -1) + shown.length) % shown.length;
+      clipRender();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (shown[clipSel]) clipPick(shown[clipSel].id, !e.shiftKey); // Shift+Enter: copy only
+    } else if (e.key === 'Delete' && shown[clipSel] && !f.value) {
+      e.preventDefault();
+      api.clipRemove(shown[clipSel].id);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      clipClose(true);
+    }
+  });
+  panel.addEventListener('mousedown', (e) => {
+    if (e.target === panel) clipClose(true); // the dimmed backdrop
+  });
+  panel.addEventListener('click', (e) => {
+    const cp = e.target.closest('[data-copy]');
+    if (cp) return clipPick(+cp.dataset.copy, false);
+    const rm = e.target.closest('[data-rm]');
+    if (rm) return api.clipRemove(+rm.dataset.rm);
+    if (e.target.closest('[data-clear]')) return api.clipClear();
+    const it = e.target.closest('.clip-item');
+    if (it) clipPick(+it.dataset.id, true);
+  });
+  const btn = document.getElementById('clip-btn');
+  if (btn) btn.addEventListener('click', () => (clipIsOpen() ? clipClose(true) : clipOpen()));
 }
 
 // ---- address suggestions ----
@@ -17108,6 +18998,11 @@ function buildPaletteItems() {
   act('🌐', 'New web tab', () => createWebTab());
   act('📝', 'Notes board', () => createNotesTab());
   act('⚙', 'Settings', () => openSettings());
+  act('📋', 'Clipboard history (Ctrl+Shift+H)', () => setTimeout(clipOpen, 0));
+  act('🪟', 'tmux sessions in this terminal', () => {
+    const r = activeTabId ? tabs.get(activeTabId) : null;
+    if (r && (r.kind === 'ssh' || r.kind === 'local')) tmuxPick(r);
+  });
 
   for (const [id, rec] of tabs) {
     const titleEl = rec.tabEl && rec.tabEl.querySelector('.title');
@@ -17342,6 +19237,11 @@ setInterval(() => {
   if (settings && MAIL_READ_MODES.includes(settings.mailReadMode)) mailReadMode = settings.mailReadMode;
   else if (settings && settings.mailDarkRead === true) mailReadMode = 'dark';
   if (settings && typeof settings.mailTabBadge === 'boolean') mailTabBadge = settings.mailTabBadge;
+  if (settings && typeof settings.tmuxOffer === 'boolean') tmuxOffer = settings.tmuxOffer;
+  if (settings && Array.isArray(settings.tmuxNeverHosts)) tmuxNeverHosts = settings.tmuxNeverHosts.filter((x) => typeof x === 'string').slice(-200);
+  if (settings && typeof settings.clipOn === 'boolean') clipOn = settings.clipOn;
+  if (settings && typeof settings.clipClearSecrets === 'boolean') clipClearSecrets = settings.clipClearSecrets;
+  clipConfig(); // start (or not) the clipboard history in the main process
   if (settings && typeof settings.mailLearnSnippets === 'boolean') mailLearnSnippets = settings.mailLearnSnippets;
   if (settings && typeof settings.mailCleanLinks === 'boolean') mailCleanLinks = settings.mailCleanLinks;
   if (settings && typeof settings.mailSigInternal === 'string') mailSigInternal = settings.mailSigInternal.slice(0, 4000);
@@ -17613,3 +19513,6 @@ setInterval(() => {
   // (SSH / local terminal / web / notes) instead of forcing the SSH dialog.
   updateEmptyState();
 })();
+
+clipWire();
+agentInit();

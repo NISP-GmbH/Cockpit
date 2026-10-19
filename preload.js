@@ -17,6 +17,12 @@ contextBridge.exposeInMainWorld('sshApi', {
   // --- clipboard (PuTTY-style copy on select / right-click paste) ---
   clipboardWrite: (text) => clipboard.writeText(text),
   clipboardRead: () => clipboard.readText(),
+  clipConfig: (o) => ipcRenderer.invoke('clip:config', o),
+  clipList: () => ipcRenderer.invoke('clip:list'),
+  clipUse: (id) => ipcRenderer.invoke('clip:use', { id }),
+  clipRemove: (id) => ipcRenderer.invoke('clip:remove', { id }),
+  clipClear: () => ipcRenderer.invoke('clip:clear'),
+  onClipChanged: (cb) => ipcRenderer.on('clip:changed', (_e, p) => cb(p)),
 
   loadSessions: () => ipcRenderer.invoke('store:load'),
   saveSessions: (sessions) => ipcRenderer.invoke('store:save', sessions),
@@ -182,8 +188,21 @@ contextBridge.exposeInMainWorld('sshApi', {
   mailCanSend: () => ipcRenderer.invoke('mail:canSend'),
   mailThreadOf: (id) => ipcRenderer.invoke('mail:threadOf', { id }),
   mailSend: (o) => ipcRenderer.invoke('mail:send', o),
+  mailGetDraft: (o) => ipcRenderer.invoke('mail:getDraft', o), // { draftId } or { messageId }
+  mailSaveDraft: (o) => ipcRenderer.invoke('mail:saveDraft', o),
+  mailDeleteDraft: (id, messageId) => ipcRenderer.invoke('mail:deleteDraft', { id, messageId }),
+  mailTrashMessage: (id) => ipcRenderer.invoke('mail:trashMessage', { id }),
+  mailUntrashMessage: (id, addInbox) => ipcRenderer.invoke('mail:untrashMessage', { id, addInbox }),
   mailFetchImage: (url) => ipcRenderer.invoke('mail:fetchImage', { url }),
   mailResolveUrl: (url) => ipcRenderer.invoke('mail:resolveUrl', { url }),
+  mailInviteInfo: (o) => ipcRenderer.invoke('mail:inviteInfo', o),
+  mailInviteRespond: (o) => ipcRenderer.invoke('mail:inviteRespond', o),
+  // agent replies: config is write-only from here (getConfig says what is SET, never the key)
+  agentGetConfig: () => ipcRenderer.invoke('agent:getConfig'),
+  agentSetConfig: (o) => ipcRenderer.invoke('agent:setConfig', o),
+  agentModels: () => ipcRenderer.invoke('agent:models'),
+  agentStart: (o) => ipcRenderer.invoke('agent:start', o),
+  agentJob: (id) => ipcRenderer.invoke('agent:job', { id }),
   mailCancelSend: (id) => ipcRenderer.invoke('mail:cancelSend', { id }),
   mailSendNow: (id) => ipcRenderer.invoke('mail:sendNow', { id }),
   mailContacts: (o) => ipcRenderer.invoke('mail:contacts', o || {}),
@@ -212,6 +231,7 @@ contextBridge.exposeInMainWorld('sshApi', {
     ipcRenderer.on('whatsapp:qr', handler);
     return () => ipcRenderer.removeListener('whatsapp:qr', handler);
   },
+  onWebCtxNote: (cb) => ipcRenderer.on('web:ctx-note', (_e, p) => cb(p)), // right-click -> sticky note
   onWebOpenTab: (cb) => {
     const handler = (_e, payload) => cb(payload);
     ipcRenderer.on('web:open-tab', handler);
