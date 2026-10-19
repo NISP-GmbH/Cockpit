@@ -775,13 +775,14 @@ list windows, bring one to the front and start apps. Windows for now (macOS late
    ```
    (Settings shows the exact path.) Claude Code then has the tools `screenshot`, `zoom`, `click`,
    `move_mouse`, `drag`, `scroll`, `type_text`, `key`, `list_windows`, `focus_window`,
-   `launch_app`, `ui_elements`, `ui_action`, `read_text`, `wait_for` and `what_changed`; a
+   `launch_app`, `ui_elements`, `ui_action`, `read_text`, `wait_for`, `what_changed`, `clipboard`,
+   `read_terminal`, `write_terminal`, `read_web_tab`, `set_window`, `watch_me` and `recipes`; a
    screenshot reaches it as a picture. A screenshot does not have to be the whole
    screen: it can be **one window** (by title) or **a region** (x, y, width, height), captured at
    full resolution - smaller, sharper and cheaper for the model than a full shot. Claude is told to
    prefer that once it knows where it works; `max_width` asks for an even smaller picture.
 
-   Four tools make it more reliable and cheaper than pictures alone:
+   These tools make it more reliable and cheaper than pictures alone:
    - **`ui_elements` / `ui_action`** - the buttons, fields, checkboxes, menus and list items of a
      window, read through Windows accessibility, with their names, values and states. Claude presses
      "Save" or fills "File name" by what it is, not by guessing pixels - mostly without moving the
@@ -794,6 +795,41 @@ list windows, bring one to the front and start apps. Windows for now (macOS late
      terminals are not held up meanwhile, and Ctrl+Alt+Esc ends it too.
    - **`what_changed`** - compares the screen with the last screenshot and returns a picture of only
      the part that changed (or "nothing changed"). A blinking cursor does not count.
+   - **`read_terminal`** - the exact text of a terminal instead of a picture of it: a **Cockpit
+     terminal tab** by its title (scrollback included - an SSH session's output, for example), or any
+     window that offers its text to Windows accessibility (Windows Terminal, a console, an editor).
+     The last lines, or only the lines containing a word. Reading Cockpit's tabs can be switched off
+     in Settings; every read is in the Black Box.
+   - **`clipboard`** - **paste** puts text into the field in front through the clipboard and
+     Ctrl+V (much faster than typing it), then puts **your** clipboard back as it was; **copy** presses
+     Ctrl+C in the app in front and returns the selection (refused in terminal windows, where Ctrl+C
+     would interrupt the program - `read_terminal` reads those); **read** / **write** the clipboard
+     itself. Cockpit's clipboard history never records this, and text that looks like a password or
+     a key (or comes from a password manager) is never handed to the program.
+   - **`write_terminal`** - the other half of `read_terminal`: Claude types a command into **another
+     Cockpit terminal tab** (a local shell or an SSH session) and gets back exactly what it printed -
+     it waits until the output is quiet, or until a given text appears. No screenshot, and the focus
+     stays where it is. Cockpit asks you **for each tab** first ("may the program in *claude* type
+     into *my-server*?"); a yes lasts as long as that terminal's screen control. Never into its own
+     terminal, never while a preset or a file transfer runs there. Keys like Ctrl+C, arrows or Tab
+     work too. The Black Box gets the length of each line, not the line. Can be switched off in
+     Settings.
+   - **`read_web_tab`** - the text of a **Cockpit web tab** straight from the page, optionally with
+     its links and form fields (a password field never gives its value) - exact, and much cheaper
+     than a screenshot. Same Settings switch as reading terminal tabs.
+   - **`set_window`** - move, size, snap (left / right / top / bottom half, a quarter, the whole
+     work area, centred), maximize, minimize or restore a window, on any monitor. Positions are the
+     visible frame, so a window snapped left really fills the left half. Not Cockpit's windows.
+   - **`watch_me`** - **teach by showing**: when Claude does not know how something is done in an
+     app, it asks you to show it. The red pill says what to show (*"show me: how you export the
+     report as PDF"*); you do it with your own mouse and keyboard and press **Done** (or
+     **Ctrl+Alt+Enter**). Claude gets the steps with **what** you clicked and typed into - *Click
+     MenuItem "File" in "Report - Word"*, *Type "Q3.pdf" into Edit "File name:"* - not just
+     positions, and can repeat them. Not recorded: anything a program does (only your own hand),
+     clicks and keys in Cockpit's windows, and what you type into password fields (only how many
+     characters). **Cancel** in the pill throws it away. With a name the steps are kept as a
+     **recipe** (`recipes` lists, reads and deletes them; Settings lists them too, with a delete
+     button). Recipes stay on this machine.
 2. Start `claude` in a **Cockpit local terminal** (opened after switching it on - a terminal that
    was already open gets it once its shell starts again) and ask it to do something on screen.
 3. The first time a terminal asks, Cockpit asks **you**: which terminal, what it wants to do first,
@@ -809,7 +845,15 @@ While a terminal may control the screen:
   at Cockpit are refused, so a program cannot type into your other terminals, change Settings or
   answer the question for itself. While a question is open, nothing is clicked or typed at all;
 - every action goes to the **Black Box** (Terminal lane) - typed text only as its length, never the
-  text; screenshots are not stored.
+  text; screenshots are not stored;
+- a **red ring** shows on the screen for a moment where it is about to click (Settings: "Show a
+  ring where it is about to click");
+- **step mode** (the permission question has a box for it, Settings has the default, and the pill
+  has a **Step** switch): every click, key press, typing, paste and app start waits for your OK in the
+  red pill - it says what and where (the ring marks the point; for typing it shows the text).
+  **OK** (or **Ctrl+Alt+Enter**) does it, **Skip** leaves it out and tells the program, **Let it run**
+  switches step mode off for that terminal. Answering never takes the keyboard focus away from the
+  window the action is for. No answer within two minutes = skipped.
 
 For scripts there is also a command, on the PATH of every Cockpit local terminal:
 `cockpit-screen screenshot` (prints the path of a PNG; `--window Notepad` or
@@ -818,7 +862,10 @@ For scripts there is also a command, on the PATH of every Cockpit local terminal
 `cockpit-screen focus Notepad`, `cockpit-screen launch notepad`, `cockpit-screen controls Notepad`
 then `cockpit-screen act 3.12 click`, `cockpit-screen text --window Notepad`,
 `cockpit-screen wait --text "Done" --timeout 30` (exit code 2 when it timed out),
-`cockpit-screen changes` - `cockpit-screen help` lists all.
+`cockpit-screen changes`, `cockpit-screen terminal build --lines 50`,
+`cockpit-screen clip paste "..."`, `cockpit-screen write my-server "df -h"` (prints the answer),
+`cockpit-screen web Docs --fields`, `cockpit-screen window Notepad --snap left`,
+`cockpit-screen learn watch "how you export the report" --name export` - `cockpit-screen help` lists all.
 Coordinates are in the last screenshot (it is scaled down to the width set in Settings; Cockpit maps
 them back to the real pixels, monitor and display scaling included).
 

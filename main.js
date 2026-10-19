@@ -512,13 +512,23 @@ app.whenReady().then(() => {
     userData: app.getPath('userData'),
     appDir: __dirname,
     send,
-    electron: { BrowserWindow, globalShortcut, nativeImage, screen },
+    electron: { BrowserWindow, globalShortcut, nativeImage, screen, clipboard },
+    // paste / copy put text on the clipboard for a moment: the history must not keep it
+    clipHooks: { hold: () => clipHistory.hold(), release: () => clipHistory.release() },
     getMainWindow: () => mainWindow,
     preload: path.join(__dirname, 'preload.js'),
   });
   {
     const s = store.loadSettings();
-    screenCtl.configure({ enabled: s.screenControl === true, offLimits: s.screenOffLimits !== false, maxWidth: Number(s.screenMaxWidth) || 1280 });
+    screenCtl.configure({
+      enabled: s.screenControl === true,
+      offLimits: s.screenOffLimits !== false,
+      maxWidth: Number(s.screenMaxWidth) || 1280,
+      showClicks: s.screenShowClicks !== false,
+      stepMode: s.screenStepMode === true,
+      readTabs: s.screenReadTabs !== false,
+      writeTabs: s.screenWriteTabs !== false,
+    });
   }
   aiReply = new AiReply({ store, encrypt: encryptSecret, decrypt: decryptSecret });
 
@@ -1142,8 +1152,16 @@ app.whenReady().then(() => {
   // --- Screen control (screen-control.js) ---
   ipcMain.handle('screen:status', () => (screenCtl ? screenCtl.status() : { supported: false }));
   ipcMain.handle('screen:configure', (_e, o) => (screenCtl ? screenCtl.configure(o || {}) : { supported: false }));
-  ipcMain.on('screen:answer', (_e, { askId, choice }) => screenCtl && screenCtl.answer(askId, choice));
+  ipcMain.on('screen:answer', (_e, { askId, choice, step }) => screenCtl && screenCtl.answer(askId, choice, { step: typeof step === 'boolean' ? step : undefined }));
+  ipcMain.on('screen:stepAnswer', (_e, { id, choice }) => screenCtl && screenCtl.stepAnswer(id, choice));
+  ipcMain.on('screen:stepMode', (_e, { on }) => screenCtl && screenCtl.setStepMode(!!on));
+  ipcMain.on('screen:pageAnswer', (e, { reqId, result }) => {
+    // only the main window holds the terminal tabs
+    if (screenCtl && mainWindow && !mainWindow.isDestroyed() && e.sender === mainWindow.webContents) screenCtl.pageAnswer(reqId, result);
+  });
   ipcMain.on('screen:stop', () => screenCtl && screenCtl.stop('the Stop button'));
+  ipcMain.handle('screen:recipes', () => (screenCtl ? screenCtl.recipesList() : []));
+  ipcMain.handle('screen:recipeDelete', (_e, { name }) => (screenCtl ? screenCtl.recipeDelete(name) : false));
   ipcMain.on('screen:revoke', (_e, { tabId }) => screenCtl && screenCtl.revoke(tabId));
   ipcMain.on('screen:title', (_e, { tabId, title }) => screenCtl && screenCtl.setTitle(tabId, title));
   ipcMain.handle('slack:history', async (_e, { channel }) => {

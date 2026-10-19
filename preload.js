@@ -158,8 +158,13 @@ contextBridge.exposeInMainWorld('sshApi', {
   // --- Screen control for programs in local terminals (screen-control.js); tokens never come here ---
   screenStatus: () => ipcRenderer.invoke('screen:status'),
   screenConfigure: (o) => ipcRenderer.invoke('screen:configure', o),
-  screenAnswer: (askId, choice) => ipcRenderer.send('screen:answer', { askId, choice }),
+  screenAnswer: (askId, choice, opts) => ipcRenderer.send('screen:answer', { askId, choice, step: opts && opts.step }),
+  screenStepAnswer: (id, choice) => ipcRenderer.send('screen:stepAnswer', { id, choice }), // the pill
+  screenStepMode: (on) => ipcRenderer.send('screen:stepMode', { on: !!on }), // the pill's Step switch
+  screenPageAnswer: (reqId, result) => ipcRenderer.send('screen:pageAnswer', { reqId, result }), // read_terminal
   screenStop: () => ipcRenderer.send('screen:stop'),
+  screenRecipes: () => ipcRenderer.invoke('screen:recipes'), // what watch_me kept
+  screenRecipeDelete: (name) => ipcRenderer.invoke('screen:recipeDelete', { name }),
   screenRevoke: (tabId) => ipcRenderer.send('screen:revoke', { tabId }),
   screenTitle: (tabId, title) => ipcRenderer.send('screen:title', { tabId, title }),
   onScreenAsk: (cb) => {
@@ -183,6 +188,11 @@ contextBridge.exposeInMainWorld('sshApi', {
     return () => ipcRenderer.removeListener('screen:status', handler);
   },
   onScreenIndicator: (cb) => ipcRenderer.on('screen:indicator', (_e, d) => cb(d)), // the indicator window
+  onScreenPage: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('screen:page', handler);
+    return () => ipcRenderer.removeListener('screen:page', handler);
+  },
   focusWindow: () => ipcRenderer.invoke('app:focus'),
   bringToFront: () => ipcRenderer.invoke('app:toFront'),
   capturePage: (rect) => ipcRenderer.invoke('app:capturePage', rect),

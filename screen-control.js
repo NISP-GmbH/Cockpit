@@ -28,6 +28,7 @@ const net = require('net');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const { secretKind } = require('./clip-history');
 
 const ASK_TIMEOUT_MS = 60000;
 const DENY_COOLDOWN_MS = 20000; // a refused terminal does not reopen the question at once
@@ -35,14 +36,27 @@ const SPACE_TTL_MS = 10 * 60000; // how long a screenshot's coordinate space sta
 const TYPE_MAX = 4000;
 const TYPE_PIECE = 80; // characters per helper call, so Stop takes effect within one piece
 const HELPER_TIMEOUT_MS = 20000;
-const INPUT_METHODS = new Set(['move', 'click', 'drag', 'scroll', 'type', 'key', 'focus', 'launch', 'uiAct']);
+const INPUT_METHODS = new Set(['move', 'click', 'drag', 'scroll', 'type', 'key', 'focus', 'launch', 'uiAct', 'clip', 'winSet', 'termWrite']);
 // wait_for polls for up to a minute: it must not hold the ONE queue that long, so it runs beside it
 // and puts each single look into the queue.
-const OUTSIDE_QUEUE = new Set(['wait']);
+const OUTSIDE_QUEUE = new Set(['wait', 'termWrite', 'web', 'learn']);
 const GRID_CELL = 24; // px per cell of the change fingerprint
 const GRID_THRESHOLD = 18; // brightness steps a cell must move to count as changed (a caret does not)
 const WAIT_MAX_S = 60;
 const SCREEN_SPACE = { id: 'screen', ox: 0, oy: 0, scale: 1 }; // real pixels of the virtual desktop
+const RING_MS = 350; // the ring shows this long before a click lands
+const RING_PARK = { x: -20000, y: -20000 }; // where the ring waits, shown, between clicks
+const STEP_TIMEOUT_MS = 120000; // step mode: no answer = the step is skipped
+const STEP_OK_KEY = 'Ctrl+Alt+Return';
+const CLIP_MAX = 100000; // characters per clipboard read / write
+const WRITE_WAIT_MAX_S = 60; // write_terminal: the longest wait for the answer
+const WEB_TEXT_MAX = 200000; // read_web_tab: characters of page text
+const TEACH_DEFAULT_S = 300; // watch_me: how long the user has to show it
+const TEACH_MAX_S = 900;
+const RECIPES_MAX = 50;
+// Ctrl+C in a console with nothing selected interrupts the program running there: copy is refused
+// for these, read_terminal reads them instead.
+const TERMINAL_PROCESSES = /^(windowsterminal|openconsole|conhost|cmd|powershell|pwsh|wsl|bash|putty|kitty|mintty|wezterm(-gui)?|alacritty|tabby|hyper|mobaxterm|securecrt|termius)$/i;
 
 // Which cells of two fingerprints of the same area differ. Changed cells are grouped (8-neighbour);
 // a group no bigger than 2x2 cells is a blinking caret or cursor and is left out unless `small`.
@@ -52,14 +66,14 @@ function gridChanges(a, b, rect, o) {
   if (!a || !b || a.cols !== b.cols || a.rows !== b.rows) return { changed: true, cells: -1, box: { ...rect } };
   const { cols, rows, cell } = a;
   const thr = o.threshold || GRID_THRESHOLD;
-  const m = o.mask;
+  const ms = o.mask ? [].concat(o.mask) : [];
   const hit = new Uint8Array(cols * rows);
   for (let i = 0; i < hit.length; i++) {
     if (Math.abs(a.v[i] - b.v[i]) <= thr) continue;
-    if (m) {
+    if (ms.length) {
       const cx = rect.x + (i % cols) * cell;
       const cy = rect.y + Math.floor(i / cols) * cell;
-      if (cx < m.x + m.width && cx + cell > m.x && cy < m.y + m.height && cy + cell > m.y) continue;
+      if (ms.some((m) => cx < m.x + m.width && cx + cell > m.x && cy < m.y + m.height && cy + cell > m.y)) continue;
     }
     hit[i] = 1;
   }
@@ -134,6 +148,227 @@ function findText(lines, what) {
   }
   return null;
 }
+// write_terminal's keys: names -> what a terminal's keyboard sends.
+const TERM_KEYS = {
+  enter: '\r',
+  return: '\r',
+  tab: '\t',
+  'shift+tab': '\x1b[Z',
+  esc: '\x1b',
+  escape: '\x1b',
+  backspace: '\x7f',
+  space: ' ',
+  up: '\x1b[A',
+  down: '\x1b[B',
+  right: '\x1b[C',
+  left: '\x1b[D',
+  home: '\x1b[H',
+  end: '\x1b[F',
+  pageup: '\x1b[5~',
+  pagedown: '\x1b[6~',
+  insert: '\x1b[2~',
+  delete: '\x1b[3~',
+  del: '\x1b[3~',
+  f1: '\x1bOP',
+  f2: '\x1bOQ',
+  f3: '\x1bOR',
+  f4: '\x1bOS',
+  f5: '\x1b[15~',
+  f6: '\x1b[17~',
+  f7: '\x1b[18~',
+  f8: '\x1b[19~',
+  f9: '\x1b[20~',
+  f10: '\x1b[21~',
+  f11: '\x1b[23~',
+  f12: '\x1b[24~',
+};
+// "ctrl+c", "up up enter", ["esc", ":wq", ...] -> the bytes. Ctrl+letter is the control character,
+// Alt+x is ESC x (what xterm sends with metaSendsEscape).
+function termKeys(spec) {
+  const list = Array.isArray(spec) ? spec : String(spec == null ? '' : spec).trim().split(/[\s,]+/);
+  let out = '';
+  for (const raw of list) {
+    const k = String(raw).trim().toLowerCase();
+    if (!k) continue;
+    if (TERM_KEYS[k] != null) {
+      out += TERM_KEYS[k];
+      continue;
+    }
+    const c = /^(?:ctrl|control)\+(.)$/.exec(k);
+    if (c) {
+      const ch = c[1];
+      if (ch >= 'a' && ch <= 'z') out += String.fromCharCode(ch.charCodeAt(0) - 96);
+      else if ('@[\\]^_'.includes(ch)) out += String.fromCharCode(ch.charCodeAt(0) - 64);
+      else if (ch === ' ') out += '\x00';
+      else throw new Error('There is no control character for "' + raw + '".');
+      continue;
+    }
+    const al = /^alt\+(.+)$/.exec(k);
+    if (al) {
+      if (al[1].length === 1) out += '\x1b' + al[1];
+      else if (TERM_KEYS[al[1]] != null) out += '\x1b' + TERM_KEYS[al[1]];
+      else throw new Error('Unknown key "' + raw + '".');
+      continue;
+    }
+    throw new Error('Unknown key "' + raw + '" - for example enter, tab, esc, up, down, ctrl+c, ctrl+d, ctrl+r, alt+b, f5.');
+  }
+  return out;
+}
+
+// A window placed by name: halves, quarters, the whole work area, or centred at its size.
+function snapRect(work, snap, cur) {
+  const { x, y, w, h } = work;
+  const hw = Math.round(w / 2);
+  const hh = Math.round(h / 2);
+  const r = {
+    left: { x, y, w: hw, h },
+    right: { x: x + hw, y, w: w - hw, h },
+    top: { x, y, w, h: hh },
+    bottom: { x, y: y + hh, w, h: h - hh },
+    top_left: { x, y, w: hw, h: hh },
+    top_right: { x: x + hw, y, w: w - hw, h: hh },
+    bottom_left: { x, y: y + hh, w: hw, h: h - hh },
+    bottom_right: { x: x + hw, y: y + hh, w: w - hw, h: h - hh },
+    full: { x, y, w, h },
+  }[snap];
+  if (r) return r;
+  if (snap === 'center') {
+    const cw = Math.min(cur.w, w);
+    const ch = Math.min(cur.h, h);
+    return { x: x + Math.round((w - cw) / 2), y: y + Math.round((h - ch) / 2), w: cw, h: ch };
+  }
+  return null;
+}
+
+// ---- watch_me: what the user did, as steps ----
+// The helper reports raw events (mouse down / up / wheel, characters, keys) with the element under
+// the pointer or in focus. Here they become steps: a press and release are a click (a double click
+// when two come quickly at the same spot) or a drag, characters into the same field are one "type",
+// Backspace takes back a typed character, wheel turns in a row are one scroll.
+const RECIPE_MAX_STEPS = 300;
+function recipeElLabel(el) {
+  if (!el) return 'the window';
+  const kind = el.type || 'element';
+  if (el.name) return kind + ' "' + String(el.name).slice(0, 60) + '"';
+  if (el.aid) return kind + ' #' + String(el.aid).slice(0, 40);
+  return kind + (el.in ? ' in ' + el.in : '');
+}
+function recipeWinLabel(s) {
+  if (s.window) return '"' + String(s.window).slice(0, 60) + '"' + (s.process ? ' (' + s.process + ')' : '');
+  return s.process || 'a window';
+}
+function recipeSay(s) {
+  const where = ' in ' + recipeWinLabel(s);
+  const wait = s.pause_s ? '(after ' + s.pause_s + ' s) ' : '';
+  if (s.do === 'click') {
+    const verb = s.double ? 'Double-click' : s.button === 'right' ? 'Right-click' : s.button === 'middle' ? 'Middle-click' : 'Click';
+    const at = !s.el || (!s.el.name && !s.el.aid) ? (s.at ? ' at ' + s.at.x + ',' + s.at.y + ' of the window' : '') : '';
+    return wait + verb + ' ' + recipeElLabel(s.el) + at + where;
+  }
+  if (s.do === 'drag') return wait + 'Drag ' + recipeElLabel(s.el) + ' from ' + s.at.x + ',' + s.at.y + ' to ' + s.to.x + ',' + s.to.y + ' of the window' + where;
+  if (s.do === 'type') {
+    const into = s.el ? ' into ' + recipeElLabel(s.el) : '';
+    if (s.secret) return wait + 'Type a password (' + s.secret + ' characters, not recorded - ask the user)' + into + where;
+    return wait + 'Type ' + JSON.stringify(s.text) + into + where;
+  }
+  if (s.do === 'key') return wait + 'Press ' + s.combo + where;
+  if (s.do === 'scroll') return wait + 'Scroll ' + (s.down > 0 ? 'down ' + s.down : 'up ' + -s.down) + where;
+  return wait + s.do;
+}
+function buildRecipe(events) {
+  const steps = [];
+  let down = null;
+  let lastT = null;
+  const base = (e) => {
+    const o = { window: e.window || '', process: e.process || '' };
+    if (e.x != null && e.wx != null) o.at = { x: e.x - e.wx, y: e.y - e.wy };
+    return o;
+  };
+  const push = (st, t) => {
+    if (lastT != null && t - lastT > 1500) st.pause_s = Math.round((t - lastT) / 100) / 10;
+    lastT = t;
+    st._t = t;
+    steps.push(st);
+  };
+  const sameField = (a, e) => a && a.do === 'type' && a.window === (e.window || '') && JSON.stringify(a.el || null) === JSON.stringify(e.el || null);
+  for (const e of events || []) {
+    if (!e || typeof e.k !== 'string') continue;
+    const prev = steps[steps.length - 1];
+    if (/down$/.test(e.k)) {
+      down = e;
+      continue;
+    }
+    if (/up$/.test(e.k)) {
+      const d = down;
+      down = null;
+      if (!d || d.k[0] !== e.k[0]) continue;
+      const button = { l: 'left', r: 'right', m: 'middle' }[d.k[0]];
+      if (button === 'left' && Math.hypot(e.x - d.x, e.y - d.y) > 8) {
+        const st = { do: 'drag', ...base(d), el: d.el || null };
+        st.to = { x: e.x - (d.wx || 0), y: e.y - (d.wy || 0) };
+        push(st, d.t);
+        continue;
+      }
+      if (prev && prev.do === 'click' && prev.button === button && !prev.double && d.t - prev._t <= 500 && Math.hypot(d.x - prev._x, d.y - prev._y) <= 6) {
+        prev.double = true;
+        continue;
+      }
+      const st = { do: 'click', button, ...base(d), el: d.el || null, _x: d.x, _y: d.y };
+      push(st, d.t);
+      continue;
+    }
+    if (e.k === 'wheel') {
+      // notches of 120; a touchpad sends small steps, so the sum is what counts
+      const notches = (d) => -Math.round(d / 120) || (d > 0 ? -1 : 1);
+      if (prev && prev.do === 'scroll' && prev.window === (e.window || '') && e.t - prev._t < 1500) {
+        prev._d += e.d || 0;
+        prev.down = notches(prev._d);
+        prev._t = e.t;
+        lastT = e.t;
+        continue;
+      }
+      push({ do: 'scroll', ...base(e), down: notches(e.d || 0), _d: e.d || 0 }, e.t);
+      continue;
+    }
+    if (e.k === 'char') {
+      if (sameField(prev, e) && !!prev.secret === !!e.secret) {
+        if (e.secret) prev.secret++;
+        else prev.text += e.c || '';
+        prev._t = e.t;
+        lastT = e.t;
+        continue;
+      }
+      const st = { do: 'type', window: e.window || '', process: e.process || '', el: e.el || null };
+      if (e.secret) st.secret = 1;
+      else st.text = e.c || '';
+      push(st, e.t);
+      continue;
+    }
+    if (e.k === 'key') {
+      const combo = String(e.combo || '');
+      if (combo === 'ctrl+alt+enter') continue; // the Done key
+      if (combo === 'backspace' && prev && prev.do === 'type' && prev.window === (e.window || '')) {
+        if (prev.secret) prev.secret = Math.max(0, prev.secret - 1);
+        else if (prev.text) prev.text = prev.text.slice(0, -1);
+        if (!prev.secret && !prev.text) steps.pop();
+        continue;
+      }
+      push({ do: 'key', window: e.window || '', process: e.process || '', combo }, e.t);
+    }
+  }
+  return steps.slice(0, RECIPE_MAX_STEPS).map((st) => {
+    const o = {};
+    for (const [k, v] of Object.entries(st)) if (k[0] !== '_' && v != null && v !== '') o[k] = v;
+    if (o.el) o.el = Object.fromEntries(Object.entries(o.el).filter(([k]) => !['ex', 'ey', 'ew', 'eh'].includes(k)));
+    o.say = recipeSay(o);
+    return o;
+  });
+}
+// A recipe as numbered lines, for the program and for the user.
+function recipeText(steps) {
+  return (steps || []).map((s, i) => i + 1 + '. ' + (s.say || recipeSay(s))).join('\n');
+}
+
 const STOP_ACCELERATOR = 'Ctrl+Alt+Escape';
 
 // ---- the Windows backend: one long-lived PowerShell running screen-win.cs ----
@@ -296,6 +531,23 @@ class ScreenControl {
     this.indicator = null;
     this.tick = null;
     this.shortcut = false;
+    this.showClicks = true; // the ring before a click
+    this.stepMode = false; // the default for the grant question's step-mode box
+    this.readTabs = true; // read_terminal may read Cockpit's terminal tabs
+    this.ring = null;
+    this.ringReady = null;
+    this.stepAsk = null; // the open step question { id, tabId, what, resolve, timer }
+    this.stepSeq = 0;
+    this.stepTimeoutMs = STEP_TIMEOUT_MS;
+    this.pasteSettleMs = 600;
+    this.stepKey = false;
+    this.pageWait = new Map(); // questions to the page (read_terminal)
+    this.pageSeq = 0;
+    this.clipHooks = o.clipHooks || null; // { hold, release }: keep our own clipboard use out of the history
+    this.writeTabs = true; // write_terminal may type into Cockpit's terminal tabs (each one asked for)
+    this.writeGrants = new Map(); // asking tabId -> Set of target tab ids it may type into
+    this.teach = null; // watch_me in progress { id, tabId, task, steps, resolve }
+    this.lastTeach = new Map(); // token -> the last demonstration, for learn save
   }
 
   get supported() {
@@ -319,7 +571,11 @@ class ScreenControl {
       mcpCommand: this.mcpCommand(),
       script: this.scriptPath(),
       stopKey: 'Ctrl+Alt+Esc',
-      grants: [...this.grants.entries()].map(([tabId, g]) => ({ tabId, until: g.until === Infinity ? null : g.until, title: this.titles.get(tabId) || '' })),
+      showClicks: this.showClicks,
+      stepMode: this.stepMode,
+      readTabs: this.readTabs,
+      writeTabs: this.writeTabs,
+      grants: [...this.grants.entries()].map(([tabId, g]) => ({ tabId, until: g.until === Infinity ? null : g.until, title: this.titles.get(tabId) || '', step: !!g.step })),
     };
   }
 
@@ -327,6 +583,11 @@ class ScreenControl {
   configure(o) {
     if (typeof o.offLimits === 'boolean') this.offLimits = o.offLimits;
     if (Number.isFinite(o.maxWidth)) this.maxWidth = Math.max(640, Math.min(2560, Math.round(o.maxWidth)));
+    if (typeof o.showClicks === 'boolean') this.showClicks = o.showClicks;
+    if (typeof o.stepMode === 'boolean') this.stepMode = o.stepMode;
+    if (typeof o.readTabs === 'boolean') this.readTabs = o.readTabs;
+    if (typeof o.writeTabs === 'boolean') this.writeTabs = o.writeTabs;
+    if (o.writeTabs === false) this.writeGrants.clear();
     if (typeof o.enabled === 'boolean' && o.enabled !== this.enabled) {
       if (o.enabled) this._enable();
       else this._disable();
@@ -415,6 +676,9 @@ class ScreenControl {
     if (this.grants.delete(tabId)) this._grantsChanged('closed', tabId);
     const a = this.asks.get(tabId);
     if (a) a.resolve('deny');
+    if (this.stepAsk && this.stepAsk.tabId === tabId) this.stepAsk.resolve('stop');
+    if (this.teach && this.teach.tabId === tabId) this.teach.resolve('stop');
+    this._writeGone(tabId);
     if (!keepTitle) this.titles.delete(tabId);
   }
 
@@ -490,19 +754,20 @@ class ScreenControl {
     return true;
   }
   _ask(tabId, method, args) {
+    // the answer may carry { step } (the dialog's step-mode box)
     const open = this.asks.get(tabId);
     if (open) return open.promise;
     const id = ++this.askSeq;
     let resolve;
     const promise = new Promise((r) => (resolve = r));
     const a = { id, promise, resolve: null, timer: null };
-    a.resolve = (choice) => {
+    a.resolve = (choice, opts) => {
       if (this.asks.get(tabId) !== a) return;
       this.asks.delete(tabId);
       clearTimeout(a.timer);
       if (choice !== 'deny') {
         const mins = choice === 'tab' ? Infinity : Math.max(1, Math.min(480, Number(choice) || 15));
-        this.grants.set(tabId, { until: mins === Infinity ? Infinity : Date.now() + mins * 60000, since: Date.now() });
+        this.grants.set(tabId, { until: mins === Infinity ? Infinity : Date.now() + mins * 60000, since: Date.now(), step: opts && typeof opts.step === 'boolean' ? opts.step : this.stepMode });
         this._grantsChanged('granted', tabId, choice);
       } else this._log(tabId, '🖱 Screen control refused', '');
       this.send('screen:asked', { askId: id, tabId, choice });
@@ -510,21 +775,63 @@ class ScreenControl {
     };
     a.timer = setTimeout(() => a.resolve('deny'), ASK_TIMEOUT_MS);
     this.asks.set(tabId, a);
-    this.send('screen:ask', { askId: id, tabId, title: this.titles.get(tabId) || '', first: this._describe(method, args) });
+    this.send('screen:ask', { askId: id, tabId, title: this.titles.get(tabId) || '', first: this._describe(method, args), stepMode: this.stepMode });
     this._toFront();
     return promise;
   }
-  answer(askId, choice) {
-    for (const [, a] of this.asks) if (a.id === askId) return a.resolve(['15', '60', 'tab', 'deny'].includes(String(choice)) ? String(choice) : 'deny');
+  answer(askId, choice, opts) {
+    for (const [, a] of this.asks) if (a.id === askId) return a.resolve(['15', '60', 'tab', 'deny', 'write'].includes(String(choice)) ? String(choice) : 'deny', opts);
+  }
+  // Typing into ANOTHER terminal tab is its own question, per target: being allowed to control the
+  // screen does not mean being allowed into the SSH session next door. A yes lasts as long as the
+  // asking terminal's screen control (it ends with it), and only for that one tab.
+  _askWrite(tabId, tgt) {
+    const key = 'w:' + tabId + ':' + tgt.id;
+    const open = this.asks.get(key);
+    if (open) return open.promise;
+    const id = ++this.askSeq;
+    let resolve;
+    const promise = new Promise((r) => (resolve = r));
+    const a = { id, promise, resolve: null, timer: null };
+    a.resolve = (choice) => {
+      if (this.asks.get(key) !== a) return;
+      this.asks.delete(key);
+      clearTimeout(a.timer);
+      const yes = choice === 'write' && this._granted(tabId);
+      if (yes) {
+        let set = this.writeGrants.get(tabId);
+        if (!set) this.writeGrants.set(tabId, (set = new Set()));
+        set.add(tgt.id);
+        this._log(tabId, '⌨ May type into ' + tgt.title, 'asked by ' + (this.titles.get(tabId) || 'a terminal'));
+      } else this._log(tabId, '⌨ Typing into ' + tgt.title + ' refused', '');
+      this.send('screen:asked', { askId: id, tabId, choice: yes ? 'write' : 'deny' });
+      resolve(yes ? 'write' : 'deny');
+    };
+    a.timer = setTimeout(() => a.resolve('deny'), ASK_TIMEOUT_MS);
+    this.asks.set(key, a);
+    this.send('screen:ask', { askId: id, tabId, kind: 'write', title: this.titles.get(tabId) || '', target: tgt.title, targetKind: tgt.kind });
+    this._toFront();
+    return promise;
+  }
+  // A tab is gone: its own write grants and open questions, and every grant to type into IT.
+  _writeGone(tabId) {
+    this.writeGrants.delete(tabId);
+    for (const set of this.writeGrants.values()) set.delete(tabId);
+    for (const [k, a] of [...this.asks]) if (k.startsWith('w:' + tabId + ':') || k.endsWith(':' + tabId)) a.resolve('deny');
   }
   revoke(tabId) {
+    if (this.stepAsk && this.stepAsk.tabId === tabId) this.stepAsk.resolve('stop');
+    if (this.teach && this.teach.tabId === tabId) this.teach.resolve('stop');
     if (this.grants.delete(tabId)) this._grantsChanged('revoked', tabId);
   }
   // Ctrl+Alt+Esc, the indicator's Stop, switching off: every grant ends, queued work is dropped.
   stop(why) {
     this.epoch++;
+    if (this.stepAsk) this.stepAsk.resolve('stop');
+    if (this.teach) this.teach.resolve('stop');
     const had = this.grants.size;
     this.grants.clear();
+    this.writeGrants.clear();
     for (const a of [...this.asks.values()]) a.resolve('deny');
     if (had) this._grantsChanged('stopped', null, why || 'Stopped');
   }
@@ -533,6 +840,8 @@ class ScreenControl {
     if (kind === 'granted') this._log(tabId, '🖱 Screen control allowed for ' + title, extra === 'tab' ? 'until the tab closes' : extra + ' min');
     else if (kind === 'stopped') this._log(null, '🛑 Screen control stopped', extra || '');
     else this._log(tabId, '🖱 Screen control ended for ' + title, kind);
+    if (kind !== 'granted' && tabId) this.writeGrants.delete(tabId); // typing into other tabs ends with it
+    if (kind !== 'granted' && tabId && this.teach && this.teach.tabId === tabId) this.teach.resolve('stop');
     this.send('screen:status', this.status());
     this._syncIndicator();
   }
@@ -600,6 +909,12 @@ class ScreenControl {
     if (method === 'text') return 'read the text on the screen';
     if (method === 'wait') return 'wait for something on the screen';
     if (method === 'changes') return 'look at what changed on the screen';
+    if (method === 'clip') return a.action === 'paste' ? 'paste text' : a.action === 'copy' ? 'copy the selected text' : a.action === 'write' ? 'put text on the clipboard' : 'read the clipboard';
+    if (method === 'term') return a.window ? 'read the text of a window' : 'read the text of a terminal tab';
+    if (method === 'termWrite') return 'type into the terminal tab ' + JSON.stringify(String(a.tab || '').slice(0, 40));
+    if (method === 'web') return a.tab ? 'read the web tab ' + JSON.stringify(String(a.tab).slice(0, 40)) : 'list the web tabs';
+    if (method === 'winSet') return 'move or size a window';
+    if (method === 'learn') return a.action === 'watch' || !a.action ? 'watch you do something, to learn it' : 'read the saved recipes';
     return method;
   }
   // Where answers that are not pictures (controls, text, changes) give positions: the current
@@ -659,20 +974,26 @@ class ScreenControl {
   }
   // The indicator pill in real pixels: its countdown must not count as a change or as text.
   _indicatorRect() {
-    const ind = this.indicator;
-    if (!ind || ind.isDestroyed() || !ind.isVisible()) return null;
-    const b = ind.getBounds();
+    return this._winRect(this.indicator);
+  }
+  // Cockpit's own marks on the screen (the pill, the click ring): never a change, never text.
+  _masks() {
+    return [this._indicatorRect(), this.ringAt ? this._winRect(this.ring) : null].filter(Boolean);
+  }
+  _winRect(win) {
+    if (!win || win.isDestroyed() || !win.isVisible()) return null;
+    const b = win.getBounds();
     const scr = this.electron && this.electron.screen;
     try {
-      return scr && scr.dipToScreenRect ? scr.dipToScreenRect(ind, b) : b;
+      return scr && scr.dipToScreenRect ? scr.dipToScreenRect(win, b) : b;
     } catch (_) {
       return b;
     }
   }
   async _ocr(rect) {
     const r = await this.backend.call('ocr', rect);
-    const m = this._indicatorRect();
-    const inM = (l) => m && l.x + l.w / 2 >= m.x && l.x + l.w / 2 < m.x + m.width && l.y + l.h / 2 >= m.y && l.y + l.h / 2 < m.y + m.height;
+    const ms = this._masks();
+    const inM = (l) => ms.some((m) => l.x + l.w / 2 >= m.x && l.x + l.w / 2 < m.x + m.width && l.y + l.h / 2 >= m.y && l.y + l.h / 2 < m.y + m.height);
     return { lines: (r.lines || []).filter((l) => !inM(l)), lang: r.lang || '' };
   }
   _grid(rect) {
@@ -737,21 +1058,26 @@ class ScreenControl {
         await this.backend.call('move', p);
         return { physical: p };
       },
-      click: async (token, tabId, a) => {
+      click: async (token, tabId, a, epoch) => {
         await this._waitForAsks();
         const p = await this._point(token, a, a.x, a.y);
         await this._guardPoint(p);
         const button = ['left', 'right', 'middle'].includes(a.button) ? a.button : 'left';
+        const name = a.double ? 'Double-click' : button === 'left' ? 'Click' : button[0].toUpperCase() + button.slice(1) + ' click';
+        await this._confirm(tabId, epoch, { title: name + ' at ' + a.x + ',' + a.y, at: p });
+        await this._guardPoint(p); // the screen may have moved on while the user looked
         await this.backend.call('click', { ...p, button, count: a.double ? 2 : 1 });
         this._log(tabId, '🖱 ' + (a.double ? 'Double-click' : button === 'left' ? 'Click' : button + ' click'), p.x + ',' + p.y);
         return { physical: p };
       },
-      drag: async (token, tabId, a) => {
+      drag: async (token, tabId, a, epoch) => {
         await this._waitForAsks();
         const p = await this._point(token, a, a.x, a.y);
         const q = await this._point(token, a, a.to_x, a.to_y);
         await this._guardPoint(p);
         await this._guardPoint(q);
+        await this._confirm(tabId, epoch, { title: 'Drag from ' + a.x + ',' + a.y + ' to ' + a.to_x + ',' + a.to_y, at: p });
+        await this._guardPoint(p);
         await this.backend.call('drag', { x: p.x, y: p.y, x2: q.x, y2: q.y });
         this._log(tabId, '🖱 Drag', p.x + ',' + p.y + ' -> ' + q.x + ',' + q.y);
         return { from: p, to: q };
@@ -766,11 +1092,15 @@ class ScreenControl {
         this._log(tabId, '🖱 Scroll', (dy ? dy + ' down ' : '') + (dx ? dx + ' right' : ''));
         return { physical: p };
       },
-      type: async (token, tabId, a, epoch) => {
+      type: async (token, tabId, a, epoch, confirmed) => {
         const text = String(a.text == null ? '' : a.text);
         if (text.length > TYPE_MAX) throw new Error('At most ' + TYPE_MAX + ' characters per call.');
         await this._waitForAsks();
         await this._guardForeground();
+        if (!confirmed) {
+          await this._confirm(tabId, epoch, { title: 'Type ' + text.length + ' characters', preview: text, into: true });
+          await this._guardForeground();
+        }
         for (let i = 0; i < text.length; i += TYPE_PIECE) {
           if (epoch !== this.epoch || !this._granted(tabId)) throw new Error('Stopped by the user after ' + i + ' characters.');
           await this.backend.call('type', { text: text.slice(i, i + TYPE_PIECE) });
@@ -778,10 +1108,12 @@ class ScreenControl {
         this._log(tabId, '⌨ Typed', text.length + ' characters'); // never the text: it may be a password
         return { typed: text.length };
       },
-      key: async (token, tabId, a) => {
+      key: async (token, tabId, a, epoch) => {
         const combo = String(a.combo || '').trim();
         if (!combo || combo.length > 40) throw new Error('A key combination like "ctrl+s" or "enter".');
         await this._waitForAsks();
+        await this._guardForeground();
+        await this._confirm(tabId, epoch, { title: 'Press ' + combo, into: true });
         await this._guardForeground();
         await this.backend.call('key', { combo });
         this._log(tabId, '⌨ Key', combo);
@@ -802,9 +1134,11 @@ class ScreenControl {
         this._log(tabId, '🪟 Focus', w.title.slice(0, 80));
         return { focused: ok, title: w.title, process: w.process };
       },
-      launch: async (token, tabId, a) => {
+      launch: async (token, tabId, a, epoch) => {
         const target = String(a.target || '').trim();
         if (!target || target.length > 500) throw new Error('What to start: an app name, a path or a URL.');
+        await this._waitForAsks();
+        await this._confirm(tabId, epoch, { title: 'Start ' + target.slice(0, 120) });
         await this.backend.call('launch', { target });
         this._log(tabId, '🚀 Started', target.slice(0, 120));
         return { started: target };
@@ -844,6 +1178,11 @@ class ScreenControl {
         if (value != null && value.length > TYPE_MAX) throw new Error('At most ' + TYPE_MAX + ' characters.');
         if (this.offLimits && it.pid === this.ownPid) throw new Error("That is part of a Cockpit window - Cockpit's own windows are not controlled.");
         await this._waitForAsks();
+        if (!['focus', 'show'].includes(action)) {
+          const label = it.type + (it.name ? ' "' + it.name.slice(0, 60) + '"' : '');
+          const verb = { click: 'Press', set_value: 'Fill', toggle: 'Toggle', expand: 'Expand', collapse: 'Collapse', select: 'Select' }[action];
+          await this._confirm(tabId, epoch, { title: verb + ' ' + label, preview: value, at: { x: it.x + Math.round(it.w / 2), y: it.y + Math.round(it.h / 2) } });
+        }
         const r = await this.backend.call('uiAct', { snap: Number(m[1]), idx: Number(m[2]), action, value });
         let done = r.done;
         if (r.needMouse) {
@@ -854,7 +1193,7 @@ class ScreenControl {
           done = 'clicked with the mouse (it has no button behaviour of its own)';
         } else if (r.needType) {
           // a field without a settable value: it has the focus now, so type into it
-          await this._methods.type.call(this, token, tabId, { text: value }, epoch);
+          await this._methods.type.call(this, token, tabId, { text: value }, epoch, true); // confirmed above
           done = 'typed (the field cannot be set directly)';
         }
         const what = it.type + (it.name ? ' "' + it.name.slice(0, 40) + '"' : '');
@@ -914,7 +1253,7 @@ class ScreenControl {
             await pause(250);
           }
         }
-        const opts = () => ({ mask: this._indicatorRect(), small: !!a.small });
+        const opts = () => ({ mask: this._masks(), small: !!a.small });
         let prev = await look(() => this._grid(t.rect));
         const base = prev;
         let last = Date.now();
@@ -944,7 +1283,7 @@ class ScreenControl {
         const look = this.looks.get(token);
         if (!look || !look.grid || Date.now() - look.at > SPACE_TTL_MS) throw new Error('Take a screenshot first - what_changed compares the screen with the last one.');
         const g = await this._grid(look.rect);
-        const d = gridChanges(look.grid, g, look.rect, { mask: this._indicatorRect(), small: !!a.small });
+        const d = gridChanges(look.grid, g, look.rect, { mask: this._masks(), small: !!a.small });
         if (!d.changed) {
           this._log(tabId, '📷 Changes', 'nothing');
           return { changed: false, of: look.rect };
@@ -959,6 +1298,341 @@ class ScreenControl {
         look.grid = g; // the next what_changed reports what changes after THIS
         look.at = Date.now();
         return { ...shot, changed: true, cells: d.cells, of: R };
+      },
+
+      // ---- the clipboard ----
+      // paste: the text goes onto the clipboard, Ctrl+V, then the user's clipboard comes back -
+      // much faster than typing, and the user loses nothing. copy: Ctrl+C in the app in front,
+      // the text comes back, the clipboard as it was. read / write: the clipboard itself.
+      // Our own use is kept out of the clipboard history (hold / release); anything that looks like a
+      // secret (a password manager's marker, a key, a password) is never handed to the program.
+      clip: async (token, tabId, a, epoch) => {
+        const action = String(a.action || '');
+        const c = this.electron && this.electron.clipboard;
+        if (!c) throw new Error('No clipboard here.');
+        const formatsNow = () => (c.availableFormats ? c.availableFormats() : []);
+        if (action === 'read') {
+          const t = c.readText() || '';
+          const k = t && secretKind(t, formatsNow());
+          this._log(tabId, '📋 Clipboard read', k ? 'a secret - not passed on' : t.length + ' characters');
+          if (k) return { text: null, secret: k };
+          return { text: t.slice(0, CLIP_MAX), length: t.length, cut: t.length > CLIP_MAX };
+        }
+        if (action === 'write') {
+          const t = String(a.text == null ? '' : a.text);
+          if (t.length > CLIP_MAX) throw new Error('At most ' + CLIP_MAX + ' characters.');
+          c.writeText(t);
+          this._log(tabId, '📋 Clipboard written', t.length + ' characters');
+          return { written: t.length };
+        }
+        if (action === 'paste') {
+          const t = String(a.text == null ? '' : a.text);
+          if (!t) throw new Error('Nothing to paste.');
+          if (t.length > CLIP_MAX) throw new Error('At most ' + CLIP_MAX + ' characters.');
+          await this._waitForAsks();
+          await this._guardForeground();
+          await this._confirm(tabId, epoch, { title: 'Paste ' + t.length + ' characters', preview: t, into: true });
+          await this._guardForeground();
+          const old = this._clipSnap();
+          this._clipHold();
+          try {
+            c.writeText(t);
+            await this.backend.call('key', { combo: 'ctrl+v' });
+            if (!a.keep) {
+              await new Promise((r) => setTimeout(r, this.pasteSettleMs)); // the app reads the clipboard after the key
+              if (c.readText() === t) this._clipRestore(old);
+            }
+          } finally {
+            this._clipRelease();
+          }
+          this._log(tabId, '📋 Pasted', t.length + ' characters'); // never the text
+          return { pasted: t.length, restored: !a.keep, filesLost: !a.keep && old.formats.some((x) => /FileName|uri-list|Shell IDList/i.test(x)) };
+        }
+        if (action === 'copy') {
+          await this._waitForAsks();
+          await this._guardForeground();
+          const fg = await this.backend.call('winInfo', {});
+          if (fg && TERMINAL_PROCESSES.test(fg.process || ''))
+            throw new Error('"' + (fg.title || fg.process) + '" is a terminal: Ctrl+C there can interrupt the running program. Use read_terminal with window to get its text.');
+          const old = this._clipSnap();
+          this._clipHold();
+          let t = '';
+          let formats = [];
+          try {
+            c.clear();
+            await this.backend.call('key', { combo: 'ctrl+c' });
+            for (let i = 0; i < 15 && !t; i++) {
+              await new Promise((r) => setTimeout(r, 100));
+              t = c.readText() || '';
+            }
+            formats = formatsNow();
+            this._clipRestore(old);
+          } finally {
+            this._clipRelease();
+          }
+          const k = t && secretKind(t, formats);
+          this._log(tabId, '📋 Copied', !t ? 'nothing' : k ? 'a secret - not passed on' : t.length + ' characters');
+          if (!t) return { text: null, empty: true };
+          if (k) return { text: null, secret: k };
+          return { text: t.slice(0, CLIP_MAX), length: t.length, cut: t.length > CLIP_MAX, from: fg ? fg.title || fg.process : '' };
+        }
+        throw new Error('clipboard action: read, write, paste or copy.');
+      },
+
+      // ---- the text of a terminal, without a picture ----
+      // A Cockpit terminal tab (its buffer, scrollback included - the page has it), or any window
+      // that offers its text through accessibility (Windows Terminal, a console, an editor).
+      term: async (token, tabId, a) => {
+        const n = Math.max(1, Math.min(5000, Math.round(Number(a.lines)) || 200));
+        const pick = (all) => {
+          const lines = all.map((x) => String(x).replace(/\s+$/, ''));
+          while (lines.length && !lines[lines.length - 1]) lines.pop();
+          const total = lines.length;
+          if (a.find) {
+            const f = String(a.find).toLowerCase();
+            const hits = [];
+            lines.forEach((l, i) => l.toLowerCase().includes(f) && hits.push({ n: i + 1, text: l }));
+            return { total, matches: hits.slice(-n), more: Math.max(0, hits.length - n) };
+          }
+          const from = Math.max(0, total - n);
+          return { total, first: from + 1, lines: lines.slice(from) };
+        };
+        if (a.window != null && a.window !== '') {
+          const w = await this._findWindow(a.window);
+          if (this.offLimits && w.pid === this.ownPid) throw new Error('That is a Cockpit window - for a Cockpit terminal tab use "tab".');
+          const r = await this.backend.call('winText', { handle: w.handle, max: 4000000 });
+          const out = pick(String(r.text || '').split(/\r\n|\r|\n/));
+          this._log(tabId, '📄 Read text', w.title.slice(0, 60) + ' (' + out.total + ' lines)');
+          return { source: 'window', title: w.title, process: w.process, ...out };
+        }
+        if (!this.readTabs) throw new Error("Reading Cockpit's terminal tabs is switched off (Cockpit: Settings > Screen control).");
+        if (a.tab == null || a.tab === '') {
+          const r = await this._askPage('tabs', { self: tabId });
+          if (!r.ok) throw new Error(r.error || 'no answer');
+          return { tabs: r.tabs };
+        }
+        const r = await this._askPage('read', { tab: String(a.tab), self: tabId });
+        if (!r.ok) throw new Error(r.error || 'no answer');
+        const out = pick(r.lines || []);
+        this._log(tabId, '📄 Read terminal', r.title + ' (' + out.total + ' lines)');
+        return { source: 'tab', title: r.title, kind: r.kind, screen: r.screen, ...out };
+      },
+
+      // ---- typing into a Cockpit terminal tab, and reading what it answered ----
+      // The other half of read_terminal: exact text both ways, no pixels, no focus taken. The page
+      // types it (the same path as the keyboard) and, unless told not to, waits until the output
+      // stops - or a given text appears - and hands back what came after the command.
+      // Outside the queue (the wait may be long); the question and the confirmation go through it.
+      termWrite: async (token, tabId, a, epoch) => {
+        if (!this.writeTabs) throw new Error("Typing into Cockpit's terminal tabs is switched off (Cockpit: Settings > Screen control).");
+        const text = String(a.text == null ? '' : a.text);
+        if (text.length > TYPE_MAX) throw new Error('At most ' + TYPE_MAX + ' characters per call.');
+        const keys = a.keys != null && a.keys !== '' ? termKeys(a.keys) : '';
+        if (!text && !keys) throw new Error('Say what to type (text) and/or which keys to press (keys).');
+        if (a.tab == null || String(a.tab).trim() === '') throw new Error('Which tab? read_terminal without a tab lists them.');
+        const enter = text && a.enter !== false && !/[\r\n]$/.test(text);
+        const data = text.replace(/\r?\n/g, '\r') + (enter ? '\r' : '') + keys;
+        const live = () => {
+          if (epoch !== this.epoch) throw new Error('Stopped by the user.');
+          if (!this._granted(tabId)) throw new Error('Screen control for this terminal ended.');
+        };
+        const tgt = await this._askPage('find', { tab: String(a.tab), self: tabId });
+        if (!tgt.ok) throw new Error(tgt.error || 'no answer');
+        if (tgt.id === tabId) throw new Error('That is the terminal you run in - type into another tab.');
+        const allowed = this.writeGrants.get(tabId);
+        if (!allowed || !allowed.has(tgt.id)) {
+          if ((await this._askWrite(tabId, tgt)) !== 'write') throw new Error('The user did not allow typing into the tab "' + tgt.title + '".');
+        }
+        live();
+        const what = keys && !text ? 'Press ' + String(a.keys) : 'Type ' + text.length + ' characters' + (enter ? ' + Enter' : '') + (keys ? ' + ' + String(a.keys) : '');
+        await this._step(async () => {
+          live();
+          await this._waitForAsks();
+          await this._confirm(tabId, epoch, { title: what + ' into the tab "' + tgt.title + '"', preview: text + (keys ? (text ? ' ' : '') + '[' + String(a.keys) + ']' : ''), target: 'Cockpit' });
+        });
+        live();
+        const wait = a.wait !== false;
+        const timeout = Math.max(1, Math.min(WRITE_WAIT_MAX_S, Number(a.timeout) || 10)) * 1000;
+        const quiet = Math.max(200, Math.min(10000, Number(a.quiet_ms) || 700));
+        const r = await this._askPage('write', { id: tgt.id, data, wait, until: a.until ? String(a.until) : '', quiet, timeout }, timeout + 5000);
+        if (!r.ok) throw new Error(r.error || 'no answer');
+        this._log(tabId, '⌨ Typed into ' + r.title, text.length + ' characters' + (keys ? ' + keys' : '')); // never the text
+        const out = { title: r.title, typed: text.length, keys: keys ? String(a.keys) : undefined, screen: r.screen };
+        if (!wait) return out;
+        const n = Math.max(1, Math.min(5000, Math.round(Number(a.lines)) || 200));
+        const lines = (r.lines || []).map((x) => String(x).replace(/\s+$/, ''));
+        while (lines.length && !lines[lines.length - 1]) lines.pop();
+        return { ...out, why: r.why, waited_ms: r.waited_ms, atPrompt: !!r.atPrompt, total: lines.length, lines: lines.slice(-n), cut: Math.max(0, lines.length - n) };
+      },
+
+      // ---- the text of a Cockpit web tab ----
+      web: async (token, tabId, a) => {
+        if (!this.readTabs) throw new Error("Reading Cockpit's tabs is switched off (Cockpit: Settings > Screen control).");
+        if (a.tab == null || String(a.tab).trim() === '') {
+          const r = await this._askPage('webTabs', {});
+          if (!r.ok) throw new Error(r.error || 'no answer');
+          return { tabs: r.tabs };
+        }
+        const max = Math.max(1000, Math.min(WEB_TEXT_MAX, Math.round(Number(a.max_chars)) || 30000));
+        const r = await this._askPage('web', { tab: String(a.tab), links: !!a.links, fields: !!a.fields, max: a.find ? WEB_TEXT_MAX : max }, 12000);
+        if (!r.ok) throw new Error(r.error || 'no answer');
+        const out = { title: r.title, url: r.url, length: r.length };
+        if (a.find) {
+          const f = String(a.find).toLowerCase();
+          const hits = [];
+          String(r.text || '')
+            .split(/\n/)
+            .forEach((l, i) => {
+              const t = l.trim();
+              if (t && t.toLowerCase().includes(f)) hits.push({ n: i + 1, text: t.slice(0, 500) });
+            });
+          out.matches = hits.slice(0, 200);
+          out.more = Math.max(0, hits.length - 200);
+        } else {
+          out.text = String(r.text || '').slice(0, max);
+          out.cut = r.length > out.text.length;
+        }
+        if (r.links) out.links = r.links;
+        if (r.fields) out.fields = r.fields;
+        if (r.selection) out.selection = r.selection;
+        this._log(tabId, '🌐 Read web tab', String(r.title || r.url || '').slice(0, 60));
+        return out;
+      },
+
+      // ---- moving and sizing a window ----
+      // x / y / width / height in a picture (as for a region screenshot) or snap to a half, quarter or
+      // the whole work area of a monitor, or maximize / minimize / restore.
+      winSet: async (token, tabId, a, epoch) => {
+        const w = await this._findWindow(a.window, true);
+        if (this.offLimits && w.pid === this.ownPid) throw new Error("That is a Cockpit window - Cockpit's own windows are not controlled.");
+        const mons = await this.backend.call('monitors');
+        const cx = w.x + w.w / 2;
+        const cy = w.y + w.h / 2;
+        const onIt = mons.findIndex((m) => cx >= m.x && cx < m.x + m.w && cy >= m.y && cy < m.y + m.h);
+        const mi = Number.isInteger(a.monitor) && mons[a.monitor] ? a.monitor : onIt >= 0 ? onIt : Math.max(0, mons.findIndex((m) => m.primary));
+        const mon = mons[mi];
+        const work = mon.ww ? { x: mon.wx, y: mon.wy, w: mon.ww, h: mon.wh } : { x: mon.x, y: mon.y, w: mon.w, h: mon.h };
+        const state = a.state ? String(a.state) : '';
+        if (state && !['maximize', 'minimize', 'restore'].includes(state)) throw new Error('state: maximize, minimize or restore.');
+        let rect = null;
+        let say = '';
+        if (a.snap) {
+          rect = snapRect(work, String(a.snap), w);
+          if (!rect) throw new Error('snap: left, right, top, bottom, top_left, top_right, bottom_left, bottom_right, full or center.');
+          say = 'Snap "' + w.title.slice(0, 60) + '" ' + String(a.snap).replace('_', ' ') + (mons.length > 1 ? ' on monitor ' + (mi + 1) : '');
+        } else if (a.x != null || a.y != null || a.width != null || a.height != null) {
+          const base = await this._regionBase(token, a.space);
+          const p = toPhysical(base, a.x != null ? a.x : 0, a.y != null ? a.y : 0);
+          rect = {
+            x: a.x != null ? p.x : w.x,
+            y: a.y != null ? p.y : w.y,
+            w: a.width != null ? Math.round(Number(a.width) / base.scale) : w.w,
+            h: a.height != null ? Math.round(Number(a.height) / base.scale) : w.h,
+          };
+          if (![rect.x, rect.y, rect.w, rect.h].every(Number.isFinite)) throw new Error('x, y, width and height must be numbers.');
+          say = (a.width != null || a.height != null ? 'Move / size' : 'Move') + ' "' + w.title.slice(0, 60) + '"';
+        } else if (state === 'maximize' && Number.isInteger(a.monitor) && a.monitor !== onIt) {
+          rect = snapRect(work, 'center', { w: Math.min(w.w, work.w), h: Math.min(w.h, work.h) }); // over there first
+        }
+        if (!rect && !state) throw new Error('Say where: snap, x/y/width/height, or a state (maximize, minimize, restore).');
+        if (rect && (rect.w < 40 || rect.h < 30)) throw new Error('Too small - at least 40 x 30 pixels.');
+        // it must land on a screen: at least a corner of 40 px visible
+        if (rect && !mons.some((m) => rect.x < m.x + m.w - 40 && rect.x + rect.w > m.x + 40 && rect.y < m.y + m.h - 30 && rect.y + rect.h > m.y + 10)) throw new Error('That would put the window off every screen.');
+        await this._waitForAsks();
+        await this._confirm(tabId, epoch, { title: say || state[0].toUpperCase() + state.slice(1) + ' "' + w.title.slice(0, 60) + '"' });
+        let r = null;
+        if (rect) r = await this.backend.call('winSet', { handle: w.handle, cmd: 'bounds', x: rect.x, y: rect.y, w: rect.w, h: rect.h });
+        if (state) r = await this.backend.call('winSet', { handle: w.handle, cmd: { maximize: 'max', minimize: 'min', restore: 'restore' }[state] });
+        this._log(tabId, '🪟 Window', (say || state) + (say ? '' : ' ' + w.title.slice(0, 60)));
+        const sp = this._outSpace(token);
+        return { title: w.title, process: w.process, physical: { x: r.x, y: r.y, w: r.w, h: r.h }, in_picture: { ...this._box(sp, r), space: sp.id }, minimized: !!r.minimized, maximized: !!r.maximized };
+      },
+
+      // ---- learning by watching the user ----
+      // watch: the pill asks the user to show something; their real clicks, typing and keys are
+      // recorded (with WHAT was clicked or typed into, via UI Automation) until they press Done.
+      // Injected input (any program's, this one's too) and Cockpit's own windows are not recorded;
+      // password fields give their length only. A name saves it as a recipe for later.
+      learn: async (token, tabId, a, epoch) => {
+        const action = String(a.action || 'watch');
+        if (action === 'list') return { recipes: this.recipesList() };
+        if (action === 'get') {
+          const r = this._recipeFind(a.name);
+          if (!r) throw new Error('No recipe "' + (a.name || '') + '". Saved: ' + (this.recipesList().map((x) => x.name).join(', ') || 'none') + '.');
+          return r;
+        }
+        if (action === 'delete') {
+          if (!this.recipeDelete(a.name)) throw new Error('No recipe "' + (a.name || '') + '".');
+          this._log(tabId, '🎓 Recipe deleted', String(a.name).slice(0, 60));
+          return { deleted: String(a.name) };
+        }
+        if (action === 'save') {
+          const last = this.lastTeach.get(token);
+          if (!last) throw new Error('Nothing watched yet - use action watch first.');
+          const r = this._recipeSave(a.name, last.task, last.steps);
+          this._log(tabId, '🎓 Recipe saved', r.name);
+          return { saved: r.name, steps: r.steps.length };
+        }
+        if (action !== 'watch') throw new Error('learn action: watch, list, get, save or delete.');
+        const task = String(a.task || '').trim().slice(0, 200);
+        if (!task) throw new Error('Say what the user should show you (task), e.g. "how you export the report as PDF".');
+        if (this.teach) throw new Error('Cockpit is already watching the user for another request.');
+        const limit = Math.max(10, Math.min(TEACH_MAX_S, Number(a.timeout) || TEACH_DEFAULT_S)) * 1000;
+        await this._step(() => this._waitForAsks());
+        if (epoch !== this.epoch) throw new Error('Stopped by the user.');
+        if (!this._granted(tabId)) throw new Error('Screen control for this terminal ended.');
+        await this._step(() => this.backend.call('recStart', { ownPid: this.ownPid }));
+        const events = [];
+        const id = ++this.stepSeq;
+        const t0 = Date.now();
+        let poll = null;
+        let timer = null;
+        const choice = await new Promise((resolve) => {
+          const t = { id, tabId, task, steps: 0, resolve: null };
+          t.resolve = (c) => {
+            if (this.teach !== t) return;
+            this.teach = null;
+            resolve(c);
+          };
+          this.teach = t;
+          timer = setTimeout(() => t.resolve('timeout'), limit);
+          poll = setInterval(() => {
+            this.backend.call('recPoll').then(
+              (r) => {
+                if (r && r.events && r.events.length) {
+                  events.push(...r.events);
+                  t.steps = buildRecipe(events).length;
+                }
+                if (this.teach === t) this._paintIndicator();
+              },
+              () => {}
+            );
+          }, 500);
+          this._stepKeySync();
+          this._paintIndicator();
+          this._log(tabId, '🎓 Watching you', task.slice(0, 80));
+        });
+        clearInterval(poll);
+        clearTimeout(timer);
+        try {
+          const r = await this.backend.call('recStop');
+          if (r && r.events) events.push(...r.events);
+        } catch (_) {
+          /* what came so far */
+        }
+        this._stepKeySync();
+        this._paintIndicator();
+        if (choice === 'stop' || epoch !== this.epoch) throw new Error('Stopped by the user.');
+        if (choice === 'cancel') {
+          this._log(tabId, '🎓 Showing cancelled', '');
+          throw new Error('The user cancelled the demonstration.');
+        }
+        const steps = buildRecipe(events);
+        this.lastTeach.set(token, { task, steps });
+        const out = { task, finished: choice === 'done' ? 'the user pressed Done' : 'the time ran out', seconds: Math.round((Date.now() - t0) / 1000), steps };
+        if (a.name) out.saved = this._recipeSave(a.name, task, steps).name;
+        this._log(tabId, '🎓 Learned', steps.length + ' steps' + (out.saved ? ', saved as ' + out.saved : ''));
+        return out;
       },
     };
   }
@@ -1045,6 +1719,272 @@ class ScreenControl {
     return img.resize({ width: w, height: h, quality: 'best' }).toPNG();
   }
 
+  // ---- the click ring and step mode ----
+  // Before an action lands: the ring at its point (RING_MS, setting showClicks). In step mode the
+  // pill asks first - OK / Skip / Let it run - and the ring stays on the point meanwhile. The pill is
+  // a non-focusable window, so answering never takes the focus from the window the action is for.
+  // The action is inside the ONE queue, so no other input can run while the question is open.
+  async _confirm(tabId, epoch, what) {
+    const g = this.grants.get(tabId);
+    if (what.into && (!g || g.step)) {
+      try {
+        const w = await this.backend.call('winInfo', {});
+        what.target = w && w.title ? w.title : w && w.process ? w.process : '';
+      } catch (_) {
+        /* the question says less */
+      }
+    } else if (what.at && g && g.step) {
+      try {
+        const w = await this.backend.call('winInfo', what.at);
+        what.target = w && w.title ? w.title : w && w.process ? w.process : '';
+      } catch (_) {
+        /* the question says less */
+      }
+    }
+    if (!g || !g.step) {
+      if (what.at && this.showClicks) {
+        await this._ringShow(what.at);
+        await new Promise((r) => setTimeout(r, RING_MS));
+        await this._ringHide();
+      }
+      return;
+    }
+    if (what.at) await this._ringShow(what.at);
+    const id = ++this.stepSeq;
+    const answer = await new Promise((resolve) => {
+      const ask = { id, tabId, what, resolve: null, timer: null };
+      ask.resolve = (c) => {
+        if (this.stepAsk !== ask) return;
+        this.stepAsk = null;
+        clearTimeout(ask.timer);
+        resolve(c);
+      };
+      ask.timer = setTimeout(() => ask.resolve('timeout'), this.stepTimeoutMs);
+      this.stepAsk = ask;
+      this._stepKeySync();
+      this.send('screen:step', { id, tabId, title: what.title, target: what.target || '' }); // the page / tests; never the preview
+      this._paintIndicator();
+    });
+    this._stepKeySync();
+    this._paintIndicator();
+    if (what.at) await this._ringHide();
+    if (answer === 'stop' || epoch !== this.epoch) throw new Error('Stopped by the user.');
+    if (answer === 'skip') {
+      this._log(tabId, '⏭ Skipped by you', what.title);
+      throw new Error('The user skipped this step: ' + what.title + '. Ask them or try something else.');
+    }
+    if (answer === 'timeout') throw new Error('The user did not confirm this step within ' + Math.round(this.stepTimeoutMs / 1000) + ' s: ' + what.title + '.');
+    if (answer === 'all') {
+      const gg = this.grants.get(tabId);
+      if (gg) gg.step = false;
+      this._log(tabId, '▶ Step mode off', 'the user let it run');
+      this.send('screen:status', this.status());
+    }
+    if (!this._granted(tabId)) throw new Error('Screen control for this terminal ended.');
+  }
+  stepAnswer(id, choice) {
+    const t = this.teach;
+    if (t && !this.stepAsk && (id == null || Number(id) === t.id)) return t.resolve(choice === 'ok' ? 'done' : 'cancel');
+    const a = this.stepAsk;
+    if (!a || (id != null && Number(id) !== a.id)) return;
+    a.resolve(['ok', 'skip', 'all', 'stop'].includes(choice) ? choice : 'skip');
+  }
+  // the pill's Step switch: every running grant at once
+  setStepMode(on) {
+    for (const g of this.grants.values()) g.step = !!on;
+    if (!on && this.stepAsk) this.stepAsk.resolve('ok'); // switching it off answers the open question
+    this._log(null, on ? '⏸ Step mode on' : '▶ Step mode off', 'from the pill');
+    this.send('screen:status', this.status());
+    this._paintIndicator();
+  }
+  _stepKeySync() {
+    const gs = this.electron && this.electron.globalShortcut;
+    if (!gs) return;
+    const want = !!(this.stepAsk || this.teach);
+    if (want && !this.stepKey) {
+      try {
+        this.stepKey = gs.register(STEP_OK_KEY, () => this.stepAnswer(null, 'ok'));
+      } catch (_) {
+        this.stepKey = false;
+      }
+    } else if (!want && this.stepKey) {
+      try {
+        gs.unregister(STEP_OK_KEY);
+      } catch (_) {
+        /* gone */
+      }
+      this.stepKey = false;
+    }
+  }
+  // The ring: a click-through, non-focusable window. It is HIDDEN again before the click, so the
+  // click's own guard (the window under the point) never sees it.
+  // The ring window is made when a grant starts and then stays SHOWN, parked off the screen: a
+  // window shown from hidden takes 300-400 ms to paint its first frame (measured), longer than the
+  // ring is up, so a hidden-then-shown ring never appeared. Moving a painted window takes ~15 ms.
+  // It is click-through (setIgnoreMouseEvents), and the real "window under the point" check does
+  // not see it; it is parked away again before the click anyway.
+  _ringPrepare() {
+    const { BrowserWindow } = this.electron || {};
+    if (!BrowserWindow || (this.ring && !this.ring.isDestroyed())) return;
+    this.ring = new BrowserWindow({
+      ...RING_PARK,
+      width: 80,
+      height: 80,
+      frame: false,
+      transparent: true,
+      resizable: false,
+      movable: false,
+      focusable: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      hasShadow: false,
+      show: false,
+      webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false },
+    });
+    this.ring.setIgnoreMouseEvents(true);
+    this.ring.setAlwaysOnTop(true, 'screen-saver');
+    const ring = this.ring;
+    this.ringReady = new Promise((resolve) => {
+      const go = () => {
+        if (!ring.isDestroyed()) ring.showInactive(); // shown, off the screen
+        resolve();
+      };
+      ring.once('ready-to-show', go);
+      setTimeout(go, 3000);
+      ring.loadFile(path.join(this.appDir, 'renderer', 'screen-ring.html')).catch(go);
+    });
+  }
+  async _ringShow(pt) {
+    const { BrowserWindow, screen } = this.electron || {};
+    if (!BrowserWindow) return;
+    const fresh = !this.ring || this.ring.isDestroyed();
+    this._ringPrepare();
+    await this.ringReady;
+    if (!this.ring || this.ring.isDestroyed()) return;
+    if (fresh) await new Promise((r) => setTimeout(r, 450)); // its first frame on the screen (300-400 ms measured)
+    let d = pt;
+    try {
+      if (screen && screen.screenToDipPoint) d = screen.screenToDipPoint(pt);
+    } catch (_) {
+      /* 1:1 */
+    }
+    if (!this.ring.isVisible()) this.ring.showInactive();
+    this.ring.setBounds({ x: Math.round(d.x - 40), y: Math.round(d.y - 40), width: 80, height: 80 });
+    this.ringAt = true;
+  }
+  async _ringHide() {
+    if (!this.ring || this.ring.isDestroyed() || !this.ringAt) return;
+    this.ring.setBounds({ ...RING_PARK, width: 80, height: 80 });
+    this.ringAt = false;
+    await new Promise((r) => setTimeout(r, 40)); // off the point before the click
+  }
+  _ringDrop() {
+    if (this.ring && !this.ring.isDestroyed()) this.ring.destroy();
+    this.ring = null;
+    this.ringReady = null;
+    this.ringAt = false;
+  }
+
+  // ---- recipes: demonstrations kept for later (userData/screen-recipes.json, this machine only) ----
+  _recipesFile() {
+    return path.join(this.userData, 'screen-recipes.json');
+  }
+  _recipes() {
+    try {
+      const list = JSON.parse(fs.readFileSync(this._recipesFile(), 'utf8'));
+      return Array.isArray(list) ? list.filter((r) => r && typeof r.name === 'string' && Array.isArray(r.steps)) : [];
+    } catch (_) {
+      return [];
+    }
+  }
+  _recipesWrite(list) {
+    const file = this._recipesFile();
+    const tmp = file + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(list, null, 1));
+    fs.renameSync(tmp, file);
+  }
+  _recipeFind(name) {
+    const n = String(name || '').trim().toLowerCase();
+    if (!n) return null;
+    const list = this._recipes();
+    return list.find((r) => r.name.toLowerCase() === n) || list.find((r) => r.name.toLowerCase().includes(n)) || null;
+  }
+  _recipeSave(name, task, steps) {
+    const n = String(name || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+    if (!n) throw new Error('A recipe needs a name.');
+    const list = this._recipes().filter((r) => r.name.toLowerCase() !== n.toLowerCase());
+    const r = { name: n, task: String(task || '').slice(0, 200), created: Date.now(), steps };
+    list.unshift(r);
+    this._recipesWrite(list.slice(0, RECIPES_MAX));
+    this.send('screen:status', this.status());
+    return r;
+  }
+  recipesList() {
+    return this._recipes().map((r) => ({ name: r.name, task: r.task || '', created: r.created || 0, steps: r.steps.length }));
+  }
+  recipeDelete(name) {
+    const n = String(name || '').trim().toLowerCase();
+    const list = this._recipes();
+    const keep = list.filter((r) => r.name.toLowerCase() !== n);
+    if (keep.length === list.length) return false;
+    this._recipesWrite(keep);
+    return true;
+  }
+
+  // ---- questions to the page (the terminal tabs live there) ----
+  _askPage(kind, payload, ms) {
+    const id = ++this.pageSeq;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pageWait.delete(id);
+        resolve({ ok: false, error: "Cockpit's window did not answer." });
+      }, ms || 4000);
+      this.pageWait.set(id, (r) => {
+        clearTimeout(timer);
+        resolve(r && typeof r === 'object' ? r : { ok: false, error: 'no answer' });
+      });
+      this.send('screen:page', { reqId: id, kind, ...payload });
+    });
+  }
+  pageAnswer(id, r) {
+    const f = this.pageWait.get(Number(id));
+    if (!f) return;
+    this.pageWait.delete(Number(id));
+    f(r);
+  }
+
+  // ---- the clipboard ----
+  // What is on it, in every form Electron can put back (text, HTML, RTF, a picture). Files on the
+  // clipboard cannot be restored - the answer says so.
+  _clipSnap() {
+    const c = this.electron && this.electron.clipboard;
+    if (!c) throw new Error('No clipboard here.');
+    const img = c.readImage ? c.readImage() : null;
+    return {
+      text: c.readText() || '',
+      html: c.readHTML ? c.readHTML() || '' : '',
+      rtf: c.readRTF ? c.readRTF() || '' : '',
+      image: img && !img.isEmpty() ? img : null,
+      formats: c.availableFormats ? c.availableFormats() : [],
+    };
+  }
+  _clipRestore(s) {
+    const c = this.electron.clipboard;
+    if (!s.text && !s.html && !s.rtf && !s.image) return c.clear();
+    const o = {};
+    if (s.text) o.text = s.text;
+    if (s.html) o.html = s.html;
+    if (s.rtf) o.rtf = s.rtf;
+    if (s.image) o.image = s.image;
+    c.write(o);
+  }
+  _clipHold() {
+    if (this.clipHooks && this.clipHooks.hold) this.clipHooks.hold();
+  }
+  _clipRelease() {
+    if (this.clipHooks && this.clipHooks.release) this.clipHooks.release();
+  }
+
   // ---- the indicator + the stop key ----
   _toFront() {
     const w = this.getMainWindow && this.getMainWindow();
@@ -1080,8 +2020,14 @@ class ScreenControl {
       clearInterval(this.tick);
       this.tick = null;
     }
-    if (on) this._paintIndicator();
-    else if (this.indicator && !this.indicator.isDestroyed()) this.indicator.hide();
+    if (on) {
+      this._paintIndicator();
+      this._ringPrepare(); // step mode shows it too, whatever the setting
+    }
+    else {
+      if (this.indicator && !this.indicator.isDestroyed()) this.indicator.hide();
+      this._ringDrop();
+    }
   }
   _paintIndicator() {
     for (const id of [...this.grants.keys()]) this._granted(id); // expire what has run out
@@ -1116,9 +2062,29 @@ class ScreenControl {
     const items = [...this.grants.entries()].map(([tabId, g]) => ({
       title: this.titles.get(tabId) || 'a terminal',
       left: g.until === Infinity ? null : Math.max(0, Math.ceil((g.until - Date.now()) / 60000)),
+      step: !!g.step,
     }));
+    const q = this.stepAsk;
+    const tq = this.teach;
+    const step = !q && tq
+      ? { id: tq.id, teach: true, who: this.titles.get(tq.tabId) || 'a terminal', title: tq.task, target: '', preview: tq.steps + (tq.steps === 1 ? ' step' : ' steps') + ' so far · what you type is recorded (not in password fields)', okKey: 'Ctrl+Alt+Enter' }
+      : q
+      ? {
+          id: q.id,
+          who: this.titles.get(q.tabId) || 'a terminal',
+          title: q.what.title,
+          target: q.what.target || '',
+          // what will be typed / filled: shown to the user here, never logged
+          preview: q.what.preview != null ? String(q.what.preview).slice(0, 160).replace(/\r?\n/g, ' ⏎ ') + (String(q.what.preview).length > 160 ? ' …' : '') : null,
+          okKey: 'Ctrl+Alt+Enter',
+        }
+      : null;
+    // the pill grows for a question and shrinks back, staying centred where the user put it
+    const want = step ? { width: 480, height: 132 } : { width: 360, height: 40 };
+    const b = this.indicator.getBounds();
+    if (b.width !== want.width || b.height !== want.height) this.indicator.setBounds({ x: Math.round(b.x + (b.width - want.width) / 2), y: b.y, ...want });
     try {
-      this.indicator.webContents.send('screen:indicator', { items, stopKey: 'Ctrl+Alt+Esc' });
+      this.indicator.webContents.send('screen:indicator', { items, stopKey: 'Ctrl+Alt+Esc', step, stepMode: items.some((i) => i.step) });
     } catch (_) {
       /* loading */
     }
@@ -1128,7 +2094,9 @@ class ScreenControl {
     this._disable();
     if (this.indicator && !this.indicator.isDestroyed()) this.indicator.destroy();
     this.indicator = null;
+    this._ringDrop();
+    this._stepKeySync();
   }
 }
 
-module.exports = { ScreenControl, WinBackend, toPhysical, fitScale, gridChanges, findText, STOP_ACCELERATOR };
+module.exports = { ScreenControl, WinBackend, toPhysical, fitScale, gridChanges, findText, termKeys, buildRecipe, recipeText, snapRect, STOP_ACCELERATOR };

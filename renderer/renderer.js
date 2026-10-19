@@ -18918,6 +18918,10 @@ function tmuxAutoOffer(rec, tries) {
 let screenControlOn = false; // saved: screenControl (main reads it at start, too)
 let screenOffLimits = true; // saved: screenOffLimits
 let screenMaxWidth = 1280; // saved: screenMaxWidth
+let screenShowClicks = true; // saved: screenShowClicks - the ring before a click
+let screenStepMode = false; // saved: screenStepMode - the default of the question's step box
+let screenReadTabs = true; // saved: screenReadTabs - read_terminal / read_web_tab may read these tabs
+let screenWriteTabs = true; // saved: screenWriteTabs - write_terminal may type into them (each target asked for)
 let screenGranted = new Set(); // tab ids
 const screenTabTitle = (rec) => (rec && rec.tabEl && rec.tabEl.querySelector('.title') ? rec.tabEl.querySelector('.title').textContent : '') || 'a terminal';
 // The Black Box and the red pill name terminals by their titles, which only the page knows.
@@ -18933,6 +18937,7 @@ function screenPushTitles() {
 }
 setInterval(screenPushTitles, 3000);
 function screenAskShow(a) {
+  if (a.kind === 'write') return screenAskWriteShow(a);
   document.getElementById('screen-dlg')?.remove();
   const rec = tabs.get(a.tabId);
   const title = rec ? screenTabTitle(rec) : a.title || 'a terminal';
@@ -18948,6 +18953,7 @@ function screenAskShow(a) {
     '<div class="pd-text sd-what">While allowed it can take screenshots, move the mouse, click, type and bring windows to the front - in every program except Cockpit itself' +
     (screenOffLimits ? '' : ' (no: Cockpit\'s own windows are NOT off limits now, see Settings)') +
     '. A red pill shows while it is allowed; <b>Ctrl+Alt+Esc</b> or its Stop ends it at once. Everything it does is in the Black Box.</div>' +
+    '<label class="sd-step"><input type="checkbox" data-sc-step' + (screenStepMode ? ' checked' : '') + '> Step mode: every click, key and typing waits for my OK (in the red pill)</label>' +
     '<div class="sd-buttons">' +
     '<button data-sc="15" class="primary">Allow 15 min</button><button data-sc="60">Allow 60 min</button>' +
     '<button data-sc="tab">Until the tab closes</button><button data-sc="deny" class="sd-deny">Don\'t allow</button></div>' +
@@ -18955,9 +18961,46 @@ function screenAskShow(a) {
     '</div>';
   document.body.appendChild(ov);
   const done = (choice) => {
-    api.screenAnswer(a.askId, choice);
+    api.screenAnswer(a.askId, choice, { step: !!ov.querySelector('[data-sc-step]').checked });
     ov.remove();
     if (rec) activateTab(rec.id);
+  };
+  ov.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-sc]');
+    if (b) done(b.dataset.sc);
+  });
+  ov.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      done('deny');
+    }
+  });
+  ov.querySelector('.sd-deny').focus(); // Enter on its own never allows anything
+}
+// write_terminal asks once per target tab: may the program in terminal A type into tab B?
+function screenAskWriteShow(a) {
+  document.getElementById('screen-dlg')?.remove();
+  const rec = tabs.get(a.tabId);
+  const title = rec ? screenTabTitle(rec) : a.title || 'a terminal';
+  const ov = document.createElement('div');
+  ov.id = 'screen-dlg';
+  ov.dataset.ask = a.askId;
+  ov.innerHTML =
+    '<div class="pd-box" role="dialog">' +
+    '<div class="pd-title">⌨ Type into another tab</div>' +
+    '<div class="pd-text">The program in the terminal <b>' + escapeHtml(title) + '</b> wants to type into the ' +
+    (a.targetKind === 'ssh' ? 'SSH session' : 'terminal') + ' <b>' + escapeHtml(a.target || '?') + '</b> and read what it answers.</div>' +
+    '<div class="pd-text sd-what">Whatever it types runs there as if you typed it' + (a.targetKind === 'ssh' ? ', on that server' : '') +
+    '. It may do so while its screen control lasts; only into this one tab. Step mode asks before each line, the Black Box lists every one, Ctrl+Alt+Esc stops it.</div>' +
+    '<div class="sd-buttons"><button data-sc="write" class="primary">Allow typing into ' + escapeHtml(String(a.target || 'it').slice(0, 30)) + '</button>' +
+    '<button data-sc="deny" class="sd-deny">Don\'t allow</button></div>' +
+    '<div class="sd-note">No answer within a minute counts as no.</div>' +
+    '</div>';
+  document.body.appendChild(ov);
+  const done = (choice) => {
+    api.screenAnswer(a.askId, choice, {});
+    ov.remove();
   };
   ov.addEventListener('click', (e) => {
     const b = e.target.closest('[data-sc]');
@@ -18984,6 +19027,228 @@ if (api.onScreenAsk) {
     logEvent('screen', { title: e.title, detail: e.detail, host: rec ? screenTabTitle(rec) : '', ref: rec ? { type: 'tab', tabKey: tabKey(rec) } : undefined });
   });
   api.onScreenStatus((s) => screenApplyStatus(s));
+  if (api.onScreenPage)
+    api.onScreenPage((q) => {
+      if (!q) return;
+      Promise.resolve()
+        .then(() => screenPageAnswer(q))
+        .then(
+          (r) => api.screenPageAnswer(q.reqId, r),
+          (e) => api.screenPageAnswer(q.reqId, { ok: false, error: (e && e.message) || String(e) })
+        );
+    });
+}
+// read_terminal: the text of a terminal TAB comes from its xterm buffer (scrollback included, the
+// screen a full-screen program draws on when that is up). Rows xterm wrapped itself are joined back
+// into the line the program wrote. Only for Cockpit's terminals; never anything else of the page.
+function screenTermTabs() {
+  return [...tabs.values()].filter((r) => (r.kind === 'local' || r.kind === 'ssh') && r.term);
+}
+function screenPageAnswer(q) {
+  try {
+    if (q.kind === 'tabs')
+      return {
+        ok: true,
+        tabs: screenTermTabs().map((r) => ({ title: screenTabTitle(r), kind: r.kind, status: r.status || '', self: r.id === q.self, lines: r.term.buffer.active.length, screen: r.term.buffer.active.type })),
+      };
+    if (q.kind === 'find') {
+      const found = screenFindTermTab(q);
+      if (found.error) return { ok: false, error: found.error };
+      return { ok: true, id: found.rec.id, title: screenTabTitle(found.rec), kind: found.rec.kind, status: found.rec.status || '' };
+    }
+    if (q.kind === 'write') return screenTermWrite(q);
+    if (q.kind === 'webTabs') return { ok: true, tabs: screenWebTabs().map((r) => ({ title: screenTabTitle(r), url: screenWebUrl(r) })) };
+    if (q.kind === 'web') return screenWebRead(q);
+    if (q.kind === 'read') {
+      const found = screenFindTermTab(q);
+      if (found.error) return { ok: false, error: found.error };
+      const rec = found.rec;
+      const buf = rec.term.buffer.active;
+      const lines = [];
+      for (let y = 0; y < buf.length; y++) {
+        const l = buf.getLine(y);
+        if (!l) continue;
+        const t = l.translateToString(true);
+        if (l.isWrapped && lines.length) lines[lines.length - 1] += t;
+        else lines.push(t);
+      }
+      return { ok: true, title: screenTabTitle(rec), kind: rec.kind, screen: buf.type, lines };
+    }
+    return { ok: false, error: 'unknown question' };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+// A terminal tab by what the program called it: "this", the exact title, else the one title that
+// contains it.
+function screenFindTermTab(q) {
+  const want = String(q.tab || '').trim().toLowerCase();
+  const list = screenTermTabs();
+  let rec = want === 'this' || want === 'self' ? list.find((r) => r.id === q.self) : null;
+  if (!rec) rec = list.find((r) => screenTabTitle(r).toLowerCase() === want);
+  if (!rec) {
+    const hits = list.filter((r) => screenTabTitle(r).toLowerCase().includes(want));
+    if (hits.length > 1) return { error: 'Several terminal tabs match "' + q.tab + '": ' + hits.map((r) => screenTabTitle(r)).join(', ') + '.' };
+    rec = hits[0];
+  }
+  if (!rec) return { error: 'No terminal tab "' + q.tab + '". Open ones: ' + list.map((r) => screenTabTitle(r)).join(', ') + '.' };
+  return { rec };
+}
+// The lines of a buffer from row `from` on, rows xterm wrapped joined back into one line.
+function screenBufLines(buf, from) {
+  const lines = [];
+  for (let y = Math.max(0, from); y < buf.length; y++) {
+    const l = buf.getLine(y);
+    if (!l) continue;
+    const t = l.translateToString(true);
+    if (l.isWrapped && lines.length) lines[lines.length - 1] += t;
+    else lines.push(t);
+  }
+  return lines;
+}
+// write_terminal: type into the tab (the keyboard's own path), then - unless told not to - wait until
+// its output has been quiet for a moment, or the awaited text appears, and return what came after
+// the command. A marker on the cursor's row says where "after" starts, even when the scrollback
+// trims old lines meanwhile. A full-screen program (vim, top, tmux's own screen) gives its screen.
+async function screenTermWrite(q) {
+  const rec = tabs.get(q.id);
+  if (!rec || !rec.term) return { ok: false, error: 'That tab is gone.' };
+  const title = screenTabTitle(rec);
+  if (rec.status !== 'connected') return { ok: false, error: 'The tab "' + title + '" is not connected (' + (rec.status || 'closed') + ').' };
+  if (rec._presetRun) return { ok: false, error: 'A preset is running in "' + title + '" - try again when it has finished.' };
+  if (rec._grab || rec._send) return { ok: false, error: 'A file transfer is running in "' + title + '" - try again when it has finished.' };
+  // a where-am-I probe or a size resync ends within milliseconds: wait for it, never type into it
+  const free = await new Promise((res) => whenInBandFree(rec, () => res(true), () => res(false)));
+  if (!free) return { ok: false, error: 'Cockpit itself is talking to "' + title + '" right now - try again in a moment.' };
+  const term = rec.term;
+  const startType = term.buffer.active.type;
+  let marker = null;
+  try {
+    marker = startType === 'normal' ? term.registerMarker(0) : null;
+  } catch (_) {
+    marker = null;
+  }
+  const sentAt = Date.now();
+  tmuxNoteTyping(rec);
+  leaveCopyModeIfParked(rec, q.data);
+  termSend(rec, q.data);
+  const read = () => {
+    const buf = term.buffer.active;
+    if (buf.type !== 'normal') return screenBufLines(buf, 0);
+    const from = marker && !marker.isDisposed && marker.line >= 0 ? marker.line : 0;
+    return screenBufLines(buf, from);
+  };
+  if (!q.wait) {
+    if (marker) marker.dispose();
+    return { ok: true, title, kind: rec.kind, screen: startType };
+  }
+  const until = String(q.until || '').toLowerCase();
+  const count = (t, w) => (w ? t.toLowerCase().split(w).length - 1 : 0);
+  const inCommand = count(String(q.data), until); // the echo of the command itself holds it that often
+  let why = 'timeout';
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 100));
+    const now = Date.now();
+    const got = (rec._lastDataAt || 0) > sentAt;
+    if (until) {
+      if (count(read().join('\n'), until) > inCommand) {
+        why = 'found';
+        break;
+      }
+    } else if (got && now - rec._lastDataAt >= q.quiet) {
+      why = 'quiet';
+      break;
+    } else if (!got && now - sentAt >= Math.max(2000, q.quiet * 3)) {
+      why = 'no output';
+      break;
+    }
+    if (now - sentAt >= q.timeout) break;
+    if (!tabs.has(rec.id)) return { ok: false, error: 'The tab "' + title + '" was closed.' };
+  }
+  const lines = read();
+  if (marker) marker.dispose();
+  return { ok: true, title, kind: rec.kind, screen: term.buffer.active.type, lines, why, waited_ms: Date.now() - sentAt, atPrompt: termAtShellPrompt(rec) };
+}
+// read_web_tab: the page's own text, links and form fields (the webview runs the script; a password
+// field never gives its value). Web tabs only - never Mail, Slack or the rest of Cockpit's page.
+function screenWebTabs() {
+  return [...tabs.values()].filter((r) => r.kind === 'web' && r.wv);
+}
+function screenWebUrl(r) {
+  try {
+    return r.wv.getURL() || r.url || '';
+  } catch (_) {
+    return r.url || '';
+  }
+}
+async function screenWebRead(q) {
+  const want = String(q.tab || '').trim().toLowerCase();
+  const list = screenWebTabs();
+  let rec = list.find((r) => screenTabTitle(r).toLowerCase() === want) || null;
+  if (!rec) {
+    const hits = list.filter((r) => screenTabTitle(r).toLowerCase().includes(want) || screenWebUrl(r).toLowerCase().includes(want));
+    if (hits.length > 1) return { ok: false, error: 'Several web tabs match "' + q.tab + '": ' + hits.map((r) => screenTabTitle(r)).join(', ') + '.' };
+    rec = hits[0] || null;
+  }
+  if (!rec) return { ok: false, error: 'No web tab "' + q.tab + '". Open ones: ' + (list.map((r) => screenTabTitle(r)).join(', ') || 'none') + '.' };
+  const opts = JSON.stringify({ max: Number(q.max) || 30000, links: !!q.links, fields: !!q.fields });
+  const code =
+    '(() => { const o = ' + opts + ';' +
+    'const vis = (el) => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return s.visibility !== "hidden" && s.display !== "none" && (r.width > 0 || r.height > 0); };' +
+    'const clean = (t, n) => String(t || "").trim().replace(/\\s+/g, " ").slice(0, n);' +
+    'const text = (document.body && document.body.innerText) || "";' +
+    'const out = { title: document.title, url: location.href, length: text.length, text: text.slice(0, o.max) };' +
+    'if (o.links) out.links = [...document.querySelectorAll("a[href]")].filter(vis).map((a) => ({ text: clean(a.innerText || a.getAttribute("aria-label") || a.title, 120), href: a.href })).filter((l) => /^(https?|mailto):/.test(l.href)).slice(0, 300);' +
+    'if (o.fields) out.fields = [...document.querySelectorAll("input, textarea, select, button")].filter((el) => el.type !== "hidden" && vis(el)).slice(0, 200).map((el) => {' +
+    '  const type = el.tagName === "INPUT" ? (el.type || "text") : el.tagName.toLowerCase();' +
+    '  const f = { type, label: clean((el.labels && el.labels[0] && el.labels[0].innerText) || el.getAttribute("aria-label") || el.placeholder || el.title || (el.tagName === "BUTTON" ? el.innerText : "") || el.name, 120) };' +
+    '  if (el.name) f.name = el.name; if (el.id) f.id = el.id;' +
+    '  if (type === "password") f.value = null;' +
+    '  else if (type === "checkbox" || type === "radio") f.checked = el.checked;' +
+    '  else if (el.tagName === "SELECT") f.value = el.selectedIndex >= 0 ? clean(el.options[el.selectedIndex].text, 200) : "";' +
+    '  else if (el.tagName !== "BUTTON" && !["submit", "button", "reset", "image"].includes(type)) f.value = String(el.value || "").slice(0, 500);' +
+    '  if (el.disabled) f.disabled = true; return f; });' +
+    'const sel = String(getSelection() || ""); if (sel) out.selection = sel.slice(0, 5000);' +
+    'return out; })()';
+  let r;
+  try {
+    r = await Promise.race([rec.wv.executeJavaScript(code), new Promise((res) => setTimeout(() => res('slow'), 8000))]);
+  } catch (e) {
+    return { ok: false, error: 'The page in "' + screenTabTitle(rec) + '" could not be read (' + ((e && e.message) || e) + ') - open the tab once so it loads.' };
+  }
+  if (r === 'slow') return { ok: false, error: 'The page in "' + screenTabTitle(rec) + '" did not answer in time.' };
+  if (!r || typeof r !== 'object') return { ok: false, error: 'The page gave no answer.' };
+  return { ok: true, ...r, title: r.title || screenTabTitle(rec) };
+}
+// Settings: the demonstrations saved by watch_me (learn), with a way to delete them.
+async function screenRecipesRender() {
+  const box = document.getElementById('set-screen-recipes');
+  if (!box || !api.screenRecipes) return;
+  let list = [];
+  try {
+    list = (await api.screenRecipes()) || [];
+  } catch (_) {
+    list = [];
+  }
+  if (!list.length) {
+    box.innerHTML = '<div class="sr-none">No recipes yet. When a program asks you to show it something (watch_me), you can let it keep the steps under a name.</div>';
+    return;
+  }
+  box.innerHTML = list
+    .map(
+      (r) =>
+        '<div class="sr-row"><span class="sr-name">' + escapeHtml(r.name) + '</span><span class="sr-meta">' + r.steps + ' steps' +
+        (r.created ? ' · ' + escapeHtml(new Date(r.created).toLocaleDateString()) : '') + '</span>' +
+        (r.task ? '<span class="sr-task" title="' + escapeHtml(r.task) + '">' + escapeHtml(r.task) + '</span>' : '') +
+        '<button class="sr-del" data-name="' + escapeHtml(r.name) + '" title="Delete this recipe">✕</button></div>'
+    )
+    .join('');
+  box.querySelectorAll('.sr-del').forEach((b) =>
+    b.addEventListener('click', async () => {
+      await api.screenRecipeDelete(b.dataset.name);
+      screenRecipesRender();
+    })
+  );
 }
 function screenApplyStatus(s) {
   screenGranted = new Set(((s && s.grants) || []).map((g) => g.tabId));
@@ -18994,6 +19259,11 @@ async function screenSettingsRender() {
   if (!on) return;
   on.checked = screenControlOn;
   document.getElementById('set-screen-offlimits').checked = screenOffLimits;
+  document.getElementById('set-screen-clicks').checked = screenShowClicks;
+  document.getElementById('set-screen-step').checked = screenStepMode;
+  document.getElementById('set-screen-tabs').checked = screenReadTabs;
+  document.getElementById('set-screen-write').checked = screenWriteTabs;
+  screenRecipesRender();
   document.getElementById('set-screen-width').value = String(screenMaxWidth);
   if (document.getElementById('set-screen-width').value !== String(screenMaxWidth)) document.getElementById('set-screen-width').value = '1280';
   const s = await api.screenStatus();
@@ -19006,13 +19276,17 @@ async function screenSave() {
   screenControlOn = document.getElementById('set-screen-on').checked;
   screenOffLimits = document.getElementById('set-screen-offlimits').checked;
   screenMaxWidth = Number(document.getElementById('set-screen-width').value) || 1280;
-  api.saveSettings({ screenControl: screenControlOn, screenOffLimits, screenMaxWidth });
-  await api.screenConfigure({ enabled: screenControlOn, offLimits: screenOffLimits, maxWidth: screenMaxWidth });
+  screenShowClicks = document.getElementById('set-screen-clicks').checked;
+  screenStepMode = document.getElementById('set-screen-step').checked;
+  screenReadTabs = document.getElementById('set-screen-tabs').checked;
+  screenWriteTabs = document.getElementById('set-screen-write').checked;
+  api.saveSettings({ screenControl: screenControlOn, screenOffLimits, screenMaxWidth, screenShowClicks, screenStepMode, screenReadTabs, screenWriteTabs });
+  await api.screenConfigure({ enabled: screenControlOn, offLimits: screenOffLimits, maxWidth: screenMaxWidth, showClicks: screenShowClicks, stepMode: screenStepMode, readTabs: screenReadTabs, writeTabs: screenWriteTabs });
   if (screenControlOn) for (const rec of tabs.values()) rec._screenTitle = null; // send every title again
   screenPushTitles();
   screenSettingsRender();
 }
-['set-screen-on', 'set-screen-offlimits', 'set-screen-width'].forEach((id) => {
+['set-screen-on', 'set-screen-offlimits', 'set-screen-width', 'set-screen-clicks', 'set-screen-step', 'set-screen-tabs', 'set-screen-write'].forEach((id) => {
   const el = document.getElementById(id);
   if (el) el.addEventListener('change', screenSave);
 });
@@ -22573,6 +22847,10 @@ setInterval(() => {
   if (settings && typeof settings.screenControl === 'boolean') screenControlOn = settings.screenControl;
   if (settings && typeof settings.screenOffLimits === 'boolean') screenOffLimits = settings.screenOffLimits;
   if (settings && Number.isFinite(settings.screenMaxWidth)) screenMaxWidth = settings.screenMaxWidth;
+  if (settings && typeof settings.screenShowClicks === 'boolean') screenShowClicks = settings.screenShowClicks;
+  if (settings && typeof settings.screenStepMode === 'boolean') screenStepMode = settings.screenStepMode;
+  if (settings && typeof settings.screenReadTabs === 'boolean') screenReadTabs = settings.screenReadTabs;
+  if (settings && typeof settings.screenWriteTabs === 'boolean') screenWriteTabs = settings.screenWriteTabs;
   if (settings && Array.isArray(settings.tmuxNeverHosts)) tmuxNeverHosts = settings.tmuxNeverHosts.filter((x) => typeof x === 'string').slice(-200);
   if (settings && typeof settings.clipOn === 'boolean') clipOn = settings.clipOn;
   if (settings && typeof settings.clipClearSecrets === 'boolean') clipClearSecrets = settings.clipClearSecrets;

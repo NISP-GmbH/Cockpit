@@ -942,6 +942,24 @@
             <input type="checkbox" id="set-screen-offlimits" />
             Cockpit's own windows are off limits (recommended: no typing into other terminals or Settings)
           </label>
+          <label class="settings-check" style="margin-top: 4px">
+            <input type="checkbox" id="set-screen-clicks" />
+            Show a ring where it is about to click
+          </label>
+          <label class="settings-check" style="margin-top: 4px">
+            <input type="checkbox" id="set-screen-step" />
+            Step mode by default: every click, key and typing waits for my OK in the red pill
+          </label>
+          <label class="settings-check" style="margin-top: 4px">
+            <input type="checkbox" id="set-screen-tabs" />
+            It may read the text of Cockpit's terminal and web tabs (read only - instead of screenshots of them)
+          </label>
+          <label class="settings-check" style="margin-top: 4px">
+            <input type="checkbox" id="set-screen-write" />
+            It may type into Cockpit's terminal tabs - Cockpit asks you for each tab first
+          </label>
+          <label style="margin-top: 8px">Recipes - what you showed a program (watch_me), kept on this machine</label>
+          <div id="set-screen-recipes" class="screen-recipes"></div>
           <label for="set-screen-width" style="margin-top: 6px">Screenshot width for the program</label>
           <select id="set-screen-width">
             <option value="1024">1024 px (fewer tokens)</option>

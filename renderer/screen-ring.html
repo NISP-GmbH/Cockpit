@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';" />
+    <title>Cockpit · click</title>
+    <!-- Where screen control is about to click: shown just before the click (and while step mode
+         asks), click-through, hidden again before the click lands. -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+      }
+      .ring,
+      .dot {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        border-radius: 50%;
+      }
+      .ring {
+        width: 44px;
+        height: 44px;
+        margin: -25px 0 0 -25px;
+        border: 3px solid #ff4d4f;
+        box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.85), 0 0 14px rgba(255, 77, 79, 0.85);
+        animation: in 0.7s ease-out infinite;
+      }
+      .dot {
+        width: 6px;
+        height: 6px;
+        margin: -3px 0 0 -3px;
+        background: #ff4d4f;
+        box-shadow: 0 0 0 1px #fff;
+      }
+      @keyframes in {
+        0% {
+          transform: scale(1.7);
+          opacity: 0.25;
+        }
+        55%,
+        100% {
+          transform: scale(1);
+          opacity: 1;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="ring"></div>
+    <div class="dot"></div>
+  </body>
+</html>

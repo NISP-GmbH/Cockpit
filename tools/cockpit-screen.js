@@ -281,7 +281,179 @@ const TOOLS = [
       return picture(r, true);
     },
   },
+  {
+    name: 'clipboard',
+    description:
+      'The clipboard. "paste": put text into the focused field via the clipboard + Ctrl+V - much faster than type_text for longer text; the user\'s clipboard is put back afterwards (keep: true leaves your text there). ' +
+      '"copy": Ctrl+C in the window in front and get the selected text (not in terminal windows - Ctrl+C interrupts there; use read_terminal). "read": what the user copied. "write": put text there for the user. ' +
+      'Text that looks like a password or key is never handed over.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['paste', 'copy', 'read', 'write'] },
+        text: { type: 'string', description: 'for paste and write' },
+        keep: { type: 'boolean', description: 'paste: leave the text on the clipboard' },
+      },
+      required: ['action'],
+    },
+    run: async (a) => text(await call('clip', a), clipText),
+  },
+  {
+    name: 'read_terminal',
+    description:
+      'The exact TEXT of a terminal - instead of a screenshot or OCR: a Cockpit terminal tab by (part of) its title ("this" = your own; no tab = the list of tabs), scrollback included; ' +
+      'or any window that offers its text to Windows accessibility (Windows Terminal, a console, an editor) by "window". The last "lines" lines (default 200), or only lines containing "find".' + SCREEN_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tab: { type: 'string', description: 'a Cockpit terminal tab: part of its title, or "this"' },
+        window: { type: 'string', description: 'any window: handle from list_windows or part of its title' },
+        lines: { type: 'integer', description: 'how many of the last lines (default 200, up to 5000)' },
+        find: { type: 'string', description: 'only lines containing this (with their line numbers)' },
+      },
+    },
+    run: async (a) => text(await call('term', a), termText),
+  },
+  {
+    name: 'write_terminal',
+    description:
+      'Type into a Cockpit terminal tab (local shell or SSH session) by (part of) its title, and get back what it printed - exact text, no screenshots, no focus taken. ' +
+      'Text is sent with Enter at the end (enter: false to leave it on the line); "keys" adds keys like "ctrl+c", "up enter", "tab", "esc", "ctrl+d". ' +
+      'Then it waits until the output has been quiet for quiet_ms (default 700) or "until" text appears (timeout default 10 s, up to 60) and returns the lines after the command; wait: false returns at once. ' +
+      'The user allows each target tab separately; not your own terminal. Commands run there as if the user typed them - on a server for an SSH tab.' + SCREEN_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tab: { type: 'string', description: 'the tab: part of its title (read_terminal without a tab lists them)' },
+        text: { type: 'string', description: 'what to type (a command)' },
+        enter: { type: 'boolean', description: 'press Enter after the text (default true)' },
+        keys: { type: 'string', description: 'keys after the text, space separated: enter, tab, esc, up, down, left, right, ctrl+c, ctrl+d, ctrl+r, alt+b, f5 ...' },
+        wait: { type: 'boolean', description: 'wait for the answer (default true)' },
+        until: { type: 'string', description: 'wait until this text appears in the new output (a prompt, "done", ...)' },
+        timeout: { type: 'number', description: 'seconds to wait at most (default 10, up to 60)' },
+        quiet_ms: { type: 'integer', description: 'output quiet this long = done (default 700)' },
+        lines: { type: 'integer', description: 'at most this many of the last lines back (default 200)' },
+      },
+      required: ['tab'],
+    },
+    run: async (a) => text(await call('termWrite', a), writeText),
+  },
+  {
+    name: 'read_web_tab',
+    description:
+      'The text of a Cockpit WEB tab (by part of its title or address) straight from the page - exact and cheaper than a screenshot or OCR; no tab = the list. ' +
+      'links: true adds the links (text + address); fields: true adds the form fields with their labels and values (never a password). "find" returns only the lines containing it.' + SCREEN_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tab: { type: 'string' },
+        find: { type: 'string' },
+        links: { type: 'boolean' },
+        fields: { type: 'boolean' },
+        max_chars: { type: 'integer', description: 'text length at most (default 30000)' },
+      },
+    },
+    run: async (a) => text(await call('web', a), webText),
+  },
+  {
+    name: 'set_window',
+    description:
+      'Move, size, snap, maximize, minimize or restore a window (by handle or part of its title): snap = left / right / top / bottom / top_left / top_right / bottom_left / bottom_right / full / center of a monitor\'s work area, ' +
+      'or x / y / width / height in the last screenshot (as for a region; "space" names another picture), or state = maximize / minimize / restore. "monitor" picks the monitor for snap and maximize. Not for Cockpit\'s windows.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        window: { type: 'string', description: 'handle from list_windows or part of the title (default: the top-most non-Cockpit window)' },
+        snap: { type: 'string', enum: ['left', 'right', 'top', 'bottom', 'top_left', 'top_right', 'bottom_left', 'bottom_right', 'full', 'center'] },
+        state: { type: 'string', enum: ['maximize', 'minimize', 'restore'] },
+        monitor: { type: 'integer', description: '0-based monitor for snap / maximize (default: the one it is on)' },
+        x: { type: 'number' },
+        y: { type: 'number' },
+        width: { type: 'number' },
+        height: { type: 'number' },
+        space: COORD.space,
+      },
+    },
+    run: async (a) => text(await call('winSet', a), winSetText),
+  },
+  {
+    name: 'watch_me',
+    description:
+      'Learn by watching: the user is asked (in Cockpit\'s red pill) to show you how to do "task" themselves; their real clicks, typing and keys are recorded until they press Done, and you get the steps with WHAT was clicked or typed into ' +
+      '(button names, fields, windows - not just positions). Use it when you do not know how something is done in an app. Your own input is never recorded, nor Cockpit\'s windows, nor what is typed into password fields. ' +
+      '"name" keeps it as a recipe (see recipes). timeout: seconds the user has (default 300, up to 900). To repeat the steps, find each element with ui_elements and act on it; the "at" positions are relative to the window and only a fallback.' + SCREEN_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: 'what the user should show, shown to them, e.g. "how you export this report as PDF"' },
+        name: { type: 'string', description: 'save the steps as a recipe with this name' },
+        timeout: { type: 'number' },
+      },
+      required: ['task'],
+    },
+    run: async (a) => text(await call('learn', { action: 'watch', task: a.task, name: a.name, timeout: a.timeout }), learnText),
+  },
+  {
+    name: 'recipes',
+    description: 'Recipes the user showed you earlier with watch_me: list them, get one by name (its steps), save the last demonstration under a name, or delete one.',
+    inputSchema: {
+      type: 'object',
+      properties: { action: { type: 'string', enum: ['list', 'get', 'save', 'delete'] }, name: { type: 'string' } },
+      required: ['action'],
+    },
+    run: async (a) => text(await call('learn', { action: a.action, name: a.name }), learnText),
+  },
 ];
+function writeText(r) {
+  const head = 'Typed into ' + JSON.stringify(r.title) + (r.typed ? ' (' + r.typed + ' characters' + (r.keys ? ' + ' + r.keys : '') + ')' : r.keys ? ' (' + r.keys + ')' : '');
+  if (!r.why) return head + '.';
+  const s = (r.waited_ms / 1000).toFixed(1) + ' s';
+  const how = { found: 'the awaited text appeared after ' + s, quiet: 'the output settled after ' + s, 'no output': 'nothing was printed within ' + s }[r.why] || 'still running after ' + s + ' (timeout - read_terminal later, or write_terminal with only keys)';
+  const scr = r.screen === 'alternate' ? ' A full-screen program is showing; this is its screen.' : '';
+  return head + '; ' + how + (r.atPrompt ? ', back at the shell prompt' : '') + '.' + scr + (r.cut ? ' (the first ' + r.cut + ' lines left out)' : '') + '\n' + r.lines.join('\n');
+}
+function webText(r) {
+  if (r.tabs) return r.tabs.length ? 'Cockpit web tabs (read one with tab):\n' + r.tabs.map((t) => '  ' + JSON.stringify(t.title) + ' ' + t.url).join('\n') : 'No web tabs are open in Cockpit.';
+  const out = ['Web tab ' + JSON.stringify(r.title) + ' - ' + r.url + ' (' + r.length + ' characters of text)'];
+  if (r.matches) out.push(r.matches.length + (r.more ? ' (+' + r.more + ')' : '') + ' matching lines:', ...r.matches.map((m) => m.n + ': ' + m.text));
+  else if (r.text != null) out.push(r.text + (r.cut ? '\n... (cut - use find or max_chars)' : ''));
+  if (r.selection) out.push('Selected: ' + r.selection);
+  if (r.fields) out.push('Fields:', ...r.fields.map((f) => '  ' + f.type + (f.label ? ' ' + JSON.stringify(f.label) : '') + (f.name ? ' name=' + f.name : '') + (f.id ? ' #' + f.id : '') + (f.checked != null ? (f.checked ? ' [x]' : ' [ ]') : f.value === null ? ' (password)' : f.value != null ? ' = ' + JSON.stringify(f.value) : '') + (f.disabled ? ' disabled' : '')));
+  if (r.links) out.push('Links:', ...r.links.map((l) => '  ' + (l.text ? JSON.stringify(l.text) + ' ' : '') + l.href));
+  return out.join('\n');
+}
+function winSetText(r) {
+  const p = r.physical;
+  return 'Window ' + JSON.stringify(r.title) + (r.minimized ? ' is minimized' : (r.maximized ? ' is maximized,' : ' is now') + ' at ' + p.x + ',' + p.y + ' size ' + p.w + 'x' + p.h + ' (screen pixels; middle ' + r.in_picture.x + ',' + r.in_picture.y + ' in space "' + r.in_picture.space + '")') + '.';
+}
+function learnText(r) {
+  const steps = (s) => s.map((x, i) => i + 1 + '. ' + x.say).join('\n');
+  if (r.recipes) return r.recipes.length ? 'Recipes:\n' + r.recipes.map((x) => '  ' + JSON.stringify(x.name) + ' - ' + x.steps + ' steps' + (x.task ? ': ' + x.task : '')).join('\n') : 'No recipes saved yet.';
+  if (r.deleted) return 'Deleted the recipe ' + JSON.stringify(r.deleted) + '.';
+  if (r.saved && !Array.isArray(r.steps)) return 'Saved as ' + JSON.stringify(r.saved) + ' (' + r.steps + ' steps).';
+  if (Array.isArray(r.steps)) {
+    const head = r.finished
+      ? 'The user showed: ' + r.task + ' (' + r.steps.length + ' steps in ' + r.seconds + ' s; ' + r.finished + ')' + (r.saved ? ', saved as ' + JSON.stringify(r.saved) : '') + '.'
+      : 'Recipe ' + JSON.stringify(r.name) + (r.task ? ': ' + r.task : '') + ' (' + r.steps.length + ' steps).';
+    if (!r.steps.length) return head + '\nNothing was recorded - nothing was clicked or typed outside Cockpit.';
+    return head + '\n' + steps(r.steps) + '\nTo repeat: find each named element with ui_elements in that window and use ui_action; "at" in the steps is a position inside the window, a fallback only.';
+  }
+  return JSON.stringify(r);
+}
+function clipText(r) {
+  if (r.pasted != null) return 'pasted ' + r.pasted + ' characters' + (r.restored ? ' (the clipboard is back as it was' + (r.filesLost ? ' - except files that were on it' : '') + ')' : ' (left on the clipboard)');
+  if (r.written != null) return 'on the clipboard: ' + r.written + ' characters';
+  if (r.secret) return 'Not passed on: the text ' + r.secret + '.';
+  if (r.empty) return 'Nothing was copied - is something selected in the window in front?';
+  if (r.text == null) return '(the clipboard holds no text)';
+  return (r.from ? 'Copied from ' + r.from + ':\n' : '') + r.text + (r.cut ? '\n... (cut, ' + r.length + ' characters in all)' : '');
+}
+function termText(r) {
+  if (r.tabs) return 'Cockpit terminal tabs (read one with tab):\n' + r.tabs.map((t) => '  ' + JSON.stringify(t.title) + ' (' + t.kind + (t.status ? ', ' + t.status : '') + ', ' + t.lines + ' lines' + (t.screen === 'alternate' ? ', full-screen program' : '') + ')' + (t.self ? ' <- this terminal' : '')).join('\n');
+  const head = (r.source === 'tab' ? 'Terminal tab ' : 'Window ') + JSON.stringify(r.title) + (r.screen === 'alternate' ? ' (a full-screen program\'s screen)' : '') + ': ' + r.total + ' lines';
+  if (r.matches) return head + ', ' + r.matches.length + (r.more ? ' (+' + r.more + ' earlier)' : '') + ' matching:\n' + r.matches.map((m) => m.n + ': ' + m.text).join('\n');
+  return head + (r.first > 1 ? ', the last ' + r.lines.length + ' (from line ' + r.first + ')' : '') + ':\n' + r.lines.join('\n');
+}
 function at(o) {
   return '@ ' + o.x + ',' + o.y;
 }
@@ -369,6 +541,8 @@ function mcp() {
           'Screen control of the user\'s desktop, through Cockpit. Take a screenshot first; coordinates are in the picture you got. ' +
           'After that, prefer screenshots of just the window or region you work in (screenshot with window, or x/y/width/height) over the full screen. ' +
           'To find and press buttons or fill fields, ui_elements + ui_action beat pixel guessing; to read words use read_text; after an action use wait_for and what_changed rather than a new full screenshot. ' +
+          'For the output of a terminal use read_terminal (exact text, no picture); to run a command in another Cockpit terminal tab (an SSH session) use write_terminal; for a Cockpit web tab read_web_tab; for longer text paste with the clipboard tool instead of type_text. ' +
+          'When you do not know how something is done in an app, ask the user to show you with watch_me (recipes keeps what they showed). The user may have step mode on: an action then waits for their OK, and a skipped step means do not repeat it - ask them. ' +
           'The user grants it per terminal in Cockpit and can stop it at any time (Ctrl+Alt+Esc). Cockpit\'s own windows are not controlled.' + SCREEN_NOTE,
       });
     }
@@ -406,6 +580,12 @@ const USAGE = [
   '  text [AREA] [--find TEXT]                   read the text (OCR)',
   '  wait (--text T | --gone T | --change | --settle) [--timeout S] [AREA]',
   '  changes [--out file.png]                    only what changed since the last screenshot',
+  '  clip paste TEXT... [--keep] | clip copy | clip read | clip write TEXT...',
+  '  terminal [TAB|this] [--window TITLE] [--lines N] [--find TEXT]   the text of a terminal (no TAB = list)',
+  '  write TAB TEXT... [--keys "ctrl+c"] [--no-enter] [--no-wait] [--until T] [--timeout S]   type into a terminal tab',
+  '  web [TAB] [--find TEXT] [--links] [--fields]   the text of a Cockpit web tab (no TAB = list)',
+  '  window TITLE|HANDLE (--snap left|right|...|full|center | --state maximize|minimize|restore | --bounds X Y W H) [--monitor N]',
+  '  learn watch TASK... [--name N] [--timeout S] | learn list | learn get NAME | learn save NAME | learn delete NAME',
   '  AREA = --window TITLE | --region X Y W H [--space S] | --monitor N (default: the last screenshot\'s)',
   '',
   'Coordinates are in the last screenshot (or the zoom given with --space). Without arguments it is an MCP server.',
@@ -415,8 +595,14 @@ function flags(argv) {
   const f = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (['--right', '--middle', '--double', '--all', '--change', '--settle', '--small'].includes(a)) f[a.slice(2)] = true;
-    else if (['--monitor', '--space', '--out', '--window', '--find', '--text', '--gone', '--timeout'].includes(a)) f[a.slice(2)] = argv[++i];
+    if (['--right', '--middle', '--double', '--all', '--change', '--settle', '--small', '--keep', '--links', '--fields'].includes(a)) f[a.slice(2)] = true;
+    else if (a === '--no-wait') f.noWait = true;
+    else if (a === '--no-enter') f.noEnter = true;
+    else if (['--monitor', '--space', '--out', '--window', '--find', '--text', '--gone', '--timeout', '--lines', '--keys', '--until', '--snap', '--state', '--name'].includes(a)) f[a.slice(2)] = argv[++i];
+    else if (a === '--bounds') {
+      f.bounds = argv.slice(i + 1, i + 5).map(Number);
+      i += 4;
+    }
     else if (a === '--max-width') f.maxWidth = argv[++i];
     else if (a === '--region') {
       f.region = argv.slice(i + 1, i + 5).map(Number);
@@ -524,6 +710,35 @@ async function cli(argv) {
         console.log(pictureInfo(r.result, true));
       }
     }
+  } else if (cmd === 'clip') {
+    const action = pos[0];
+    if (!['paste', 'copy', 'read', 'write'].includes(action)) throw new Error('clip paste|copy|read|write\n\n' + USAGE);
+    r = await call('clip', { action, text: pos.length > 1 ? pos.slice(1).join(' ') : undefined, keep: !!f.keep });
+    if (r.ok) console.log(clipText(r.result));
+  } else if (cmd === 'terminal') {
+    r = await call('term', { tab: f.window ? undefined : pos.join(' ') || undefined, window: f.window, lines: f.lines != null ? Number(f.lines) : undefined, find: f.find });
+    if (r.ok) console.log(termText(r.result));
+  } else if (cmd === 'write') {
+    if (!pos[0]) throw new Error('which tab?\n\n' + USAGE);
+    r = await call('termWrite', { tab: pos[0], text: pos.slice(1).join(' ') || undefined, keys: f.keys, enter: !f.noEnter, wait: !f.noWait, until: f.until, timeout: f.timeout != null ? Number(f.timeout) : undefined, lines: f.lines != null ? Number(f.lines) : undefined });
+    if (r.ok) console.log(writeText(r.result));
+  } else if (cmd === 'web') {
+    r = await call('web', { tab: pos.join(' ') || undefined, find: f.find, links: !!f.links, fields: !!f.fields });
+    if (r.ok) console.log(webText(r.result));
+  } else if (cmd === 'window') {
+    if (!pos.length) throw new Error('which window?\n\n' + USAGE);
+    const args = { window: pos.join(' '), snap: f.snap, state: f.state, monitor: f.monitor != null ? Number(f.monitor) : undefined };
+    if (f.bounds) {
+      if (f.bounds.length < 4 || !f.bounds.every(Number.isFinite)) throw new Error('--bounds needs X Y W H\n\n' + USAGE);
+      Object.assign(args, { x: f.bounds[0], y: f.bounds[1], width: f.bounds[2], height: f.bounds[3], space: f.space });
+    }
+    r = await call('winSet', args);
+    if (r.ok) console.log(winSetText(r.result));
+  } else if (cmd === 'learn') {
+    const action = pos[0] || 'list';
+    if (!['watch', 'list', 'get', 'save', 'delete'].includes(action)) throw new Error('learn watch|list|get|save|delete\n\n' + USAGE);
+    r = await call('learn', action === 'watch' ? { action, task: pos.slice(1).join(' '), name: f.name, timeout: f.timeout != null ? Number(f.timeout) : undefined } : { action, name: pos.slice(1).join(' ') || f.name });
+    if (r.ok) console.log(learnText(r.result));
   } else throw new Error('unknown command "' + cmd + '"\n\n' + USAGE);
   if (!r.ok) throw new Error(r.error);
 }
@@ -541,4 +756,4 @@ if (require.main === module) {
     );
 }
 
-module.exports = { TOOLS, cli, flags, NOT_HERE };
+module.exports = { TOOLS, cli, flags, NOT_HERE, writeText, webText, learnText };

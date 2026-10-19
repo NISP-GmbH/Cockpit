@@ -80,7 +80,17 @@ class ClipHistory {
       return [];
     }
   }
+  // Cockpit's own short use of the clipboard (screen control's paste / copy) is not a copy of
+  // the user's: while held nothing is recorded, and on release what is there counts as seen.
+  hold() {
+    this.held = (this.held || 0) + 1;
+  }
+  release() {
+    this.held = Math.max(0, (this.held || 0) - 1);
+    if (!this.held) this.last = this._read();
+  }
   tick() {
+    if (this.held) return;
     const text = this._read();
     if (text !== this.last) {
       this.last = text;

@@ -14,7 +14,7 @@
         user-select: none;
         font-family: "Segoe UI", system-ui, sans-serif;
       }
-      /* the whole pill moves the window; the button does not */
+      /* the whole pill moves the window; the buttons do not */
       #pill {
         -webkit-app-region: drag;
         box-sizing: border-box;
@@ -54,7 +54,7 @@
       #text b {
         color: #fff;
       }
-      #stop {
+      button {
         -webkit-app-region: no-drag;
         flex: 0 0 auto;
         border: none;
@@ -65,8 +65,88 @@
         padding: 4px 10px;
         cursor: pointer;
       }
-      #stop:hover {
+      button:hover {
         background: #ff7072;
+      }
+      button.small {
+        background: rgba(255, 255, 255, 0.12);
+        color: #ffd6d6;
+        font-weight: 500;
+      }
+      button.small:hover {
+        background: rgba(255, 255, 255, 0.22);
+      }
+      #stepbtn.on {
+        background: #ffb020;
+        color: #2a1a00;
+      }
+      /* the step question, under the pill */
+      #ask {
+        box-sizing: border-box;
+        margin: 0 3px 3px;
+        padding: 8px 12px 9px;
+        border-radius: 12px;
+        background: rgba(40, 10, 12, 0.95);
+        border: 2px solid #ffb020;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+        color: #ffe7c2;
+        font-size: 12.5px;
+      }
+      #ask.teach {
+        border-color: #3ecf8e;
+        color: #d4f7e6;
+      }
+      #ask.teach #ok {
+        background: #3ecf8e;
+        color: #00301c;
+      }
+      #ask.teach #askprev {
+        font: 12px "Segoe UI", system-ui, sans-serif;
+        color: #bfe9d4;
+      }
+      button[hidden] {
+        display: none;
+      }
+      #ask[hidden] {
+        display: none;
+      }
+      #askwhat {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #askwhat b {
+        color: #fff;
+      }
+      #askprev {
+        margin-top: 3px;
+        font: 12px Consolas, monospace;
+        color: #fff;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #askprev:empty {
+        display: none;
+      }
+      #askrow {
+        margin-top: 7px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      #ok {
+        background: #ffb020;
+        color: #2a1a00;
+        padding: 4px 16px;
+      }
+      #ok:hover {
+        background: #ffc04d;
+      }
+      #askkey {
+        margin-left: auto;
+        color: #d9b98a;
+        font-size: 11.5px;
       }
     </style>
   </head>
@@ -74,7 +154,17 @@
     <div id="pill">
       <span id="dot"></span>
       <span id="text">Screen control</span>
+      <button id="stepbtn" class="small" title="Step mode: every click, key and typing waits for your OK">Step</button>
       <button id="stop" title="Stop: every terminal loses screen control at once">Stop</button>
+    </div>
+    <div id="ask" hidden>
+      <div id="askwhat"></div>
+      <div id="askprev"></div>
+      <div id="askrow">
+        <button id="ok">OK</button><button id="skip" class="small">Skip</button
+        ><button id="all" class="small" title="Step mode off for this terminal - it runs without asking">Let it run</button>
+        <span id="askkey"></span>
+      </div>
     </div>
     <script src="screen-indicator.js"></script>
   </body>

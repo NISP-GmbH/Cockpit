@@ -65,6 +65,9 @@ public static class CockpitScreen
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int val, int size);
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT val, int size);
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] static extern bool IsZoomed(IntPtr h);
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
 
     const uint INPUT_MOUSE = 0, INPUT_KEYBOARD = 1;
     const uint MOUSEEVENTF_LEFTDOWN = 0x2, MOUSEEVENTF_LEFTUP = 0x4, MOUSEEVENTF_RIGHTDOWN = 0x8, MOUSEEVENTF_RIGHTUP = 0x10,
@@ -92,6 +95,8 @@ public static class CockpitScreen
                 case "ocr": result = Ocr(Int(m, "x"), Int(m, "y"), Int(m, "w"), Int(m, "h")); break;
                 case "ui": result = UiList(Long(m, "handle"), Int(m, "max"), Str(m, "offscreen") == "True", Str(m, "filter"), Math.Max(500, Int(m, "budget"))); break;
                 case "uiAct": result = UiAct(Int(m, "snap"), Int(m, "idx"), Str(m, "action"), Str(m, "value")); break;
+                case "winInfo": result = WinInfo(m.ContainsKey("x") ? WindowAt(Int(m, "x"), Int(m, "y")) : GetForegroundWindow()); break;
+                case "winText": result = WinText(Long(m, "handle"), Int(m, "max")); break;
                 case "cursor": { POINT p; GetCursorPos(out p); result = new Dictionary<string, object> { { "x", p.X }, { "y", p.Y } }; break; }
                 case "move": SetCursorPos(Int(m, "x"), Int(m, "y")); result = true; break;
                 case "click": Click(Int(m, "x"), Int(m, "y"), Str(m, "button"), Math.Max(1, Int(m, "count"))); result = true; break;
@@ -104,6 +109,10 @@ public static class CockpitScreen
                 case "launch": Process.Start(new ProcessStartInfo(Str(m, "target")) { UseShellExecute = true }); result = true; break;
                 case "ownerAt": result = OwnerPid(WindowAt(Int(m, "x"), Int(m, "y"))); break;
                 case "foregroundPid": result = OwnerPid(GetForegroundWindow()); break;
+                case "winSet": result = WinSet(new IntPtr(Long(m, "handle")), Str(m, "cmd"), Int(m, "x"), Int(m, "y"), Int(m, "w"), Int(m, "h")); break;
+                case "recStart": result = RecStart(Int(m, "ownPid")); break;
+                case "recPoll": result = RecPoll(); break;
+                case "recStop": result = RecStop(); break;
                 default: throw new Exception("unknown op " + op);
             }
             return Ascii(Json.Serialize(new Dictionary<string, object> { { "id", id }, { "ok", true }, { "result", result } }));
@@ -136,7 +145,8 @@ public static class CockpitScreen
             list.Add(new Dictionary<string, object> {
                 { "x", mi.rcMonitor.L }, { "y", mi.rcMonitor.T },
                 { "w", mi.rcMonitor.R - mi.rcMonitor.L }, { "h", mi.rcMonitor.B - mi.rcMonitor.T },
-                { "primary", (mi.dwFlags & 1) != 0 }, { "name", mi.szDevice } });
+                { "primary", (mi.dwFlags & 1) != 0 }, { "name", mi.szDevice },
+                { "wx", mi.rcWork.L }, { "wy", mi.rcWork.T }, { "ww", mi.rcWork.R - mi.rcWork.L }, { "wh", mi.rcWork.B - mi.rcWork.T } });
             return true;
         }, IntPtr.Zero);
         return list;
@@ -456,14 +466,57 @@ public static class CockpitScreen
         catch (ElementNotAvailableException) { throw new Exception("that element is gone - call ui_elements again"); }
         return r;
     }
+    // The window at a point (or the one in front): who it belongs to and what it is called - for the
+    // step question ("Click at 640,380 in Untitled - Notepad").
+    static Dictionary<string, object> WinInfo(IntPtr h)
+    {
+        int pid = OwnerPid(h);
+        var r = new Dictionary<string, object> { { "pid", pid }, { "title", "" }, { "process", "" } };
+        if (h == IntPtr.Zero) return r;
+        int len = GetWindowTextLength(h);
+        if (len > 0) { var sb = new StringBuilder(len + 1); GetWindowText(h, sb, sb.Capacity); r["title"] = sb.ToString(); }
+        try { r["process"] = Process.GetProcessById(pid).ProcessName; } catch { }
+        return r;
+    }
+    // The text a window offers through accessibility (TextPattern): a console / Windows Terminal
+    // buffer, an editor, a document - exact, scrollback included, no OCR. Bounded: a search through
+    // a large tree must not hang the helper.
+    static Dictionary<string, object> WinText(long handle, int max)
+    {
+        Dictionary<string, object> r = null;
+        bool ok = Bounded(() =>
+        {
+            var root = AutomationElement.FromHandle(new IntPtr(handle));
+            object pat;
+            // the LARGEST element with text: the terminal / document area, not a tab title or an
+            // address bar (both offer text too, and come first in the tree)
+            AutomationElement el = null;
+            double best = -1;
+            var all = root.FindAll(TreeScope.Subtree, new PropertyCondition(AutomationElement.IsTextPatternAvailableProperty, true));
+            foreach (AutomationElement c in all)
+            {
+                double area = 0;
+                try { var rc = c.Current.BoundingRectangle; if (!rc.IsEmpty) area = rc.Width * rc.Height; } catch { }
+                if (c.Current.ControlType == ControlType.Document) area *= 1.5;
+                if (area > best) { best = area; el = c; }
+            }
+            if (el == null || !el.TryGetCurrentPattern(TextPattern.Pattern, out pat))
+                throw new Exception("this window offers no text through accessibility - use read_text (OCR) instead");
+            string text = ((TextPattern)pat).DocumentRange.GetText(max > 0 ? max : 4000000);
+            r = new Dictionary<string, object> { { "text", text }, { "kind", el.Current.ControlType.ProgrammaticName.Replace("ControlType.", "") }, { "name", el.Current.Name ?? "" } };
+        }, 8000);
+        if (!ok) throw new Exception("reading the window's text took too long - use read_text (OCR) instead");
+        return r;
+    }
     // InvokePattern.Invoke waits for a modal dialog that the button opens; never hang the helper on it.
-    static bool Bounded(Action a)
+    static bool Bounded(Action a) { return Bounded(a, 3000); }
+    static bool Bounded(Action a, int ms)
     {
         Exception err = null;
         var t = new Thread(() => { try { a(); } catch (Exception e) { err = e; } });
         t.IsBackground = true;
         t.Start();
-        if (!t.Join(3000)) return false;
+        if (!t.Join(ms)) return false;
         if (err != null) throw err;
         return true;
     }
@@ -613,4 +666,280 @@ public static class CockpitScreen
     }
     static IntPtr WindowAt(int x, int y) { var p = new POINT { X = x, Y = y }; return GetAncestor(WindowFromPoint(p), 2); } // GA_ROOT
     static int OwnerPid(IntPtr h) { if (h == IntPtr.Zero) return 0; int pid; GetWindowThreadProcessId(h, out pid); return pid; }
+
+    // ---- moving and sizing windows ----
+    // Positions are the VISIBLE frame (DWM's extended frame bounds), the same rect list_windows gives:
+    // SetWindowPos takes the outer rect, which has an invisible resize border (7-8 px a side on
+    // 10/11), so the difference is added back. A window that lands on a monitor with another scale
+    // resizes itself on WM_DPICHANGED - hence a second pass when the first one is off.
+    static RECT Visible(IntPtr h)
+    {
+        RECT r;
+        if (DwmGetWindowAttribute(h, 9, out r, Marshal.SizeOf(typeof(RECT))) != 0) GetWindowRect(h, out r);
+        return r;
+    }
+    static Dictionary<string, object> WinSet(IntPtr h, string cmd, int x, int y, int w, int hh)
+    {
+        if (!IsWindow(h)) throw new Exception("that window is gone");
+        if (cmd == "min") ShowWindow(h, 6); // SW_MINIMIZE
+        else if (cmd == "max") ShowWindow(h, 3); // SW_MAXIMIZE
+        else if (cmd == "restore") ShowWindow(h, 9); // SW_RESTORE
+        else if (cmd == "bounds")
+        {
+            if (w < 40 || hh < 30) throw new Exception("too small (at least 40 x 30)");
+            if (IsIconic(h) || IsZoomed(h)) { ShowWindow(h, 9); Thread.Sleep(150); }
+            for (int pass = 0; pass < 2; pass++)
+            {
+                RECT o; GetWindowRect(h, out o);
+                RECT v = Visible(h);
+                int dl = v.L - o.L, dt = v.T - o.T, dr = o.R - v.R, db = o.B - v.B;
+                if (!SetWindowPos(h, IntPtr.Zero, x - dl, y - dt, w + dl + dr, hh + dt + db, 0x0014)) // SWP_NOZORDER | SWP_NOACTIVATE
+                    throw new Exception("Windows refused to move it (a program running as administrator cannot be moved from here)");
+                Thread.Sleep(60);
+                RECT n = Visible(h);
+                if (Math.Abs(n.L - x) <= 2 && Math.Abs(n.T - y) <= 2 && Math.Abs(n.R - n.L - w) <= 2 && Math.Abs(n.B - n.T - hh) <= 2) break;
+            }
+        }
+        else throw new Exception("unknown window command " + cmd);
+        Thread.Sleep(80);
+        RECT r = Visible(h);
+        return new Dictionary<string, object> { { "x", r.L }, { "y", r.T }, { "w", r.R - r.L }, { "h", r.B - r.T }, { "minimized", IsIconic(h) }, { "maximized", IsZoomed(h) } };
+    }
+
+    // ---- watching the user (teach by showing) ----
+    // Low-level mouse and keyboard hooks on a thread of their own (they need a message loop; the
+    // helper's main thread is reading stdin). The hook callbacks only note what happened and return
+    // at once - Windows drops a hook that is slow. A worker thread then asks UI Automation WHAT was
+    // clicked or typed into, so a recipe says "the Save button", not "640,380".
+    // Not recorded: input that was injected (SendInput - a program's, ours included), anything on a
+    // Cockpit window or this helper, and the characters typed into a password field.
+    delegate IntPtr HookProc(int code, IntPtr wp, IntPtr lp);
+    [DllImport("user32.dll")] static extern IntPtr SetWindowsHookEx(int id, HookProc fn, IntPtr mod, uint thread);
+    [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr h);
+    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr h, int code, IntPtr wp, IntPtr lp);
+    [DllImport("user32.dll")] static extern int GetMessage(out MSG m, IntPtr h, uint min, uint max);
+    [DllImport("user32.dll")] static extern bool PostThreadMessage(uint tid, uint msg, IntPtr wp, IntPtr lp);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string name);
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
+    [DllImport("user32.dll")] static extern short GetKeyState(int vk);
+    [DllImport("user32.dll")] static extern IntPtr GetKeyboardLayout(uint thread);
+    [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint type);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int ToUnicodeEx(uint vk, uint scan, byte[] state, StringBuilder buf, int n, uint flags, IntPtr hkl);
+    [StructLayout(LayoutKind.Sequential)] struct MSG { public IntPtr h; public uint msg; public IntPtr wp, lp; public uint time; public POINT pt; }
+    [StructLayout(LayoutKind.Sequential)] struct MSLL { public POINT pt; public uint data, flags, time; public IntPtr extra; }
+    [StructLayout(LayoutKind.Sequential)] struct KBDLL { public uint vk, scan, flags, time; public IntPtr extra; }
+
+    class RecRaw { public string k; public int x, y, d; public string c, combo; public long t; public IntPtr win; }
+    static readonly object RecLock = new object();
+    static readonly Queue<RecRaw> recIn = new Queue<RecRaw>();
+    static List<object> recOut = new List<object>();
+    static readonly AutoResetEvent recSignal = new AutoResetEvent(false);
+    static Thread recHookThread, recWorker;
+    static uint recTid;
+    static volatile bool recOn;
+    static int recOwnPid, recSelfPid, recLost;
+    static HookProc recMouseFn, recKeyFn; // kept referenced: a collected delegate under a live hook crashes the process
+    static long recFocusAt; static IntPtr recFocusWin; static Dictionary<string, object> recFocusEl; static bool recFocusSecret;
+
+    static void RecPush(RecRaw r)
+    {
+        lock (RecLock) { if (recIn.Count < 5000) recIn.Enqueue(r); else recLost++; }
+        recSignal.Set();
+    }
+    static bool Down(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
+    static IntPtr RecMouse(int code, IntPtr wp, IntPtr lp)
+    {
+        if (code >= 0 && recOn)
+        {
+            var s = (MSLL)Marshal.PtrToStructure(lp, typeof(MSLL));
+            if ((s.flags & 1) == 0) // LLMHF_INJECTED: SendInput, not the user's hand
+            {
+                string k = null;
+                switch (wp.ToInt32())
+                {
+                    case 0x201: k = "ldown"; break; case 0x202: k = "lup"; break;
+                    case 0x204: k = "rdown"; break; case 0x205: k = "rup"; break;
+                    case 0x207: k = "mdown"; break; case 0x208: k = "mup"; break;
+                    case 0x20A: k = "wheel"; break;
+                }
+                if (k != null) RecPush(new RecRaw { k = k, x = s.pt.X, y = s.pt.Y, d = k == "wheel" ? (short)((s.data >> 16) & 0xffff) : 0, t = Environment.TickCount });
+            }
+        }
+        return CallNextHookEx(IntPtr.Zero, code, wp, lp);
+    }
+    static readonly Dictionary<uint, string> RecNames = new Dictionary<uint, string> {
+        { 0x0D, "enter" }, { 0x09, "tab" }, { 0x1B, "esc" }, { 0x08, "backspace" }, { 0x2E, "delete" }, { 0x2D, "insert" },
+        { 0x24, "home" }, { 0x23, "end" }, { 0x21, "pageup" }, { 0x22, "pagedown" }, { 0x26, "up" }, { 0x28, "down" },
+        { 0x25, "left" }, { 0x27, "right" }, { 0x2C, "printscreen" }, { 0x5D, "menu" } };
+    static IntPtr RecKey(int code, IntPtr wp, IntPtr lp)
+    {
+        if (code >= 0 && recOn && (wp.ToInt32() == 0x100 || wp.ToInt32() == 0x104))
+        {
+            var s = (KBDLL)Marshal.PtrToStructure(lp, typeof(KBDLL));
+            if ((s.flags & 0x10) == 0) try { RecKeyDown(s.vk, s.scan); } catch { } // LLKHF_INJECTED
+        }
+        return CallNextHookEx(IntPtr.Zero, code, wp, lp);
+    }
+    static void RecKeyDown(uint vk, uint scan)
+    {
+        if ((vk >= 0xA0 && vk <= 0xA5) || vk == 0x10 || vk == 0x11 || vk == 0x12 || vk == 0x5B || vk == 0x5C || vk == 0x14 || vk == 0x90 || vk == 0x91) return; // modifiers, locks
+        bool shift = Down(0x10), ctrl = Down(0x11), alt = Down(0x12), win = Down(0x5B) || Down(0x5C);
+        bool altGr = Down(0xA5) && Down(0xA2); // AltGr = right Alt plus a synthetic left Ctrl
+        IntPtr fg = GetForegroundWindow();
+        string name; RecNames.TryGetValue(vk, out name);
+        if (vk >= 0x70 && vk <= 0x87) name = "f" + (vk - 0x6F);
+        if (name == null && !win && (altGr || (!ctrl && !alt)))
+        {
+            var st = new byte[256];
+            if (shift) st[0x10] = 0x80;
+            if (altGr) { st[0x11] = 0x80; st[0x12] = 0x80; }
+            if ((GetKeyState(0x14) & 1) != 0) st[0x14] = 1;
+            int pid; uint tid = (uint)GetWindowThreadProcessId(fg, out pid);
+            var sb = new StringBuilder(8);
+            int n = ToUnicodeEx(vk, scan, st, sb, 8, 4, GetKeyboardLayout(tid)); // 4: leave the dead-key state alone
+            if (n < 0) return; // a dead key: the next key carries the letter
+            if (n > 0 && sb[0] >= ' ') { RecPush(new RecRaw { k = "char", c = sb.ToString(0, n), win = fg, t = Environment.TickCount }); return; }
+        }
+        if (name == null)
+        {
+            uint ch = MapVirtualKey(vk, 2);
+            name = ch > 32 && ch < 127 ? ((char)ch).ToString().ToLowerInvariant() : vk == 0x20 ? "space" : "vk" + vk.ToString("x2");
+        }
+        string combo = (ctrl && !altGr ? "ctrl+" : "") + (alt && !altGr ? "alt+" : "") + (shift ? "shift+" : "") + (win ? "win+" : "") + name;
+        RecPush(new RecRaw { k = "key", combo = combo, win = fg, t = Environment.TickCount });
+    }
+    static Dictionary<string, object> RecEl(AutomationElement e)
+    {
+        if (e == null) return null;
+        var c = e.Current;
+        var o = new Dictionary<string, object> { { "type", c.ControlType.ProgrammaticName.Replace("ControlType.", "") }, { "name", (c.Name ?? "").Trim() } };
+        if (!string.IsNullOrEmpty(c.AutomationId)) o["aid"] = c.AutomationId;
+        if (c.IsPassword) o["password"] = true;
+        // nothing to call it by: the nearest named ancestor says where it is
+        if ((c.Name ?? "").Trim() == "")
+        {
+            var walk = TreeWalker.ControlViewWalker;
+            var p = walk.GetParent(e);
+            for (int i = 0; i < 3 && p != null; i++, p = walk.GetParent(p))
+            {
+                string pn = (p.Current.Name ?? "").Trim();
+                if (pn != "") { o["in"] = p.Current.ControlType.ProgrammaticName.Replace("ControlType.", "") + " \"" + (pn.Length > 60 ? pn.Substring(0, 60) : pn) + "\""; break; }
+            }
+        }
+        try { var r = c.BoundingRectangle; if (!r.IsEmpty) { o["ex"] = (int)r.X; o["ey"] = (int)r.Y; o["ew"] = (int)r.Width; o["eh"] = (int)r.Height; } } catch { }
+        return o;
+    }
+    static bool RecWin(Dictionary<string, object> e, IntPtr w)
+    {
+        int pid = OwnerPid(w);
+        if (pid == 0 || pid == recOwnPid || pid == recSelfPid) return false; // Cockpit (its pill's Done button too), this helper
+        var info = WinInfo(w);
+        e["window"] = info["title"]; e["process"] = info["process"];
+        RECT r = Visible(w);
+        e["wx"] = r.L; e["wy"] = r.T; e["ww"] = r.R - r.L; e["wh"] = r.B - r.T;
+        return true;
+    }
+    static Dictionary<string, object> RecResolve(RecRaw r)
+    {
+        var e = new Dictionary<string, object> { { "k", r.k }, { "t", r.t } };
+        if (r.k == "char" || r.k == "key")
+        {
+            if (!RecWin(e, r.win)) return null;
+            if (r.k == "key") { e["combo"] = r.combo; recFocusAt = 0; return e; } // Tab, Enter... may move the focus
+            if (r.win != recFocusWin || Environment.TickCount - recFocusAt > 1500)
+            {
+                Dictionary<string, object> el = null;
+                bool secret = false, ok = false;
+                try { ok = Bounded(() => { var f = AutomationElement.FocusedElement; el = RecEl(f); secret = f != null && f.Current.IsPassword; }, 800); } catch { }
+                recFocusEl = ok ? el : null; recFocusSecret = secret; recFocusWin = r.win;
+            }
+            recFocusAt = Environment.TickCount;
+            if (recFocusSecret) e["secret"] = true; else e["c"] = r.c;
+            if (recFocusEl != null) e["el"] = recFocusEl;
+            return e;
+        }
+        e["x"] = r.x; e["y"] = r.y;
+        if (!RecWin(e, WindowAt(r.x, r.y))) return null;
+        if (r.k == "wheel") e["d"] = r.d;
+        if (r.k.EndsWith("down"))
+        {
+            recFocusAt = 0; // a click moves the focus
+            Dictionary<string, object> el = null;
+            try { Bounded(() => { el = RecEl(AutomationElement.FromPoint(new System.Windows.Point(r.x, r.y))); }, 1500); } catch { }
+            if (el != null) e["el"] = el;
+        }
+        return e;
+    }
+    static void RecWork()
+    {
+        SetThreadDpiAwarenessContext(new IntPtr(-4));
+        for (;;)
+        {
+            recSignal.WaitOne(250);
+            bool last = !recOn;
+            for (;;)
+            {
+                RecRaw r;
+                lock (RecLock) { if (recIn.Count == 0) break; r = recIn.Dequeue(); }
+                Dictionary<string, object> e = null;
+                try { e = RecResolve(r); } catch { }
+                if (e != null) lock (RecLock) recOut.Add(e);
+            }
+            if (last) return;
+        }
+    }
+    static object RecStart(int ownPid)
+    {
+        lock (RecLock) { recIn.Clear(); recOut.Clear(); recLost = 0; }
+        if (recOn) return true;
+        recOwnPid = ownPid; recSelfPid = Process.GetCurrentProcess().Id;
+        recFocusAt = 0; recFocusWin = IntPtr.Zero; recFocusEl = null; recFocusSecret = false;
+        recMouseFn = RecMouse; recKeyFn = RecKey;
+        var ready = new ManualResetEvent(false);
+        string err = null;
+        recOn = true;
+        recHookThread = new Thread(() =>
+        {
+            SetThreadDpiAwarenessContext(new IntPtr(-4));
+            recTid = GetCurrentThreadId();
+            IntPtr mod = GetModuleHandle(null);
+            IntPtr mh = SetWindowsHookEx(14, recMouseFn, mod, 0); // WH_MOUSE_LL
+            IntPtr kh = SetWindowsHookEx(13, recKeyFn, mod, 0); // WH_KEYBOARD_LL
+            if (mh == IntPtr.Zero || kh == IntPtr.Zero) err = "Windows did not let Cockpit watch the mouse and keyboard";
+            ready.Set();
+            MSG msg;
+            if (err == null) while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0) { }
+            if (mh != IntPtr.Zero) UnhookWindowsHookEx(mh);
+            if (kh != IntPtr.Zero) UnhookWindowsHookEx(kh);
+        });
+        recHookThread.IsBackground = true;
+        recHookThread.Start();
+        ready.WaitOne(3000);
+        if (err != null) { recOn = false; throw new Exception(err); }
+        recWorker = new Thread(RecWork) { IsBackground = true };
+        recWorker.Start();
+        return true;
+    }
+    static object RecPoll()
+    {
+        lock (RecLock)
+        {
+            var l = recOut;
+            recOut = new List<object>();
+            return new Dictionary<string, object> { { "events", l }, { "on", recOn }, { "lost", recLost } };
+        }
+    }
+    static object RecStop()
+    {
+        if (recOn)
+        {
+            recOn = false;
+            PostThreadMessage(recTid, 0x12, IntPtr.Zero, IntPtr.Zero); // WM_QUIT
+            if (recHookThread != null) recHookThread.Join(2000);
+            recSignal.Set();
+            if (recWorker != null) recWorker.Join(4000);
+        }
+        return RecPoll();
+    }
 }
