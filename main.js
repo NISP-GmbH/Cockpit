@@ -10,7 +10,7 @@ const { AppTracker } = require('./app-tracker');
 const { AppStore } = require('./app-store');
 const { SlackManager } = require('./slack-manager');
 const { WhatsAppManager } = require('./whatsapp-manager');
-const { GoogleManager } = require('./google-manager');
+const { GoogleManager, _mail: mailUtil } = require('./google-manager');
 const { LocalPty } = require('./local-pty');
 const { CodeServerManager } = require('./codeserver-manager');
 const { BlackBoxStore } = require('./blackbox-store');
@@ -65,7 +65,9 @@ const slack = new SlackManager();
 let whatsapp = null; // WhatsAppManager, created lazily once userData path is known
 const localPty = new LocalPty((ch, payload) => send(ch, payload));
 const codeServer = new CodeServerManager();
+const PDF_PREVIEW_DIR = path.join(os.tmpdir(), 'cockpit-pdf-preview');
 const googleMgr = new GoogleManager();
+googleMgr.contactsFile = path.join(app.getPath('userData'), 'mail-contacts.json'); // compose suggestions
 const appTracker = new AppTracker();
 let appStore = null; // AppStore, created lazily once userData path is known (flushed on quit)
 
@@ -603,6 +605,65 @@ app.whenReady().then(() => {
     }
   });
   // Save a base64 blob captured in-band from a terminal ("Grab file from here").
+  // Preview a PDF (a mail attachment) with Chromium's own viewer, in a window of its own:
+  // room to read, zoom, print or save, movable to another screen, and nothing to do with the
+  // main window's CSP or the mail sandbox. (Measured on Electron 31: the viewer shows even
+  // without plugins: true - the flag stays as an explicit ask, in case a later default flips.)
+  // The bytes go to a temp file; the window is sandboxed, with no preload, and shows nothing
+  // but that one file. Links inside the PDF open as Cockpit web tabs. The file is deleted
+  // when the window closes, and the folder on quit, for a crash's leftovers.
+  // Centred over Cockpit, on the display Cockpit is on - left to itself Windows puts a new
+  // window wherever it last put one, which on a multi-monitor desk is often another screen.
+  function pdfPreviewBounds() {
+    const ref = mainWindow && !mainWindow.isDestroyed() ? mainWindow.getBounds() : null;
+    const area = (ref ? screen.getDisplayMatching(ref) : screen.getPrimaryDisplay()).workArea;
+    const width = Math.min(920, area.width - 40);
+    const height = Math.min(1100, area.height - 60);
+    const cx = ref ? ref.x + ref.width / 2 : area.x + area.width / 2;
+    const cy = ref ? ref.y + ref.height / 2 : area.y + area.height / 2;
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    return {
+      width,
+      height,
+      x: Math.round(clamp(cx - width / 2, area.x, area.x + area.width - width)),
+      y: Math.round(clamp(cy - height / 2, area.y, area.y + area.height - height)),
+    };
+  }
+  ipcMain.handle('file:previewPdf', async (_e, { name, b64 }) => {
+    try {
+      const buf = Buffer.from(b64 || '', 'base64');
+      if (buf.slice(0, 5).toString('latin1') !== '%PDF-') return { ok: false, error: 'not a PDF' };
+      const base = String(name || 'preview').replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/\.pdf$/i, '').slice(0, 80) || 'preview';
+      fs.mkdirSync(PDF_PREVIEW_DIR, { recursive: true });
+      const file = path.join(PDF_PREVIEW_DIR, Date.now().toString(36) + '-' + base + '.pdf');
+      fs.writeFileSync(file, buf);
+      const win = new BrowserWindow({
+        ...pdfPreviewBounds(),
+        title: (name || 'PDF') + ' - preview',
+        backgroundColor: '#525659',
+        autoHideMenuBar: true,
+        webPreferences: { plugins: true, sandbox: true, contextIsolation: true, nodeIntegration: false },
+      });
+      const toTab = (url) => {
+        if (/^https?:\/\//i.test(url)) send('web:open-tab', { url, background: false });
+        else if (/^mailto:/i.test(url)) shell.openExternal(url);
+      };
+      win.webContents.setWindowOpenHandler(({ url }) => {
+        toTab(url);
+        return { action: 'deny' };
+      });
+      win.webContents.on('will-navigate', (e, url) => {
+        if (url.startsWith('file:')) return; // the viewer itself
+        e.preventDefault();
+        toTab(url);
+      });
+      win.on('closed', () => fs.rm(file, { force: true }, () => {}));
+      await win.loadFile(file);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message || String(err) };
+    }
+  });
   ipcMain.handle('file:saveBase64', async (_e, { name, b64 }) => {
     try {
       const res = await dialog.showSaveDialog(mainWindow, { defaultPath: name || 'download' });
@@ -964,9 +1025,9 @@ app.whenReady().then(() => {
       return { ok: false, error: err.message || String(err) };
     }
   });
-  ipcMain.handle('google:recentMail', async () => {
+  ipcMain.handle('google:recentMail', async (_e, o) => {
     try {
-      return { ok: true, messages: await googleMgr.recentMail() };
+      return { ok: true, messages: await googleMgr.recentMail(15, o && o.q) };
     } catch (err) {
       return { ok: false, error: err.message || String(err) };
     }
@@ -1009,10 +1070,57 @@ app.whenReady().then(() => {
     }
   });
   ipcMain.handle('google:disconnect', () => {
+    googleMgr.forgetContacts(); // "disconnect" also forgets who you mail
     googleMgr.disconnect();
     store.saveSettings({ googleRefreshToken: '' });
     return { ok: true };
   });
+
+  // --- Mail tab ---------------------------------------------------------------
+  // Every handler has the same shape: `{ ok: true, ...result }` or `{ ok: false, error }`.
+  const mailCall = (fn) => async (_e, arg) => {
+    try {
+      if (!googleMgr.connected) return { ok: false, error: 'Google is not connected' };
+      return { ok: true, ...(await fn(arg || {})) };
+    } catch (err) {
+      return { ok: false, error: err.message || String(err) };
+    }
+  };
+  ipcMain.handle('mail:listThreads', mailCall((o) => googleMgr.listThreads(o)));
+  ipcMain.handle('mail:getThread', mailCall(({ id }) => googleMgr.getThread(id)));
+  ipcMain.handle(
+    'mail:modifyThread',
+    mailCall(async ({ id, add, remove }) => ({ done: await googleMgr.modifyThread(id, add, remove) }))
+  );
+  ipcMain.handle('mail:trashThread', mailCall(async ({ id }) => ({ done: await googleMgr.trashThread(id) })));
+  ipcMain.handle('mail:untrashThread', mailCall(async ({ id }) => ({ done: await googleMgr.untrashThread(id) })));
+  ipcMain.handle('mail:listLabels', mailCall(async () => ({ labels: await googleMgr.listLabels() })));
+  ipcMain.handle('mail:unreadCount', mailCall((o) => googleMgr.unreadCount(o)));
+  ipcMain.handle('mail:canSend', mailCall(async () => ({ canSend: await googleMgr.canSend() })));
+  ipcMain.handle('mail:threadOf', mailCall(async ({ id }) => ({ threadId: await googleMgr.threadIdOf(id) })));
+  // With delayMs the message is held here and can be taken back (mail:cancelSend) until it
+  // goes; the outcome arrives as a mail:sendResult event either way.
+  ipcMain.handle(
+    'mail:send',
+    mailCall(async (o) => {
+      const { delayMs, ...msg } = o;
+      if (!(Number(delayMs) > 0)) return googleMgr.send(msg);
+      return googleMgr.sendLater(msg, delayMs, (r) => send('mail:sendResult', r));
+    })
+  );
+  ipcMain.handle('mail:cancelSend', (_e, { id }) => ({ ok: googleMgr.cancelPending(id) }));
+  ipcMain.handle('mail:sendNow', async (_e, { id }) => {
+    const r = await googleMgr.sendPendingNow(id);
+    return r || { ok: false, error: 'already sent' };
+  });
+  ipcMain.handle(
+    'mail:contacts',
+    mailCall((o) => googleMgr.contacts(o, (list) => send('mail:contacts', { contacts: list })))
+  );
+  ipcMain.handle(
+    'mail:fetchImage',
+    mailCall(async ({ url }) => ({ dataUrl: await mailUtil.fetchImageDataUrl(url) }))
+  );
   ipcMain.handle('slack:forgetTokens', () => {
     slack.disconnect();
     store.saveSettings({ slackBotToken: '', slackAppToken: '' });
@@ -1030,7 +1138,22 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
+// Undo send holds mail in this process. Quitting is not an undo: send what is waiting,
+// then quit for real (the flag stops this handler from holding the quit twice).
+let mailFlushed = false;
+app.on('before-quit', (e) => {
+  if (mailFlushed || !googleMgr || !googleMgr.pending || !googleMgr.pending.size) return;
+  e.preventDefault();
+  mailFlushed = true;
+  const cap = new Promise((r) => setTimeout(r, 15000)); // never hang the quit on a dead network
+  Promise.race([googleMgr.flushPending(), cap]).finally(() => app.quit());
+});
 app.on('before-quit', () => {
+  try {
+    fs.rmSync(PDF_PREVIEW_DIR, { recursive: true, force: true }); // previews never outlive the app
+  } catch (_) {
+    /* a viewer still holding a file; the next quit gets it */
+  }
   ssh.disconnectAll();
   slack.disconnect();
   if (whatsapp) whatsapp.disconnect();

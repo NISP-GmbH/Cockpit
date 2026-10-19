@@ -23,6 +23,7 @@
             <button id="relax-btn" title="Time Relax - work/break cycles with a bell (F2)">🍵 Time Relax</button>
             <button id="new-tab-btn" title="New connection (Ctrl+Shift+T)">＋ New connection</button>
             <button id="slack-btn" title="Open a Slack channel">＃ Slack</button>
+            <button id="mail-btn" title="Gmail in a tab - read, triage from the keyboard, reply">📧 Mail</button>
             <button id="sftp-btn" title="Browse files (SFTP) of the active SSH tab">📁 Files</button>
             <button id="local-term-btn" title="Open a local terminal (run Claude / CDP tools)">🖥 Local terminal</button>
             <button id="code-btn" title="Open VS Code (code-server) — Shift-click to choose a folder">🧑‍💻 VS Code</button>
@@ -115,6 +116,7 @@
             <div class="layout-menu-note">Click a tab to fill the focused tile. Drag the seams to resize.</div>
           </div>
         </div>
+        <button id="files-btn" title="Files (SFTP) of the active SSH tab - upload and download">📁</button>
         <button id="privacy-btn" title="Privacy Curtain - blur sensitive content for screen sharing (F9)">🕶</button>
         <button id="settings-btn" title="Settings">⚙</button>
       </div>
@@ -152,9 +154,9 @@
           <div class="sftp-head">
             <span id="sftp-title">📁 Files</span>
             <span class="spacer"></span>
-            <button id="sftp-up" title="Up one folder">↑</button>
+            <button id="sftp-up" class="sftp-nav" title="Go up one folder">← Up</button>
             <button id="sftp-refresh" title="Refresh">⟳</button>
-            <button id="sftp-upload" title="Upload file(s) here">⬆</button>
+            <button id="sftp-upload" class="sftp-send" title="Upload file(s) into the folder shown above">📤 Upload</button>
             <button id="sftp-close" title="Close">✕</button>
           </div>
           <div id="sftp-path"></div>
@@ -333,8 +335,10 @@
       <div id="tab-help-project"></div>
       <div id="tab-help-view"></div>
       <div id="tab-help-cmds"></div>
-      <div class="th-title">Terminal shortcuts</div>
-      <table>
+      <button id="th-keys-btn" class="th-title th-fold" type="button">
+        <span class="th-fold-caret">▸</span> Terminal shortcuts
+      </button>
+      <table id="th-keys" class="hidden">
         <tr><td>Ctrl+Shift+F</td><td>Find in scrollback</td></tr>
         <tr><td>Ctrl+Shift+C / V</td><td>Copy / Paste</td></tr>
         <tr><td>Right / middle click</td><td>Paste</td></tr>
@@ -395,10 +399,17 @@
         <label class="settings-check"><input type="checkbox" id="rx-notify" /> Show a desktop notification too</label>
         <label class="settings-check"><input type="checkbox" id="rx-link" /> Run the current project's timer during work, pause it on breaks</label>
         <label class="settings-check"><input type="checkbox" id="rx-auto" /> Start the next phase automatically (no click)</label>
-        <label class="settings-check"><input type="checkbox" id="rx-autostart" /> Start Time Relax when Cockpit starts</label>
+        <label class="settings-check"><input type="checkbox" id="rx-autostart" /> Pick Time Relax up again if it was running when Cockpit closed</label>
         <label class="settings-check"><input type="checkbox" id="rx-breathe-on" /> Guide your breathing during breaks</label>
         <div class="rx-vol" id="rx-breathe-row"><span>Pattern</span><select id="rx-breathe-pattern"></select></div>
         <label class="settings-check"><input type="checkbox" id="rx-tips" /> Suggest something to do with the break</label>
+        <label class="settings-check"><input type="checkbox" id="rx-music" /> Play soothing music during breaks</label>
+        <div class="rx-vol" id="rx-music-row">
+          <select id="rx-music-kind"></select>
+          <input id="rx-music-vol" type="range" min="2" max="100" step="2" />
+          <span id="rx-music-vol-out" class="rx-vol-out"></span>
+          <button id="rx-music-test" type="button" class="rx-vol-test">▶ Test</button>
+        </div>
         <label class="settings-check"><input type="checkbox" id="rx-nudge" /> Ring again every minute or two while a phase is waiting to start</label>
         <label class="settings-check"><input type="checkbox" id="rx-evening" /> Evening chime: ring now and then once it gets late</label>
         <div class="rx-vol" id="rx-evening-row"><span>From</span><input id="rx-evening-from" type="number" min="12" max="23" /><span>:00, every</span><input id="rx-evening-min" type="number" min="1" max="120" /><span>to</span><input id="rx-evening-max" type="number" min="1" max="120" /><span>min</span></div>
@@ -614,6 +625,25 @@
             <button id="set-google-forget" type="button">Disconnect</button>
           </div>
           <span id="settings-google-error"></span>
+          <label class="settings-check" style="margin-top: 8px">
+            <input type="checkbox" id="set-mail-quiet" />
+            Mail stays quiet during a focus session or a Time Relax work phase (one summary at the break)
+          </label>
+          <label class="settings-check" style="margin-top: 6px">
+            Undo send: hold each message for
+            <select id="set-mail-undo">
+              <option value="0">no time (send at once)</option>
+              <option value="5">5 seconds</option>
+              <option value="10">10 seconds</option>
+              <option value="15">15 seconds</option>
+              <option value="20">20 seconds</option>
+              <option value="30">30 seconds</option>
+            </select>
+          </label>
+          <div class="settings-status">
+            The Mail tab reads and triages with the permission you already gave. Sending needs Gmail
+            send as well: press <b>Connect &amp; sign in</b> once more and allow it.
+          </div>
         </div>
 
         <div class="settings-section" style="margin-top: 14px">
@@ -643,6 +673,15 @@
             <br /><b>No PageUp / PageDown keys?</b> <b>Alt+Shift+↑/↓</b> sends whatever is
             chosen here (the bytes are synthesized, so the key never has to exist on your
             keyboard), and <b>Ctrl+Shift+↑/↓</b> pages this terminal's own scrollback.
+          </div>
+          <label class="settings-check" style="margin-bottom: 8px">
+            <input type="checkbox" id="set-join-wraps" />
+            Copy long lines as one line (drop the breaks the terminal added)
+          </label>
+          <div class="settings-status" style="margin-top: 0">
+            A row that fills the width is treated as continuing on the next one, so a wrapped path or
+            URL pastes in one piece. For output wrapped at a word boundary use
+            <b>🔗 Copy as one line</b> on the tab hover sheet.
           </div>
           <label for="set-wheel-keys">Shift+scroll sends</label>
           <select id="set-wheel-keys">

@@ -39,10 +39,10 @@ ANSI/256/truecolor, SSH-key auth.
 Everything lives in one tabbed window (`Ctrl+Shift+T` new · `Ctrl+Shift+W` close · `Ctrl+Tab` switch).
 
 **Terminals**
-- **SSH** - Windows OpenSSH **ssh-agent**, a **private key** (with passphrase), or **password** fallback; auto-detects keys in `~/.ssh` / `%USERPROFILE%\.ssh`. Full ANSI/256/truecolor, 10k scrollback, clickable links (open in an in-app web tab), live resize, PuTTY-style copy-on-select / right-click paste, font zoom (`Ctrl +/-/0`), scrollback search (`Ctrl+Shift+F`).
+- **SSH** - Windows OpenSSH **ssh-agent**, a **private key** (with passphrase), or **password** fallback; auto-detects keys in `~/.ssh` / `%USERPROFILE%\.ssh`. Full ANSI/256/truecolor, 10k scrollback, clickable links (open in an in-app web tab), live resize, PuTTY-style copy-on-select / right-click paste (a line the terminal broke across rows is copied as **one line** - untick in ⚙ if you want the breaks; 🔗 **Copy as one line** on the hover sheet handles word-wrapped output too), font zoom (`Ctrl +/-/0`), scrollback search (`Ctrl+Shift+F`).
 - **Local shell** tabs (PowerShell/cmd on Windows, `$SHELL`/zsh/bash on macOS/Linux) via a real PTY - same terminal UI, from **＋ New → Local terminal**.
 - **Broadcast typing** (⇄ in the tab bar) - mirror your keystrokes from the focused terminal to every other connected ssh/local tab, so you run a command once and it lands everywhere. The button shows the member count; participating terminals get an orange badge, and any tab can opt out from its hover cheat-sheet.
-- **Saved sessions** (host/port/user/key path) - secrets are never written to disk. **SSH auto-hop** optionally replays `ssh …` jump commands on connect (opt-in). Dropped session? **R** to reconnect, **P** to re-enter a passphrase. Reconnecting **re-asserts the terminal size**, so a re-attached `tmux` session or a full-screen app gets the real geometry instead of falling back to 80x24 - no more dragging the window edge to make it snap.
+- **Saved sessions** (host/port/user/key path) - secrets are never written to disk. **SSH auto-hop** optionally replays `ssh …` jump commands on connect (opt-in). Dropped session? **R** to reconnect, **P** to re-enter a passphrase. **📐 Fix the size** (tab hover cheat-sheet) tells the far end how big this terminal is - the resize signal, plus `stty` and `tmux refresh-client` in words, because tmux keeps whatever size its client had when it attached and a signal alone does not always reach it. It runs on its own after connecting; press it when a pane is the wrong size. Reconnecting **re-asserts the terminal size**, so a re-attached `tmux` session or a full-screen app gets the real geometry instead of falling back to 80x24 - no more dragging the window edge to make it snap.
 - **`ssh://` link handler** (Settings → ssh:// links, opt-in) - register Cockpit as the system handler for `ssh://user@host:port` links, so clicking one anywhere opens a new terminal and connects. If a **jump / bastion host** is set (pick a **saved SSH session** from the dropdown, or type one), Cockpit connects there first and then runs `ssh user@host` to reach the target. Off by default; unchecking it hands `ssh://` back to your other tools.
 - **Resilient SSH auth** - agent auth automatically **falls back to your `~/.ssh` keys** (like OpenSSH), so a stopped/empty agent isn't a dead end; a failing agent is a note, not a failed connection. (Cockpit uses the `ssh2` library, not the `ssh` binary.)
 - Optional per-terminal **line numbers** for command output. **SFTP** file browser for the active SSH tab (drag-and-drop upload/download). New output **auto-scrolls** to the bottom (unless you've scrolled up to read history); `Ctrl+PageUp`/`Ctrl+PageDown` page the scrollback. **Shift+scroll** instead writes keys to the remote app, so you can scroll inside full-screen apps (tmux, `less`, vim, Claude Code) that own the screen and have no local scrollback. Which keys is configurable in ⚙ → **Terminal scrolling** (`PgUp`/`PgDn`, tmux copy-mode, `Ctrl+B`/`Ctrl+F`, arrows, an SGR mouse report, or your own sequence) because every app binds paging differently - notably, some editors bind `PgUp`/`PgDn` to jump to the start/end of the input rather than scroll. For tmux the simplest answer is usually `set -g mouse on`, after which a plain scroll works natively. On keyboards without `PageUp`/`PageDown` keys (Mac laptops, 60% boards), `Alt+Shift+↑/↓` sends the same configured sequence and `Ctrl+Shift+↑/↓` pages the local scrollback - the key bytes are synthesized, so the physical key never has to exist. In **tmux copy-mode** mode, scrolling up parks the pane in copy-mode (leave it with `q`, Escape or Enter); by default Cockpit sends that `q` for you the moment you start typing, so typing just resumes - untick **Leave copy-mode as soon as I type** if you would rather stay there to search or select.
@@ -57,8 +57,8 @@ Everything lives in one tabbed window (`Ctrl+Shift+T` new · `Ctrl+Shift+W` clos
   when you switch to a tab, and on demand. It never types into a full-screen program: on the alternate
   screen the probe is skipped, so `vim`, tmux copy-mode and Claude are safe.
 - **Send a file here** (tab hover cheat-sheet → 📤) - the mirror of the grab below: pushes a file **into the shell this terminal is in right now**, so on a multi-hop `ssh` it lands on the **last** hop, not the first - and it reaches inside `sudo` or a container too. The bytes are base64 and typed through the terminal in chunks, with the whole exchange hidden, and the size is checked on arrival. Small files only (1 MB cap); use **📁 Files** for anything larger.
-- **📁 Files (SFTP)** (tab hover cheat-sheet, or ＋ New ▾ → 📁 Files) - browse the host you connected to: **⬆ upload**, download, and move around. You can also **drag files onto the terminal**. SFTP is attached to the first hop, so it does not follow further `ssh` hops - that is what Send a file here is for.
-- **Grab / preview a file from here** (tab hover cheat-sheet → 📥 Get a file) - reaches a file straight through the current terminal session, so it works even inside a **nested `ssh`**, `sudo`, `tmux`, or a container where SFTP can't reach. Two options: **👁 Preview** shows the contents in a scrollable viewer (`.json` pretty-prints; **`.log`/`.out`/`.err` jump to the end** so you see the newest lines; binary files are declined), and **📥 Download** saves it. The transfer is hidden from the terminal (a short `[sending file …]` note stands in for the base64), leaving no clutter. Best for small/medium files; use SFTP for large ones.
+- **📁 Files (SFTP)** (the 📁 button on the top bar, the tab hover cheat-sheet, or ＋ New ▾ → 📁 Files) - browse the host you connected to: **📤 Upload**, download, and move around. You can also **drag files onto the terminal**. SFTP is attached to the first hop, so it does not follow further `ssh` hops - that is what Send a file here is for.
+- **Grab / preview a file from here** (tab hover cheat-sheet → 📥 Get a file) - reaches a file straight through the current terminal session, so it works even inside a **nested `ssh`**, `sudo`, `tmux`, or a container where SFTP can't reach. Two options: **👁 Preview** shows the contents in a scrollable viewer (`.json` pretty-prints; **`.log`/`.out`/`.err` jump to the end** so you see the newest lines; binary files are declined), and **📥 Download** saves it. The transfer is hidden from the terminal (a short `[sending file …]` note stands in for the base64), leaving no clutter. The host also reports the file size, and a transfer that arrives a different size is **refused rather than saved** - a long stream can be mangled by anything that redraws the terminal instead of passing bytes through (tmux, screen), and a silently corrupt file is worse than none. Best for small and medium files; use 📁 Files (SFTP) for large ones.
 - **Port forwarding** (tab hover cheat-sheet → 🔀 Port forwarding) - a visual SSH tunnel manager for the active connection. Port forwarding is confusing because it's hard to picture *who listens* and *which way traffic flows*, so each tunnel is drawn as a **three-node diagram** - your PC, the SSH host, the target - with a 📡 LISTENS pin and directional arrows, plus a plain-English sentence, and a live preview updates as you fill the form. Supports **Local (`-L`)** (reach an internal service from your machine), **Remote (`-R`)** (expose something of yours on the server), and **Dynamic (`-D`)** (a built-in SOCKS5 proxy). Each active tunnel shows a status dot, live connection count and bytes up/down, with a Stop button. Optionally **remember** a tunnel per host so it **auto-starts on connect**. An "allow other devices (0.0.0.0)" toggle exposes a local tunnel to your LAN. The panel is **draggable** by its header (double-click the header to re-center).
 - **Host vitals** (Terminal ▾ → 📈 Host vitals, opt-in) - a tiny live CPU / MEM / DISK sparkline strip in the **status bar**, next to the active SSH shell's name, so you can eyeball a box's health without opening `htop`. Each host is polled over a **separate exec channel** (default every 15 s, selectable 5/15/30/60 s in the same menu), so it never disturbs your interactive shell. CPU is load1 ÷ cores; colours go green → amber → red as a metric climbs. **Hover** the strip for absolute figures (e.g. `MEM 29% of 33 GB (9.6 GB used)`, `DISK 82% of 500 GB`, plus load and core count). Linux-oriented (reads `/proc` + `df`); unavailable values show `n/a`.
 - **Smart output** (Terminal ▾ → 🔎 Smart output, on by default) - makes things in the terminal scrollback clickable: click an **IP** (with optional `:port`) to open a pre-filled SSH connection, a **file path** to grab it through the current session, or a **JSON** object/array to pretty-print it in a copyable pop-up - this works on both compact single-line JSON and pretty-printed **multi-line** blocks (e.g. `cat file.json`), where clicking any line pops the enclosing object/array. URLs keep opening in an in-app web tab. IPs inside URLs are left alone; only text that actually parses as JSON gets a link. A `.json` file (a path, or a filename in an `ls -l` row) **previews structured** immediately (fetched in-band, with a Save button in the viewer). Filenames in an `ls -l` listing are grabbable too.
@@ -75,7 +75,7 @@ Everything lives in one tabbed window (`Ctrl+Shift+T` new · `Ctrl+Shift+W` clos
 
 **Messaging** - **Slack** and **WhatsApp** as tabs *and* as live right-sidebar **boards** (latest messages across all channels/chats, click to jump). Slack via Socket Mode; WhatsApp via QR login (no API key). Capture any message to a note.
 
-**Google** - **Gmail** inbox strip + **Calendar** bar with countdown, a **centered pop-up that raises the window for an imminent meeting** (with a one-click **Join**), and capture-email-to-note.
+**Google** - a **📧 Mail tab** (Gmail in a tab: triage from the keyboard, reply / forward, attachments straight into a shell), the Inbox board + **Calendar** bar with countdown, a **centered pop-up that raises the window for an imminent meeting** (with a one-click **Join**), and capture-email-to-note.
 
 **Notes & tasks hub** - draggable sticky notes; Markdown checkboxes `[ ]`/`[/]`/`[x]` become a **Tasks dashboard** + **Kanban**; note **templates** (standup / incident / checklist); capture-to-note from terminals, Slack, mail, or web; run/open **action buttons** on `ssh …`/URL lines. A **Cockpit pet** 🐤 reacts to your open/overdue tasks.
 
@@ -107,6 +107,12 @@ above, which stays the one-shot deep-work block.
 - **The hand-off** - while a phase waits to be started the pill **grows and lights up the button to
   press**: green for a break waiting, amber for **Back to work**. Left alone, it gives a quiet
   single-strike reminder every minute or two, up to ten times, and then stops asking.
+- **Soothing music** (off by default) - five pieces that play only while a break is actually
+  running: **Rain**, **Ocean waves**, **Warm drone**, **Distant bowls** (your chosen bell voice, rung
+  softly at random) and **Music box** (a random walk over a pentatonic scale, so nothing lands wrong).
+  All of it is generated live rather than played from a file, so it never loops and never repeats;
+  it fades in and out, has its own volume, previews for eight seconds when you change it, and
+  goes quiet the moment a meeting starts.
 - **Breaks worth taking** - a slow **breathing circle** paces you (**Calm (4-7-8)**, **Box (4-4-4-4)**
   or **Even (5-5)**), and each break **suggests one thing to do** with it ("look at something 20 m away
   for 20 seconds", "refill the water glass"), rotating so nothing repeats and with bigger ideas saved
@@ -131,9 +137,10 @@ above, which stays the one-shot deep-work block.
 - **Project time** - work phases can drive the **project timer** and pause it on breaks, so totals
   reflect focused time rather than wall-clock. Stopping hands the timer back exactly as it was.
 - **Settings** - durations, bell, desktop notification and the project link live in the dialog and
-  persist, along with the count of work phases finished today. **Start Time Relax when Cockpit
-  starts** is on by default, so a fresh work phase begins on its own every launch with the durations
-  you last used. Everything saves as you change it; **Start** only begins a cycle.
+  persist, along with the count of work phases finished today. Cockpit **remembers whether it was
+  running**: close it mid-cycle and it picks up again on the next launch; stop it and it stays
+  stopped. Untick the box in the dialog to never resume. Everything saves as you change it;
+  **Start** only begins a cycle.
 
 **Privacy Curtain** (🕶 / `F9`) - one toggle blurs sensitive ambient content for screen sharing, demos, and screenshots: the Slack/WhatsApp/Mail boards, calendar, message logs, note titles/bodies, the URL bar, and tab titles. Terminal and web page content stay visible (that's what you're presenting).
 
@@ -240,7 +247,7 @@ Tokens are stored encrypted at rest via Electron `safeStorage` (Windows DPAPI).
 ## Gmail + Calendar (Google OAuth)
 An always-visible **Gmail strip** (recent inbox subjects) and a **Calendar bar** in the
 status bar (next appointment with a countdown that **flashes 3 min before start until you
-click to acknowledge**). Read-only. One-time Google setup:
+click to acknowledge**), plus the **📧 Mail tab** below. One-time Google setup:
 
 1. **console.cloud.google.com** → create a project.
 2. **APIs & Services → Library** → enable **Gmail API** and **Google Calendar API**.
@@ -248,11 +255,62 @@ click to acknowledge**). Read-only. One-time Google setup:
 4. **Credentials → Create credentials → OAuth client ID → Desktop app** → copy the
    **Client ID** and **Client secret**.
 5. In the app: **⚙ Settings → Google** → paste Client ID + secret → **Connect & sign in** →
-   a browser opens; approve the scopes (Gmail **modify** - read + move-to-Trash - and
-   Calendar read-only).
+   a browser opens; approve the scopes (Gmail **modify** - read, label, archive, Trash -
+   Gmail **send**, and Calendar read-only).
 
 Tokens (client id/secret + refresh token) are stored encrypted via `safeStorage`; the app
 reconnects silently on later launches. Gmail refreshes every 2 min, Calendar every 5 min.
+
+Connected before the Mail tab existed? Reading and triage keep working with the grant you
+have; **sending** needs Gmail send too, so press **Connect & sign in** once more and allow
+it. The compose panel says so when it is missing.
+
+### 📧 The Mail tab
+**＋ New ▾ → 📧 Mail** (or the Home deck, or click a mail on the Inbox board) opens Gmail in
+a tab: search, Inbox / Unread / Starred / Sent / All mail, your labels, a thread list and a
+reader. The tab badge is the **real** inbox unread count, and the tab comes back on restart.
+
+- **Inbox categories** - the row under the toolbar picks which of Gmail's categories you see:
+  **Primary** only, or any mix (Primary + Updates, say). **All** turns the filter off. It is
+  remembered, and it decides what "inbox" means everywhere: the Inbox / Unread views, the tab
+  badge, the Inbox board (its header names the filter) and the Home count. Starred, Sent,
+  labels and search always show everything.
+- **Keyboard triage** (while the tab has focus, never inside a text field): `j`/`k` next /
+  previous, `Enter`/`o` open, `u`/`Esc` back, `e` archive, `#` trash, `s` star,
+  `Shift+I`/`Shift+U` read / unread, `l` label, `r`/`a`/`f` reply / reply all / forward,
+  `c` compose, `/` search, `z` undo, `1`-`9` quick replies, `d` dark reading, `?` the list. `Ctrl+Enter` sends.
+  Archive and trash act at once and can be undone for 8 s.
+- **Reading safely** - HTML mail is shown in a sandboxed frame that cannot run scripts, and
+  remote images stay blocked (they tell a sender you opened the mail). **Load images** fetches
+  them for that one message. Links open in a Cockpit web tab; `mailto:` links open compose.
+- **Reply, reply all, forward** - plain text with the original quoted, kept in the same Gmail
+  thread; reply all leaves you out. Forward brings the attachments along; 📎 adds your own.
+- **Address suggestions** - start typing in To / Cc / Bcc and the people you mail pop up
+  (by name, surname, address or domain); ↑↓ to choose, Enter or Tab to take one, Esc to close
+  the list. ↓ in an empty field lists the people you write to most. The list is built from your
+  own sent and received mail (no extra Google permission), kept in `mail-contacts.json` in the
+  data folder, refreshed daily, and forgotten when you disconnect Google.
+- **Snippets** - predefined texts. In a message type `;thx` then Space or Tab, or `;;` /
+  `Ctrl+Space` to pick one from a list (↑↓ + Enter). Variables fill themselves in: `{first}`
+  and `{name}` of the recipient, `{today}`, `{tomorrow}`, `{subject}`, `{project}`, `{clip}`,
+  `{cursor}`, and **`{free}`** - your next free hours from the calendar (`{free@Berlin}` gives
+  them in one of your TZ planner zones). Edit them with **✂** in the Mail toolbar.
+- **Quick replies** - snippets marked ⚡ show as buttons under every open conversation: click
+  (or press `1`-`9`) to start a reply with it, Ctrl+click to send it straight away.
+- **Undo send** - every message waits 15 s with **Undo** / **Send now** in the toast (`z` undoes);
+  undone, it comes back exactly as written. Quitting Cockpit sends what is waiting rather than
+  dropping it. Settings → Google sets the time (or off).
+- **Dark reading** - 🌙 in the reader bar (or `d`) shows every mail white on black, even the
+  ones that fix their own colours; photos and logos keep theirs. Remembered for all mail.
+- **Resizable list** - drag the divider between the list and the reader; double-click it for
+  the default width. The width is remembered.
+- **Attachments** - preview images and text, **👁 View** a PDF in its own viewer window (opened
+  over Cockpit, on the same screen), **💾 Save**, or **⤴ Terminal**: pick a terminal
+  and the file lands in that shell's current directory, **at any ssh depth** (the same in-band
+  path as *Send a file here*, up to 1 MB).
+- **Quiet during focus** - during a focus session or a Time Relax work phase the badge, the
+  Inbox board and the Home count hold still. At the break you get one silent summary
+  ("📧 4 new while you worked - from ..."). Settings → Google to turn it off.
 
 ## WhatsApp
 Turn on the **WhatsApp board** from the ＋ New menu, then **⚙ Settings → WhatsApp → Connect**
