@@ -186,6 +186,7 @@ contextBridge.exposeInMainWorld('sshApi', {
   mailListLabels: () => ipcRenderer.invoke('mail:listLabels'),
   mailUnreadCount: (q) => ipcRenderer.invoke('mail:unreadCount', { q }),
   mailCanSend: () => ipcRenderer.invoke('mail:canSend'),
+  mailSendAs: () => ipcRenderer.invoke('mail:sendAs'),
   mailThreadOf: (id) => ipcRenderer.invoke('mail:threadOf', { id }),
   mailSend: (o) => ipcRenderer.invoke('mail:send', o),
   mailGetDraft: (o) => ipcRenderer.invoke('mail:getDraft', o), // { draftId } or { messageId }

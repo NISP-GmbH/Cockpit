@@ -186,6 +186,7 @@ function summarizeThread(t) {
     id: t.id,
     subject: h(first, 'Subject') || '(no subject)',
     from: h(last, 'From') || h(first, 'From'),
+    to: h(last, 'To'), // Sent and Drafts name whom it is written to
     date: Number(last.internalDate) || 0,
     snippet: last.snippet || t.snippet || '',
     unread: msgs.some((m) => (m.labelIds || []).includes('UNREAD')),
@@ -504,6 +505,21 @@ async function fetchImageDataUrl(url, maxBytes, opts = {}) {
  * app. Tokens auto-refresh via the stored refresh token. Reads, triages and (with the send
  * scope granted) sends mail; the calendar is read-only.
  */
+// The page token of a thread list that is several label listings merged (see listThreads).
+const ANY_TOKEN = 'any:';
+function parseAnyToken(t) {
+  if (typeof t !== 'string' || !t.startsWith(ANY_TOKEN)) return null;
+  try {
+    const o = JSON.parse(t.slice(ANY_TOKEN.length));
+    if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+    const out = {};
+    for (const k of Object.keys(o)) if (typeof o[k] === 'string' && o[k]) out[k] = o[k];
+    return out;
+  } catch (_) {
+    return null;
+  }
+}
+
 class GoogleManager {
   constructor() {
     this.clientId = null;
@@ -722,14 +738,57 @@ class GoogleManager {
   }
 
   /** One page of threads for a view (a label, a search, or both). */
+  // `labelIds` must ALL be on a thread. `anyOf` adds a choice: one of THOSE labels as well (the
+  // inbox categories, CATEGORY_PERSONAL and friends).
+  // Why a category is asked for as a label and not as a search (q: 'category:primary'): Gmail
+  // returns a SEARCH ordered by when each conversation started, not by its newest message -
+  // seen on a real mailbox: a conversation begun yesterday with a reply from a minute ago was not
+  // among the first 25 of 'in:inbox category:primary', while the plain INBOX listing had it at
+  // the top. So an active conversation was missing from Primary and present under All. A
+  // listing by labels has no such ranking. Labels can only be ANDed, so a choice of several
+  // is one listing per label, merged; the page token then holds one token per label
+  // (ANY_TOKEN + JSON), and a label with no pages left drops out of it.
   async listThreads(o = {}) {
     const gmail = this._gmail();
-    const params = { userId: 'me', maxResults: Math.max(1, Math.min(50, Number(o.max) || 25)) };
-    if (o.q) params.q = String(o.q);
-    if (Array.isArray(o.labelIds) && o.labelIds.length) params.labelIds = o.labelIds;
-    if (o.pageToken) params.pageToken = o.pageToken;
-    const list = await gmail.users.threads.list(params);
-    const ids = (list.data.threads || []).map((t) => t.id);
+    const max = Math.max(1, Math.min(50, Number(o.max) || 25));
+    const clean = (a) => (Array.isArray(a) ? a.filter((l) => typeof l === 'string' && l) : []);
+    const base = clean(o.labelIds);
+    const any = [...new Set(clean(o.anyOf))].slice(0, 8);
+    const listOne = async (labelIds, pageToken) => {
+      const params = { userId: 'me', maxResults: max };
+      if (o.q) params.q = String(o.q);
+      if (labelIds.length) params.labelIds = labelIds;
+      if (pageToken) params.pageToken = pageToken;
+      const list = await gmail.users.threads.list(params);
+      return { ids: (list.data.threads || []).map((t) => t.id), next: list.data.nextPageToken || null };
+    };
+    let ids;
+    let nextPageToken;
+    if (any.length < 2) {
+      const one = await listOne(base.concat(any), o.pageToken ? String(o.pageToken) : undefined);
+      ids = one.ids;
+      nextPageToken = one.next;
+    } else {
+      let tokens = null; // null = the first page: every label is asked
+      if (o.pageToken) {
+        tokens = parseAnyToken(o.pageToken);
+        if (!tokens) throw new Error('That page belongs to a different list - refresh the list.');
+      }
+      const todo = any.filter((l) => !tokens || tokens[l]);
+      const pages = await Promise.all(todo.map((l) => listOne(base.concat(l), tokens ? tokens[l] : undefined)));
+      const seen = new Set(); // a conversation can carry two categories
+      const left = {};
+      ids = [];
+      pages.forEach((p, i) => {
+        for (const id of p.ids) {
+          if (seen.has(id)) continue;
+          seen.add(id);
+          ids.push(id);
+        }
+        if (p.next) left[todo[i]] = p.next;
+      });
+      nextPageToken = Object.keys(left).length ? ANY_TOKEN + JSON.stringify(left) : null;
+    }
     const threads = await mapLimit(ids, 8, async (id) => {
       const t = await gmail.users.threads.get({
         userId: 'me',
@@ -739,7 +798,7 @@ class GoogleManager {
       });
       return summarizeThread(t.data);
     });
-    return { threads, nextPageToken: list.data.nextPageToken || null };
+    return { threads, nextPageToken };
   }
 
   /** A whole conversation, bodies and all - raw HTML included, for the reading pane. */
@@ -819,6 +878,21 @@ class GoogleManager {
       if (!pageToken) return { threads: n, messages: null };
     }
     return { threads: n, messages: null, capped: true };
+  }
+
+  /** The addresses Gmail lets this account send AS (Settings > Accounts > Send mail as): the
+   *  primary and every verified alias. gmail.modify may read them - no new scope. */
+  async listSendAs() {
+    const res = await this._gmail().users.settings.sendAs.list({ userId: 'me' });
+    return (res.data.sendAs || [])
+      .filter((a) => a.sendAsEmail && (!a.verificationStatus || a.verificationStatus === 'accepted'))
+      .map((a) => ({
+        email: String(a.sendAsEmail).trim(),
+        name: String(a.displayName || '').trim(),
+        isDefault: !!a.isDefault,
+        isPrimary: !!a.isPrimary,
+        replyTo: String(a.replyToAddress || '').trim(),
+      }));
   }
 
   /** Which scopes the stored grant really carries (a pre-Mail-tab token has no send). */

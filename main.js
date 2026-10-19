@@ -1236,6 +1236,7 @@ app.whenReady().then(() => {
   ipcMain.handle('mail:listLabels', mailCall(async () => ({ labels: await googleMgr.listLabels() })));
   ipcMain.handle('mail:unreadCount', mailCall((o) => googleMgr.unreadCount(o)));
   ipcMain.handle('mail:canSend', mailCall(async () => ({ canSend: await googleMgr.canSend() })));
+  ipcMain.handle('mail:sendAs', mailCall(async () => ({ list: await googleMgr.listSendAs() })));
   ipcMain.handle('mail:threadOf', mailCall(async ({ id }) => ({ threadId: await googleMgr.threadIdOf(id) })));
   // With delayMs the message is held here and can be taken back (mail:cancelSend) until it
   // goes; the outcome arrives as a mail:sendResult event either way.

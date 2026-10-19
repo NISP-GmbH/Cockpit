@@ -104,6 +104,70 @@ paste / select all; anywhere else - back / forward / reload; and always *Inspect
 
 **Google** - a **📧 Mail tab** (Gmail in a tab: triage from the keyboard, reply / forward, attachments straight into a shell), the Inbox board + **Calendar** bar with countdown, a **centered pop-up that raises the window for an imminent meeting** (with a one-click **Join**), and capture-email-to-note.
 
+**Terminal presets** - a terminal that sets itself up. A preset is a name and a list of steps that Cockpit
+types for you: `ssh` somewhere, wait, attach to tmux, set the tab title. You write them once, as plain text,
+in ⚙ → **⚡ Terminal presets** (or ＋ New ▾ → ⚡ Presets → ✎ Edit presets…):
+
+```
+[Pen]
+start: local
+title: pen
+ssh admin@pen
+wait: $
+tmux attach -t main
+
+[Logs]
+start: my saved connection
+cd /var/log
+tail -f syslog
+```
+
+A name in brackets starts a preset; then one step per line:
+
+| Line | What it does |
+|---|---|
+| any other line | typed into the terminal, with Enter |
+| `sleep 3` | a pause of 3 seconds, made by Cockpit - nothing is typed |
+| `wait: text` | goes on when that text shows up in the terminal (a prompt, say); gives it 30 s, `wait 60: text` for longer. If it never comes the preset stops there and the rest is **not** typed |
+| `title: Name` | sets the tab title, at the start or between two steps |
+| `start: local` | where a **new** tab starts: a local terminal (the default), or `start: name of a saved connection` |
+| `cwd: folder` | the folder a new local terminal opens in |
+| `run: sleep 3` | types the line exactly as written (here: the shell's own `sleep`) |
+| `# note` | ignored |
+
+**Save presets** says what it understood, or names the line with a mistake.
+
+Three ways to use one:
+
+- **A new tab**: ＋ New ▾ → **⚡ Presets ▸** → the preset. It opens the terminal (or the saved connection - a
+  password is still asked for in the usual dialog) and types the steps.
+- **A terminal that is already open**: hover its tab, point at **⚡ Presets ▸** in the top row of the menu and
+  pick one from the list beside it (or Shift+click the preset in the ＋ New menu). The steps are typed there -
+  for when an ssh has logged out again. A shell that ended or a connection that dropped is started again first.
+  `start:` and `cwd:` do not apply here, and the tab keeps its title unless the preset has a `title:` line.
+- **By itself, when Cockpit starts**: every terminal that *belongs to* a preset runs it again after a restart,
+  once its shell or connection is there. A terminal belongs to a preset when it was started with it, or when its
+  **tab title matches**: the preset's name, or one of its `title:` lines (upper and lower case do not matter).
+  So a tab you named `pen` and a preset with `title: pen` are a match - name your tabs after your presets and
+  the whole set of terminals is back where it was. Renaming a tab while Cockpit runs starts nothing; the match
+  is looked at when Cockpit starts. Switch this off in ⚙ → Terminal presets ("When Cockpit starts, run a preset
+  by itself ..."): then such tabs come back with a **▶ Run preset** button and nothing is typed without a click.
+
+While a preset runs, a small strip in the corner of the terminal shows the step it is at and has **Stop**;
+afterwards it offers **▶ Run again**. Cockpit's own background commands (the where-am-I check, the size
+resync) stay out of a terminal while a preset is typing into it.
+
+One thing to know: a fixed `sleep` does not look at the screen. If `ssh` is still asking for a password when
+the pause is over, the next command is typed into the password prompt. With key login that cannot happen;
+otherwise use `wait:` with the end of your prompt instead of `sleep`. A terminal that is showing a full-screen
+program (tmux, vim) asks before a preset is typed into it by hand.
+
+**Look** - ⚙ → Look switches the whole app between the standard dark grey and one colour on black:
+**green**, **amber**, **ice blue** or **white**, like an old terminal screen. Panels, borders and dim text
+are mixed from that one colour, the Mail tab follows, and the matching terminal theme is picked with it
+(a terminal's own menu can still choose another). Formatted mails are read in that colour too - the reading
+button in a mail, or `t`, shows one as it was sent. Web pages keep their own colours.
+
 **Notes & tasks hub** - draggable sticky notes; Markdown checkboxes `[ ]`/`[/]`/`[x]` become a **Tasks dashboard** + **Kanban**; note **templates** (standup / incident / checklist); capture-to-note from terminals, Slack, mail, or web; run/open **action buttons** on `ssh …`/URL lines. A **Cockpit pet** 🐤 reacts to your open/overdue tasks.
 
 **Project accounting** - a start/stop **time tracker per project** in the status bar (today's total, green ▶/⏸). An overlay with **Day/Month bar charts** (Chart.js), a project list, inline **rename**, and **move time between projects** (fix "forgot to switch") with **undo** (`Ctrl+U` / revert banner). Optional **auto-switch by tab**: assign a project to a tab and the timer follows your focus.
@@ -311,7 +375,7 @@ it. The compose panel says so when it is missing.
 
 ### 📧 The Mail tab
 **＋ New ▾ → 📧 Mail** (or the Home deck, or click a mail on the Inbox board) opens Gmail in
-a tab: search, Inbox / Unread / Starred / Sent / All mail, your labels, a thread list and a
+a tab: search, Inbox / Unread / Starred / Sent / Drafts / All mail, your labels, a thread list and a
 reader. The list loads more **by itself as you scroll** - the next page is already fetched in
 the background, so it appears at once - and **emptying the search box** (or its ✕) puts back
 the list you were in before the search. A long conversation opens at the mail that matters - the **first unread** one, else the
@@ -328,19 +392,36 @@ operator like `from:` are searched exactly as typed. The tab comes back on resta
   remembered, and it decides what "inbox" means everywhere: the Inbox / Unread views, the tab
   badge, the Inbox board (its header names the filter) and the Home count. Starred, Sent,
   labels and search always show everything.
+  **A mail shows under All but not under Primary?** Select it and **right-click a category**:
+  the hint says where Gmail filed that mail (or that it has no category at all), what Gmail
+  puts in each category, and offers "Show Updates too" when the filter is what hides it.
+  The usual cause: in Gmail's own page a category whose tab is switched off is shown under
+  Primary, but the mail keeps its real category, and that is what the filter goes by.
 - **Keyboard triage** (while the tab has focus, never inside a text field): `↑`/`↓` move in
   the list, `→` opens the mail (then `↑`/`↓` and `PgUp`/`PgDn` scroll it) and `←` goes back to the
-  list; `j`/`k` next /
+  list; `Space` moves one page on in the open mail and `Shift+Space` one back, from the list too; `j`/`k` next /
   previous, `Enter`/`o` open, `Esc` back, `e` archive, `d` / `Delete` / `#` trash, `s` star,
   `Shift+I` read, `u`, `Shift+U` or `Ctrl+U` unread (`u` is not Gmail's "back" here - that is `Esc`), `l` label, `r`/`a`/`f` reply / reply all / forward,
-  `c` compose, `/` search, `z` undo, `1`-`9` quick replies, `t` reading mode, `?` the list. `Ctrl+Enter` sends.
+  `c` compose, `/` search, `z` undo, `1`-`9` quick replies, `t` reading mode, `?` the list. `Ctrl+Enter` sends at once - the undo wait is for the Send button only.
+  **Several at once**: `x` marks the selected row (`Shift+X`, or Shift+click on a row's box, marks
+  everything from the last mark to here); then `e`, `#`, `l`, `Shift+I`, `Shift+U`, `s` - or the
+  strip above the list - act on all marked, with one undo for the lot. `Esc` unmarks.
+  An account that sends as several addresses (Gmail: Settings → Accounts → Send mail as) gets a
+  **From** row in the compose panel: a reply goes out as the address the mail came to, anything
+  else as Gmail's default, and you can pick another.
   More of Gmail's own: `[`/`]` archive and open the previous / next conversation, `!` report spam,
   `+`/`-` important / not important, `n`/`p` next / previous message in the conversation,
-  `;`/`:` expand / collapse them all, `Shift+N` refresh, and `g` then `i` `u` `s` `t` `a` `d` to go to
+  `;`/`:` expand / collapse them all, `Ctrl+R` or `Shift+N` refresh (the list and the open conversation are read again), and `g` then `i` `u` `s` `t` `a` `d` to go to
   Inbox, Unread, Starred, Sent, All mail or Drafts (`g` `l` picks a label). `Shift+D` asks the agent
   for a reply when it is set up. Archive, trash and spam act at once and can be undone for 8 s.
 - **Reading safely** - HTML mail is shown in a sandboxed frame that cannot run scripts, and
-  remote images stay blocked (they tell a sender you opened the mail). **Load images** fetches
+  remote images stay blocked (they tell a sender you opened the mail) - **Always from …** on the
+  image bar loads them by themselves in every later mail from that address (the list, addresses
+  or whole domains, is in ⚙ → Google). A web address that is only
+  text in the mail (`URL: https://...`) is made a link you can click. The earlier mails a reply
+  carries below it are folded behind a **⋯** pill, so the end of the mail and its attachments are
+  right there (click ⋯ to open them, again to fold; forwards and answers written between the
+  quoted lines are left as they are; the Aa panel switches it off). **Load images** fetches
   them for that one message. Links open in a Cockpit web tab; `mailto:` links open compose.
 - **Links show where they really go** - hover a link for a card with its real destination.
   Wrapped links (Google and Outlook SafeLinks redirects, Facebook, Slack, URL Defense and the
@@ -363,11 +444,17 @@ operator like `from:` are searched exactly as typed. The tab comes back on resta
   stays inside the Mail tab and keeps its place and size across restarts (double-click the title
   bar to dock it bottom right again). **💾 Save draft** (`Ctrl+S`) on any message puts it in
   Gmail Drafts - a reply inside its thread - and closes the window; finish it later here or in Gmail.
+- **Drafts** - the **Drafts** chip next to Sent (or `g` `d`) lists what is waiting in Gmail Drafts. Rows there, and
+  in Sent, name whom the mail is written *to*. A click or Enter on a draft that stands alone opens it straight in
+  the editor; a reply draft opens its conversation, with **✏ Edit draft** on the draft. In the other views a
+  conversation that holds an unsent draft is tagged **Draft**.
 - **Font and weight** - **Aa** in the Mail toolbar: pick the font (each shown in its own face;
   ones not installed are marked, **Other…** takes any installed font by name), the weight (Light to
   Bold) and the size. It covers the list, the reader, plain-text mails and compose; formatted
   mails take it where they set no font of their own - or always (**Override**, code stays
-  monospace) - or never. Unread mails stay bold whatever you pick. **Background**: Dark (the
+  monospace) - or never. Unread mails stay bold whatever you pick, and carry a **blue bar on the
+  left** (on by default; "Mark unread mails with a bar" switches it off) - with a heavy weight the
+  bold alone no longer stands out. **Background**: Dark (the
   standard), Dim, Slate, Light grey, Paper, White or any colour from the picker - the rest of the
   tab (cards, buttons, lines, the text itself: dark on a light background) is made to match.
   Only the Mail tab changes; formatted mails keep their own look (that is the reading mode).

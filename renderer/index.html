@@ -26,10 +26,22 @@
             <button id="mail-btn" title="Gmail in a tab - read, triage from the keyboard, reply">📧 Mail</button>
             <button id="sftp-btn" title="Browse files (SFTP) of the active SSH tab">📁 Files</button>
             <button id="local-term-btn" title="Open a local terminal (run Claude / CDP tools)">🖥 Local terminal</button>
+            <div class="tab-menu-sub">
+              <button id="presets-btn" title="Terminal presets: a terminal that types its own commands (ssh, a pause, tmux attach ...)" aria-haspopup="true">⚡ Presets <span class="tab-sub-arrow">▸</span></button>
+              <div id="presets-menu" class="tab-submenu"></div>
+            </div>
             <button id="code-btn" title="Open VS Code (code-server) — Shift-click to choose a folder">🧑‍💻 VS Code</button>
             <button id="web-btn" title="Open a web page">🌐 Web page</button>
             <button id="notes-btn" title="Notes board">📝 Notes</button>
             <button id="expose-btn" title="3D overview of all tabs (F3)">🧊 3D view</button>
+            <div class="tab-menu-sub">
+              <button id="games-btn" title="Games" aria-haspopup="true">🎮 Games <span class="tab-sub-arrow">▸</span></button>
+              <div id="games-menu" class="tab-submenu">
+                <button id="chess-btn" title="Chess on a 3D wooden board - against the computer, or two players">♟ Chess</button>
+                <button id="mahjong-btn" title="Mahjong solitaire - 144 tiles in 3D, the classic turtle">🀄 Mahjong</button>
+                <button id="sudoku-btn" title="Sudoku - four levels, pencil marks, hints">🔢 Sudoku</button>
+              </div>
+            </div>
             <div class="tab-menu-sep"></div>
             <button id="toggle-slack-feed" title="Show/hide the Slack updates board">💬 Slack board</button>
             <button id="toggle-whatsapp-feed" title="Show/hide the WhatsApp board">🟢 WhatsApp board</button>
@@ -580,6 +592,14 @@
       <div id="settings-dialog">
         <h2>Settings</h2>
         <div class="settings-section">
+          <h3>Look</h3>
+          <label class="settings-check">
+            Colours
+            <select id="set-app-look"></select>
+          </label>
+          <div class="settings-look-note">One colour on black for the whole app, like an old terminal screen - or the standard dark grey. It also picks the terminal theme that goes with it (a terminal's own menu can still choose another). Mail follows: the Mail tab, and formatted mails are read in that colour too (the reading button in a mail, or t, shows one as it was sent). Web pages keep their own colours.</div>
+        </div>
+        <div class="settings-section" style="margin-top: 14px">
           <h3>Slack</h3>
           <div id="settings-slack-status" class="settings-status">Not connected</div>
           <label for="set-slack-bot">Bot / user token (xoxb-… or xoxp-…)</label>
@@ -655,6 +675,12 @@
             <input type="checkbox" id="set-mail-clean-links" />
             Open links without their trackers (unwrap redirects, drop utm_ and similar)
           </label>
+          <div class="settings-mailsig">
+            <div class="settings-mailsig-cap">Remote images - load them without asking in mail from these senders</div>
+            <label>Senders
+              <textarea id="set-mail-img-senders" rows="3" spellcheck="false" placeholder="one per line: an address (news@example.com) or a whole domain (example.org)"></textarea>
+            </label>
+          </div>
           <div class="settings-mailsig">
             <div class="settings-mailsig-cap">Signatures - the short one when every recipient is a colleague</div>
             <label>Colleague domains
@@ -902,6 +928,35 @@
             <span id="quick-cmds-msg"></span>
           </div>
         </div>
+        <div class="settings-section" style="margin-top: 14px">
+          <h3>⚡ Terminal presets</h3>
+          <div class="settings-status">
+            A preset is one terminal tab that types its own commands. Start one from ＋ New → Presets.
+            Write a name in brackets, then one step per line:
+            a command &middot; <code>sleep 3</code> (a pause, in seconds) &middot;
+            <code>wait: text</code> (go on when that text shows up, e.g. a prompt; <code>wait 60: text</code> for longer than 30 s) &middot;
+            <code>title: Name</code> (the tab title) &middot; <code>start: local</code> or <code>start: a saved connection</code> &middot;
+            <code>cwd: folder</code> (local only) &middot; <code>run: sleep 3</code> types the line as it is &middot; <code>#</code> a note.
+            To run a preset in a terminal that is already open, hover its tab: ⚡ Presets, among the buttons at the top, opens the list.
+          </div>
+          <div class="ssh-hop-row">
+            <textarea id="set-term-presets" rows="10" spellcheck="false"
+              placeholder="[Prod tmux]&#10;start: local&#10;title: Prod&#10;ssh admin@db1&#10;sleep 3&#10;tmux attach -t main&#10;&#10;[Logs]&#10;start: my saved connection&#10;wait: $&#10;cd /var/log&#10;tail -f syslog"></textarea>
+          </div>
+          <div class="settings-row">
+            <button id="term-presets-save" type="button" class="primary">Save presets</button>
+            <span id="term-presets-msg"></span>
+          </div>
+          <label class="settings-check" style="margin-top: 8px">
+            <input type="checkbox" id="set-preset-auto" />
+            When Cockpit starts, run a preset by itself in every terminal that belongs to it
+          </label>
+          <div class="settings-status">
+            A terminal belongs to a preset when it was started with it, or when its tab title is the preset's name or
+            one of its <code>title:</code> lines - a tab called <code>pen</code> and a preset with <code>title: pen</code> are a match.
+            Switched off, such tabs come back with a Run button and nothing is typed without a click.
+          </div>
+        </div>
 
         <div class="settings-section" style="margin-top: 14px">
           <h3>SSH auto-hop commands</h3>
@@ -1022,6 +1077,14 @@
     <script src="vendor/CSS3DRenderer.js"></script>
     <script src="../node_modules/chart.js/dist/chart.umd.js"></script>
     <script src="emoji-map.js"></script>
+    <script src="presets.js"></script>
+    <script src="games.js"></script>
+    <script src="chess-engine.js"></script>
+    <script src="chess.js"></script>
+    <script src="mahjong-engine.js"></script>
+    <script src="mahjong.js"></script>
+    <script src="sudoku-engine.js"></script>
+    <script src="sudoku.js"></script>
     <script src="renderer.js"></script>
 </body>
 </html>

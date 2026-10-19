@@ -51,6 +51,22 @@ const THEMES = {
     selectionBackground: '#4a3300',
     ...ANSI,
   },
+  'Ice on Black': {
+    background: '#000000',
+    foreground: '#7fd4ff',
+    cursor: '#7fd4ff',
+    cursorAccent: '#000000',
+    selectionBackground: '#0f3a52',
+    ...ANSI,
+  },
+  'White on Black': {
+    background: '#000000',
+    foreground: '#e8e8e8',
+    cursor: '#e8e8e8',
+    cursorAccent: '#000000',
+    selectionBackground: '#3c3c3c',
+    ...ANSI,
+  },
   'Solarized Dark': {
     background: '#002b36',
     foreground: '#839496',
@@ -102,6 +118,70 @@ const THEMES = {
 const DEFAULT_THEME = 'Tomorrow Night';
 let currentTheme = DEFAULT_THEME;
 
+// ---- the app's look: the standard dark grey, or ONE colour on black ----
+// A look is a text colour on a background; everything else is mixed from the two (panels a
+// step toward the colour, borders further, dim text in between, headings toward white) and set
+// as the app's own CSS variables on <html>, so every rule that uses them follows. The few
+// hard-coded light text colours in the stylesheet read --fg-strong / --fg-soft, which only a
+// look sets. Terminals have their own themes: picking a look also picks the theme that goes
+// with it (still changeable per the terminal menu). Web pages and formatted mails keep their
+// own colours; the Mail tab follows unless it was given a background of its own.
+const APP_LOOKS = {
+  standard: { label: 'Standard (dark grey)', term: 'Tomorrow Night' },
+  green: { label: 'Green on black', fg: '#33ff66', term: 'Green on Black' },
+  amber: { label: 'Amber on black', fg: '#ffb000', term: 'Amber on Black' },
+  ice: { label: 'Ice blue on black', fg: '#7fd4ff', term: 'Ice on Black' },
+  mono: { label: 'White on black', fg: '#e8e8e8', term: 'White on Black' },
+};
+const APP_LOOK_VARS = ['--bg', '--bg-alt', '--bg-tab', '--bg-tab-active', '--border', '--fg', '--fg-dim', '--accent', '--fg-strong', '--fg-soft', '--on-accent', '--scroll'];
+let appLook = 'standard';
+function appLookVars(name) {
+  const L = APP_LOOKS[name];
+  if (!L || !L.fg) return null;
+  const bgHex = L.bg || '#000000';
+  const bg = mailHexRgb(bgHex);
+  const fg = mailHexRgb(L.fg);
+  const mix = (f) => mailRgbHex(mailMix(bg, fg, f));
+  const strong = mailRgbHex(mailMix(fg, [255, 255, 255], 0.45));
+  const base = { '--bg': bgHex, '--bg-alt': mix(0.06), '--bg-tab': mix(0.12), '--border': mix(0.32), '--fg': L.fg, '--fg-dim': mix(0.62) };
+  return {
+    root: { ...base, '--bg-tab-active': bgHex, '--accent': L.accent || strong, '--fg-strong': strong, '--fg-soft': L.fg, '--on-accent': bgHex, '--scroll': mix(0.4) },
+    mail: { ...base, '--m-strong': strong, '--m-row-line': mix(0.14), '--m-row-hover': mix(0.07), '--m-row-sel': mix(0.13), '--m-row-open': mix(0.18) },
+  };
+}
+// pick: the user chose it just now - the terminal theme goes along and the choice is saved.
+function applyAppLook(name, pick) {
+  if (!APP_LOOKS[name]) name = 'standard';
+  appLook = name;
+  const root = document.documentElement;
+  const v = appLookVars(name);
+  for (const k of APP_LOOK_VARS) root.style.removeProperty(k);
+  if (v) {
+    for (const [k, val] of Object.entries(v.root)) root.style.setProperty(k, val);
+    root.dataset.look = name;
+  } else delete root.dataset.look;
+  if (pick) mailBgOverLook = false; // a look just picked paints the Mail tab too
+  mailApplyBg();
+  // formatted mails that are open now: the one-colour reading mode changes colour with the look
+  {
+    const rec = mailRec();
+    if (rec) {
+      rec.paneEl.querySelectorAll('iframe.mm-frame').forEach((f) => mailApplyReadMode(f.contentDocument, mailReadMode));
+      mailPaintDarkBtn(rec.paneEl.querySelector('.mr-darkbtn'));
+    }
+  }
+  if (els.setAppLook) els.setAppLook.value = name;
+  if (pick) {
+    api.saveSettings({ appLook: name, mailBgOverLook });
+    // formatted mails read in the look's colour too (the reading button, or t, changes that);
+    // back on Standard they are shown as sent again
+    if (name !== 'standard' && mailReadMode !== 'green') mailSetReadMode('green');
+    else if (name === 'standard' && mailReadMode === 'green') mailSetReadMode('off');
+    const t = APP_LOOKS[name].term;
+    if (t && THEMES[t]) applyTheme(t);
+  }
+}
+
 let webBookmarks = []; // [{ name, url }] shared across all web tabs
 let sshHops = {}; // serverKey -> [ssh commands] (auto-hops, per server)
 let remoteDebugPort = 0; // CDP port (0 = off); applied at startup in main
@@ -150,6 +230,10 @@ const els = {
   setQuickCmds: document.getElementById('set-quick-cmds'),
   quickCmdsSave: document.getElementById('quick-cmds-save'),
   quickCmdsMsg: document.getElementById('quick-cmds-msg'),
+  setTermPresets: document.getElementById('set-term-presets'),
+  termPresetsSave: document.getElementById('term-presets-save'),
+  termPresetsMsg: document.getElementById('term-presets-msg'),
+  setPresetAuto: document.getElementById('set-preset-auto'),
   searchBar: document.getElementById('search-bar'),
   searchInput: document.getElementById('search-input'),
   searchInfo: document.getElementById('search-info'),
@@ -227,7 +311,9 @@ const els = {
   setClipOn: document.getElementById('set-clip-on'),
   setClipSecrets: document.getElementById('set-clip-secrets'),
   setMailLearn: document.getElementById('set-mail-learn'),
+  setAppLook: document.getElementById('set-app-look'),
   setMailCleanLinks: document.getElementById('set-mail-clean-links'),
+  setMailImgSenders: document.getElementById('set-mail-img-senders'),
   setMailSigInt: document.getElementById('set-mail-sig-int'),
   setMailSigExt: document.getElementById('set-mail-sig-ext'),
   setMailIntDomains: document.getElementById('set-mail-int-domains'),
@@ -313,7 +399,7 @@ function createTabChrome(id, title, kind) {
   tabEl.innerHTML =
     '<span class="kind-glyph"></span><span class="title"></span><span class="unread"></span><span class="close" title="Close">✕</span>';
   tabEl.querySelector('.kind-glyph').textContent =
-    kind === 'slack' ? '#' : kind === 'web' ? '🌐' : kind === 'notes' ? '📝' : kind === 'deck' ? '🏠' : kind === 'mail' ? '📧' : '>_';
+    kind === 'slack' ? '#' : kind === 'web' ? '🌐' : kind === 'notes' ? '📝' : kind === 'deck' ? '🏠' : kind === 'mail' ? '📧' : gameTabs[kind] ? gameTabs[kind].glyph : '>_';
   const titleEl = tabEl.querySelector('.title');
   titleEl.textContent = title;
   titleEl.title = 'Double-click to rename';
@@ -682,6 +768,9 @@ function showTabHelp(tabEl) {
     }
   }
 
+  // ⚡ Presets ▸ among the actions at the top; its list opens to the right (presets.js).
+  presetHelpRender(els.tabHelpPaste, rec);
+
   p.classList.remove('hidden');
   const r = tabEl.getBoundingClientRect();
   p.style.left = Math.max(8, Math.min(r.left, window.innerWidth - p.offsetWidth - 8)) + 'px';
@@ -693,7 +782,11 @@ function hideTabHelp() {
 
 // Keep the cheat-sheet open while hovering it (so you can click a quick command).
 els.tabHelp.addEventListener('mouseenter', () => clearTimeout(tabHelpTimer));
-els.tabHelp.addEventListener('mouseleave', () => els.tabHelp.classList.add('hidden'));
+els.tabHelp.addEventListener('mouseleave', (e) => {
+  // onto the presets list that hangs beside the sheet: that still counts as being on it
+  if (e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest('#tab-help-fly')) return;
+  els.tabHelp.classList.add('hidden');
+});
 
 // --- Web tab hover: CDP helper snippet (selectable, to paste to Claude) ---
 let webHelpTimer = null;
@@ -3164,7 +3257,11 @@ api.onPtyData(({ tabId, data }) => {
   const rec = tabs.get(tabId);
   if (rec && rec.term) {
     rec._lastDataAt = Date.now();
-    captureStream(rec, typeof data === 'string' ? data : streamDecode(rec, binaryToUint8(data)));
+    {
+      const text = typeof data === 'string' ? data : streamDecode(rec, binaryToUint8(data));
+      captureStream(rec, text);
+      if (rec._presetRun) presetFeed(rec, text); // a preset waiting for some text
+    }
     const quiet = rec._send || rec._probe || rec._size || rec._ask;
     if (quiet) {
       const vis = quiet.feed(typeof data === 'string' ? data : u8ToLatin1(binaryToUint8(data)));
@@ -3528,6 +3625,8 @@ function activateTab(id) {
       renderDeck(rec); // refresh the dashboard the moment it's shown
     } else if (rec.kind === 'mail') {
       mailOnShow();
+    } else if (gameTabs[rec.kind]) {
+      gameTabs[rec.kind].onShow(); // a canvas could not be measured while the tab was hidden
     }
   });
   persistActiveTab();
@@ -3604,6 +3703,7 @@ function closeTab(id) {
   const wasLocal = rec.kind === 'local';
   const wasDeck = rec.kind === 'deck';
   const wasMail = rec.kind === 'mail';
+  const wasGame = gameTabs[rec.kind]; // games.js
   rec.tabEl.remove();
   rec.paneEl.remove();
   tabs.delete(id);
@@ -3623,6 +3723,10 @@ function closeTab(id) {
   if (wasWeb) persistOpenWebTabs();
   if (wasLocal) persistTabOrder();
   if (wasDeck) persistTabOrder();
+  if (wasGame) {
+    wasGame.onClose(); // stop workers and timers, free a WebGL context
+    persistTabOrder();
+  }
   if (wasMail) {
     mailHidePop();
     mailReset();
@@ -3776,6 +3880,7 @@ function quietCommand(rec, body) {
 // The signal AND the words. Returns false when it could only send the signal.
 function resyncTermSize(rec) {
   if (!rec || (rec.kind !== 'ssh' && rec.kind !== 'local') || !rec.term) return false;
+  if (rec._presetRun) return false; // never type into the middle of a running preset
   const cols = rec.term.cols;
   const rows = rec.term.rows;
   if (!cols || !rows) return false;
@@ -3847,6 +3952,7 @@ function probeWhere(rec) {
   if (!rec || (rec.kind !== 'ssh' && rec.kind !== 'local')) return false;
   if (rec.status !== 'connected' || !rec.term) return false;
   if (inBandBusy(rec)) return false; // one in-band conversation at a time
+  if (rec._presetRun) return false; // a preset is typing: its ssh may be asking for a password right now
   try {
     // Never type into a full-screen program. On the alternate screen the keystrokes
     // would land in vim, tmux's copy-mode or Claude, not in a shell.
@@ -5345,7 +5451,11 @@ api.onData(({ tabId, data }) => {
   if (rec && rec.term) {
     rec._lastDataAt = Date.now(); // "is the shell quiet yet?" (tmux card)
     const u8 = binaryToUint8(data);
-    captureStream(rec, streamDecode(rec, u8)); // ssh: latin1 bytes -> UTF-8 text (history + recorder)
+    {
+      const text = streamDecode(rec, u8); // ssh: latin1 bytes -> UTF-8 text (history + recorder)
+      captureStream(rec, text);
+      if (rec._presetRun) presetFeed(rec, text); // a preset waiting for some text
+    }
     // The quiet conversations - a send, a where-am-I, a size resync - all swallow
     // their own echo and output; only the grab writes a note in place of it.
     const quiet = rec._send || rec._probe || rec._size || rec._ask;
@@ -5618,6 +5728,7 @@ let reconnectTabId = null;
 
 function openDialog() {
   reconnectTabId = null;
+  presetPending = null; // a preset says so AFTER opening it
   els.connectBtn.textContent = 'Connect';
   els.dialogError.textContent = '';
   els.overlay.classList.remove('hidden');
@@ -5640,6 +5751,7 @@ function openReconnectDialog(id) {
 
 function closeDialog() {
   els.overlay.classList.add('hidden');
+  presetPending = null; // closed without Connect: the preset is off
   reconnectTabId = null;
   els.connectBtn.textContent = 'Connect';
 }
@@ -5774,8 +5886,10 @@ function doConnect() {
       keyPath: form.keyPath,
     },
   });
+  const waiting = presetPending; // closing the dialog forgets it
   closeDialog();
-  createTab(form);
+  const newId = createTab(form);
+  if (waiting) presetAfterConnect(newId, waiting);
 }
 
 els.connectBtn.addEventListener('click', doConnect);
@@ -6754,6 +6868,7 @@ function tabKey(rec) {
   if (rec.kind === 'notes') return 'notes';
   if (rec.kind === 'deck') return 'deck';
   if (rec.kind === 'mail') return 'mail';
+  if (gameTabs[rec.kind]) return rec.kind; // one tab per game
   return rec.kind + ':' + rec.id;
 }
 
@@ -6801,9 +6916,12 @@ function persistTabOrder() {
       entry = { kind: 'deck' };
     } else if (rec.kind === 'mail') {
       entry = { kind: 'mail' };
+    } else if (gameTabs[rec.kind]) {
+      entry = { kind: rec.kind };
     }
     if (!entry) continue;
     if (rec.customTitle) entry.title = rec.customTitle; // remember a manual rename
+    if (rec.preset && (rec.kind === 'local' || rec.kind === 'ssh')) entry.preset = rec.preset.name;
     order.push(entry);
   }
   api.saveSettings({ tabOrder: order });
@@ -7340,6 +7458,7 @@ async function openSettings() {
   els.setClipSecrets.checked = clipClearSecrets;
   els.setMailLearn.checked = mailLearnSnippets;
   els.setMailCleanLinks.checked = mailCleanLinks;
+  els.setMailImgSenders.value = mailImgSenders.join('\n');
   els.setMailSigInt.value = mailSigInternal;
   els.setMailSigExt.value = mailSigExternal;
   els.setMailIntDomains.value = mailInternalDomains;
@@ -7379,6 +7498,9 @@ async function openSettings() {
     }
   });
   els.setQuickCmds.value = quickCommands.join('\n');
+  els.setTermPresets.value = termPresetsText;
+  els.termPresetsMsg.textContent = '';
+  els.setPresetAuto.checked = presetAutoRun;
   els.setDebugPort.value = remoteDebugPort || '';
   els.debugPortMsg.textContent = '';
   els.webExtMsg.textContent = '';
@@ -7446,6 +7568,19 @@ els.quickCmdsSave.addEventListener('click', () => {
   els.quickCmdsMsg.textContent = 'Saved.';
 });
 
+els.setPresetAuto.addEventListener('change', () => {
+  presetAutoRun = els.setPresetAuto.checked;
+  api.saveSettings({ presetAutoRun });
+});
+els.termPresetsSave.addEventListener('click', () => {
+  const r = presetSetText(els.setTermPresets.value, true);
+  const n = r.presets.length;
+  els.termPresetsMsg.textContent = r.errors.length
+    ? 'Saved, but check: ' + r.errors.join(' · ')
+    : 'Saved - ' + n + ' preset' + (n === 1 ? '' : 's') + (n ? ': ' + r.presets.map((p) => p.name).join(', ') : '') + '.';
+  els.termPresetsMsg.classList.toggle('err', r.errors.length > 0);
+});
+
 els.setClaudeWatch.addEventListener('change', () => {
   claudeWatch = els.setClaudeWatch.checked;
   api.saveSettings({ claudeWatch });
@@ -7454,6 +7589,11 @@ els.setClaudeWatch.addEventListener('change', () => {
 els.setMailCleanLinks.addEventListener('change', () => {
   mailCleanLinks = els.setMailCleanLinks.checked;
   api.saveSettings({ mailCleanLinks });
+});
+els.setMailImgSenders.addEventListener('change', () => {
+  mailImgSenders = mailCleanImgSenders(els.setMailImgSenders.value);
+  els.setMailImgSenders.value = mailImgSenders.join('\n'); // what was understood
+  api.saveSettings({ mailImgSenders });
 });
 {
   // saved as you type (after a short pause) and when the field is left
@@ -11365,9 +11505,11 @@ function shortFrom(from) {
 // ---------------------------------------------------------------------------
 const MAIL_VIEWS = [
   { key: 'INBOX', label: 'Inbox', labelIds: ['INBOX'] },
-  { key: 'UNREAD', label: 'Unread', labelIds: ['INBOX'], q: 'is:unread' },
+  // by label, not q: 'is:unread' - a search is not listed newest first (see mailViewQuery)
+  { key: 'UNREAD', label: 'Unread', labelIds: ['INBOX', 'UNREAD'] },
   { key: 'STARRED', label: 'Starred', labelIds: ['STARRED'] },
   { key: 'SENT', label: 'Sent', labelIds: ['SENT'] },
+  { key: 'DRAFT', label: 'Drafts', labelIds: ['DRAFT'] },
   { key: 'ALL', label: 'All mail', labelIds: [] },
 ];
 // Gmail's inbox categories, as its search spells them. Primary is CATEGORY_PERSONAL underneath.
@@ -11422,18 +11564,22 @@ const MAIL_KEYS = {
   '-': 'unimportant',
   N: 'refresh',
   D: 'agent',
+  x: 'mark',
+  X: 'mark-range',
 };
-// g, then a letter: go to a view (Gmail's two-key jumps). 'd' is Drafts, which is a search.
-const MAIL_GO = { i: 'INBOX', u: 'UNREAD', s: 'STARRED', t: 'SENT', a: 'ALL', d: 'drafts', l: 'labels' };
+// g, then a letter: go to a view (Gmail's two-key jumps).
+const MAIL_GO = { i: 'INBOX', u: 'UNREAD', s: 'STARRED', t: 'SENT', a: 'ALL', d: 'DRAFT', l: 'labels' };
 const MAIL_GO_MS = 1500;
 const MAIL_KEY_HELP = [
   ['j / k', 'next / previous conversation'],
   ['↑ / ↓', 'move in the list - in an open mail (after →): scroll it'],
   ['→ / ←', 'into the mail / back to the list'],
   ['PgUp / PgDn', 'a page (in the list: 10 rows)'],
+  ['Space / Shift+Space', 'the open mail: one page on / back'],
   ['Enter / o', 'open'],
   ['Esc', 'back to the list'],
   ['e', 'archive'],
+  ['x / Shift+X', 'mark the row / everything from the last mark to here - then e, #, l, Shift+I, Shift+U, s work on all marked (Esc unmarks)'],
   ['d / Delete / #', 'move to Trash'],
   ['s', 'star'],
   ['Shift+I', 'mark read'],
@@ -11446,7 +11592,7 @@ const MAIL_KEY_HELP = [
   ['; / :', 'expand / collapse every message'],
   ['g then i u s t a d', 'go to Inbox, Unread, Starred, Sent, All mail, Drafts'],
   ['g then l', 'pick a label'],
-  ['Shift+N', 'refresh'],
+  ['Ctrl+R / Shift+N', 'refresh: read the list and the open conversation again'],
   ['Shift+D', '🤖 agent reply (the fast AI reply when no agent is set up)'],
   ['Ctrl+J', 'write it with AI (while writing; your words are the brief)'],
   ['r / a / f', 'reply / reply all / forward'],
@@ -11458,7 +11604,7 @@ const MAIL_KEY_HELP = [
   ['z', 'undo'],
   ['t', 'reading: as sent / white on black / green on black'],
   ['Ctrl + wheel / Ctrl + - 0', 'text size (Ctrl+0 resets)'],
-  ['Ctrl+Enter', 'send (while writing)'],
+  ['Ctrl+Enter', 'send at once, without the undo wait (while writing)'],
   ['?', 'this list'],
 ];
 let mailQuietFocus = true; // hold new-mail signals during a focus session or a work phase
@@ -11510,7 +11656,7 @@ function createMailTab(opts) {
     '<div class="mail-views"></div>' +
     '<select class="mail-labels" title="Show a label"></select>' +
     '<span class="mail-spacer"></span>' +
-    '<button class="mail-btn" data-act="refresh" title="Refresh">⟳</button>' +
+    '<button class="mail-btn" data-act="refresh" title="Refresh: read the mail again (Ctrl+R)">⟳</button>' +
     '<button class="mail-btn" data-act="snippets" title="Snippets and quick replies">✂</button>' +
     '<button class="mail-btn mail-fontbtn" data-act="font" title="Mail text: font, weight and size">Aa</button>' +
     '<button class="mail-btn mail-primary" data-act="compose" title="Compose (c)">✏ Compose</button>' +
@@ -11560,6 +11706,7 @@ function createMailTab(opts) {
   mailLoad();
   mailLoadLabels();
   mailCheckSend();
+  mailLoadSendAs();
   mailLoadContacts(); // warms the address book (a first build reads recent headers once)
   // Paint what is already known: quiet holds the NUMBER still, it must not hide it from
   // a tab opened in the middle of a work phase.
@@ -11581,14 +11728,8 @@ function mailWire(rec) {
   p.style.setProperty('--mail-zoom', String(mailZoom));
   if (mailFont) p.style.setProperty('--mail-font', mailFontStack(mailFont));
   p.style.setProperty('--mail-weight', String(mailFontWeight));
-  {
-    const pal = mailBgPalette(mailBg);
-    if (pal) {
-      p.classList.add('mail-bg');
-      p.classList.toggle('mail-light', pal.light);
-      for (const [k, v] of Object.entries(pal.vars)) p.style.setProperty(k, v);
-    }
-  }
+  p.classList.toggle('unread-bar', mailUnreadBar);
+  mailApplyBg(p); // its own background, or the app's look
   mailWireDrop(p);
   p.addEventListener('wheel', mailZoomWheel, { passive: false, capture: true });
   p.addEventListener(
@@ -11631,10 +11772,25 @@ function mailWire(rec) {
     mailToggleCategory(b.dataset.cat, e.ctrlKey || e.metaKey || e.shiftKey);
     mailFocus();
   });
+  p.querySelector('.mail-cats').addEventListener('contextmenu', (e) => {
+    const b = e.target.closest('[data-cat]');
+    if (!b) return;
+    e.preventDefault();
+    mailCatHint(b, b.dataset.cat);
+  });
   p.querySelector('.mail-list').addEventListener('scroll', mailAutoMore, { passive: true });
   p.querySelector('.mail-list').addEventListener('click', (e) => {
     if (e.target.closest('[data-act="settings"]')) return openSettings();
     if (e.target.closest('.mail-more')) return mailLoad(true);
+    const mk = e.target.closest('[data-mk]');
+    if (mk) {
+      if (mk.dataset.mk === 'none') mailClearMarks();
+      else if (mk.dataset.mk === 'all') {
+        mbox.threads.forEach((t) => mailMarks().add(t.id));
+        mailRenderList();
+      } else mailDo(mk.dataset.mk);
+      return mailFocus();
+    }
     const row = e.target.closest('.mail-row');
     if (!row) return;
     const t = mbox.threads[+row.dataset.i];
@@ -11644,14 +11800,15 @@ function mailWire(rec) {
     if (act) {
       e.stopPropagation();
       if (act.dataset.act === 'star') mailToggleStar(t.id);
+      else if (act.dataset.act === 'mark') mailToggleMark(t.id, e.shiftKey);
       else mailRemove(t.id, act.dataset.act);
       return;
     }
-    mailOpenThread(t.id);
+    mailOpenRow(t.id);
   });
   p.querySelector('.mail-reader').addEventListener('click', (e) => {
     const b = e.target.closest('.mr-bar [data-act]');
-    if (b) return mailDo(b.dataset.act);
+    if (b) return mailDo(b.dataset.act, true);
     const qr = e.target.closest('.mr-quick [data-qr]');
     if (qr) return mailQuickReply(+qr.dataset.qr, e.ctrlKey || e.metaKey);
     if (e.target.closest('.mr-quick [data-snips]')) return mailSnippetManager();
@@ -11738,6 +11895,7 @@ function mailWireSplit(rec) {
 }
 // The arrow keys work on one side at a time: the list (↑/↓ move, → opens) or the open mail
 // (↑/↓ and PgUp/PgDn scroll it, ← goes back to the list). A click on either side picks it.
+// Space / Shift+Space page the open mail from both sides.
 function mailSetReadFocus(on, quiet) {
   mbox.readFocus = !!on && !!mbox.openId;
   const rec = mailRec();
@@ -11749,8 +11907,19 @@ function mailReaderScroll(dy) {
   if (r) r.scrollBy({ top: dy });
 }
 function mailArrowKey(e) {
-  if (e.shiftKey) return false;
   const k = e.key;
+  // Space = one page on in the open mail, Shift+Space = one page back - from EITHER side:
+  // the space bar means nothing in the list, and it is the reading key everywhere else.
+  if (k === ' ') {
+    const r = mbox.openId && mailEl('.mail-reader');
+    if (!r) return false;
+    const pg = Math.max(120, (r.clientHeight || 600) - 80);
+    mailReaderScroll(e.shiftKey ? -pg : pg);
+    e.preventDefault();
+    e.stopPropagation();
+    return true;
+  }
+  if (e.shiftKey) return false;
   if (!/^(Arrow(Up|Down|Left|Right)|Page(Up|Down))$/.test(k)) return false;
   const t = e.target;
   const inFrame = !!(t && t.ownerDocument && t.ownerDocument !== document);
@@ -11801,13 +11970,25 @@ function mailCategoryQuery(cats) {
   const terms = on.map((k) => 'category:' + k);
   return terms.length === 1 ? terms[0] : '{' + terms.join(' ') + '}';
 }
+// The same choice as Gmail LABELS (CATEGORY_PERSONAL is Primary); [] = no filter.
+function mailCategoryLabels(cats) {
+  const on = MAIL_CATEGORIES.map((c) => c.key).filter((k) => (cats || []).includes(k));
+  if (!on.length || on.length === MAIL_CATEGORIES.length) return [];
+  return on.map((k) => MAIL_CAT_LABEL[k]);
+}
+// What the thread list asks Gmail for. The categories go as LABELS (`anyOf`: one of them, on
+// top of the view's own labels), never as a search: Gmail hands a search back ordered by when
+// each conversation STARTED, so one that began yesterday and got a reply a minute ago was not
+// on the first page of 'category:primary' - missing from Primary, there under All. A listing
+// by labels comes newest message first, like All itself. (The badge and the board only count
+// or list single messages, so they keep the search form, mailCategoryQuery.)
 function mailViewQuery() {
   if (mbox.view === 'SEARCH') return { q: mbox.qx || mbox.q, labelIds: [] };
   const v = MAIL_VIEWS.find((x) => x.key === mbox.view);
   if (v) {
     // Categories only mean something inside the inbox; Starred, Sent and the rest are whole.
-    const cat = v.labelIds.includes('INBOX') ? mailCategoryQuery(mailCategories) : '';
-    return { q: [v.q, cat].filter(Boolean).join(' '), labelIds: v.labelIds };
+    const anyOf = v.labelIds.includes('INBOX') ? mailCategoryLabels(mailCategories) : [];
+    return { q: v.q || '', labelIds: v.labelIds, anyOf };
   }
   return { q: '', labelIds: [mbox.view] }; // a user label
 }
@@ -11837,11 +12018,121 @@ function mailRenderCats() {
   const all = !mailCategories.length;
   box.innerHTML =
     '<span class="mail-cats-cap" title="Which inbox categories to show - also what the badge and the Inbox board count. Ctrl+click to combine several.">Categories</span>' +
-    `<button class="mail-chip mail-cat${all ? ' sel' : ''}" data-cat="all">All</button>` +
+    `<button class="mail-chip mail-cat${all ? ' sel' : ''}" data-cat="all" title="Every mail in the inbox, whatever its category · right-click: which category is a mail in?">All</button>` +
     MAIL_CATEGORIES.map(
       (c) =>
-        `<button class="mail-chip mail-cat${mailCategories.includes(c.key) ? ' sel' : ''}" data-cat="${c.key}" title="Show ${c.label} · Ctrl+click to add it to or remove it from the others">${c.label}</button>`
+        `<button class="mail-chip mail-cat${mailCategories.includes(c.key) ? ' sel' : ''}" data-cat="${c.key}" title="Show ${c.label} · Ctrl+click to add it to or remove it from the others · right-click: why is a mail here, or not?">${c.label}</button>`
     ).join('');
+}
+// ---- "why is this mail (not) in Primary?" - right-click a category ----
+// Cockpit never sorts mail: Gmail stamps a category label on each message when it arrives and
+// the filter is Gmail's own search for it. So the answer is always in the labels the thread
+// already carries, and the hint needs no request.
+const MAIL_CAT_LABEL = { primary: 'CATEGORY_PERSONAL', updates: 'CATEGORY_UPDATES', promotions: 'CATEGORY_PROMOTIONS', social: 'CATEGORY_SOCIAL', forums: 'CATEGORY_FORUMS' };
+const MAIL_CAT_ABOUT = {
+  primary: 'Mail from people, and what Gmail does not sort into one of the other categories.',
+  updates: 'Automatic mail: confirmations, receipts, bills, statements, notifications from services.',
+  promotions: 'Offers, newsletters and other marketing mail.',
+  social: 'Mail from social networks and media-sharing sites.',
+  forums: 'Mailing lists and discussion groups.',
+};
+// The categories a set of labels carries, as MAIL_CATEGORIES keys in their usual order.
+function mailCatsOf(labelIds) {
+  return MAIL_CATEGORIES.map((c) => c.key).filter((k) => (labelIds || []).includes(MAIL_CAT_LABEL[k]));
+}
+const mailCatName = (k) => (MAIL_CATEGORIES.find((c) => c.key === k) || { label: k }).label;
+// The mail the question is about: the one open in the reader, else the selected row.
+// { id, subject, from, labelIds, perMessage: [[keys]...] | null }
+function mailCatSubject() {
+  const open = mbox.openId && mbox.thread && mbox.thread.id === mbox.openId ? mbox.thread : null;
+  const row = (mbox.openId && mbox.threads.find((t) => t.id === mbox.openId)) || (open ? null : mbox.threads[mbox.sel]) || null;
+  if (!open && !row) return null;
+  const msgs = open ? (open.messages || []).filter((m) => !(m.labelIds || []).some((l) => l === 'DRAFT' || l === 'TRASH')) : null;
+  const labelIds = msgs && msgs.length ? [...new Set(msgs.flatMap((m) => m.labelIds || []))] : (row && row.labelIds) || [];
+  const first = msgs && msgs[0];
+  return {
+    id: open ? open.id : row.id,
+    subject: (row && row.subject) || (first && first.subject) || '(no subject)',
+    from: (row && row.from) || (first && first.from) || '',
+    labelIds,
+    inInbox: labelIds.includes('INBOX'),
+    perMessage: msgs && msgs.length > 1 ? msgs.map((m) => mailCatsOf(m.labelIds)) : null,
+  };
+}
+// What to say about that mail under category `key` ('all' = just name its category).
+// { kind: 'here' | 'elsewhere' | 'none' | 'notinbox', cats, text, mixed }
+function mailCatVerdict(s, key) {
+  const cats = mailCatsOf(s.labelIds);
+  const names = cats.map(mailCatName);
+  const list = names.length > 1 ? names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1] : names[0];
+  const mixed = !!(s.perMessage && new Set(s.perMessage.map((c) => c.join('+'))).size > 1);
+  if (!s.inInbox) return { kind: 'notinbox', cats, mixed, text: 'It is not in the inbox (archived, or only sent), so no inbox category shows it.' };
+  if (!cats.length) {
+    return {
+      kind: 'none',
+      cats,
+      mixed,
+      text: 'Gmail has not put it in any category. A mail without a category is found by none of the category filters - it shows under All only.',
+    };
+  }
+  if (key === 'all') return { kind: 'here', cats, mixed, text: 'Gmail filed it under ' + list + '.' };
+  if (cats.includes(key)) return { kind: 'here', cats, mixed, text: 'Gmail filed it under ' + list + ' - it belongs here.' };
+  return { kind: 'elsewhere', cats, mixed, text: 'Gmail filed it under ' + list + ', not ' + mailCatName(key) + ' - that is why it is not shown here.' };
+}
+function mailCatHint(anchor, key) {
+  const pop = mailEl('.mail-pop');
+  if (!pop) return;
+  const isAll = key === 'all';
+  const name = isAll ? 'All' : mailCatName(key);
+  const s = mailCatSubject();
+  let h = `<div class="mp-cap">${escapeHtml(name)} - why is a mail here, or not?</div><div class="mch">`;
+  if (isAll) h += '<p>Every mail in the inbox, whatever category Gmail gave it.</p>';
+  else h += `<p><b>What Gmail puts in ${escapeHtml(name)}:</b> ${escapeHtml(MAIL_CAT_ABOUT[key])}</p>`;
+  // the mail in question
+  if (s) {
+    const v = mailCatVerdict(s, key);
+    const who = (s.from || '').replace(/\s*<[^>]*>\s*$/, '').replace(/^"|"$/g, '');
+    h += `<div class="mch-mail ${v.kind}"><div class="mch-subj">${escapeHtml(s.subject)}${who ? ' <span>· ' + escapeHtml(who) + '</span>' : ''}</div><div class="mch-text">${escapeHtml(v.text)}</div>`;
+    if (v.mixed) h += '<div class="mch-text">Its messages are in different categories. One message in a category is enough for the whole conversation to show there.</div>';
+    // what would make it show, with the filter as it is now
+    const showing = !mailCategories.length || v.cats.some((c) => mailCategories.includes(c));
+    if (!showing && v.kind !== 'notinbox' && mailViewHasInbox()) {
+      h += '<div class="mch-acts">' + (v.cats.length ? v.cats.map((c) => `<button class="mail-btn" data-add="${c}">Show ${escapeHtml(mailCatName(c))} too</button>`).join('') : '<button class="mail-btn" data-add="all">Show All</button>') + '</div>';
+    }
+    h += '</div>';
+  } else {
+    h += '<div class="mch-mail"><div class="mch-text">To ask about one mail: click <b>All</b>, select the mail, then right-click a category again - it says where Gmail filed that mail.</div></div>';
+  }
+  // how it works, and the one thing that surprises people
+  h +=
+    '<p><b>Who decides:</b> Gmail, when the mail arrives. Cockpit does not sort; it asks Gmail for ' +
+    (isAll ? 'the inbox' : `the inbox mail filed under this category (in Gmail's search box: <code>category:${escapeHtml(key)}</code>)`) +
+    ' and shows what comes back, newest first.</p>' +
+    '<p><b>Different from Gmail in the browser?</b> There, a category whose tab is switched off (Settings, Inbox, Categories) is shown under Primary. The mail still carries its own category, and that is what this filter sees. So a mail that sits under Primary in the browser can be Updates here.</p>';
+  // what is in the list right now - honest only when nothing is filtered away
+  if (mailViewHasInbox() && !mailCategories.length && mbox.view !== 'SEARCH' && mbox.threads.length) {
+    const n = {};
+    let none = 0;
+    for (const t of mbox.threads) {
+      const cs = mailCatsOf(t.labelIds);
+      if (!cs.length) none++;
+      for (const c of cs) n[c] = (n[c] || 0) + 1;
+    }
+    const parts = MAIL_CATEGORIES.filter((c) => n[c.key]).map((c) => `${escapeHtml(c.label)} <b>${n[c.key]}</b>`);
+    if (none) parts.push(`no category <b>${none}</b>`);
+    h += `<div class="mch-count">Of the ${mbox.threads.length} loaded now: ${parts.join(' · ')}</div>`;
+  }
+  pop.innerHTML = h + '</div>';
+  mailShowPop(anchor);
+  pop.onclick = (e) => {
+    const b = e.target.closest('[data-add]');
+    if (!b) return;
+    mailHidePop();
+    // keep what is shown and ADD the category the mail is in (Ctrl+click does the same)
+    if (b.dataset.add === 'all') mailToggleCategory('all', false);
+    else if (!mailCategories.includes(b.dataset.add)) mailToggleCategory(b.dataset.add, true);
+    mailFocus();
+  };
 }
 function mailViewHasInbox() {
   return mailViewQuery().labelIds.includes('INBOX');
@@ -11857,6 +12148,8 @@ function mailSetView(view) {
   }
   mbox.sel = 0;
   mbox.threads = [];
+  mailMarks().clear();
+  mbox.markAnchor = null;
   mbox.next = null;
   mbox.prefetch = null;
   mbox.autoPauseUntil = 0;
@@ -12050,6 +12343,32 @@ function mailDecodeEntities(s) {
   mailEntityBox.innerHTML = String(s || '');
   return mailEntityBox.value;
 }
+// Whom a row names: the sender - except in Sent and Drafts when the newest message is your
+// own, where that would always be you and the person it is written TO says more.
+function mailRowWho(t) {
+  if ((mbox.view === 'SENT' || mbox.view === 'DRAFT') && mailMyAddrs().has(mailAddr(t.from).toLowerCase())) {
+    const to = mailSplit(t.to || '');
+    if (!to.length) return mbox.view === 'DRAFT' ? '(no recipient yet)' : shortFrom(t.from) || t.from || '';
+    return 'To: ' + (shortFrom(to[0]) || mailAddr(to[0])) + (to.length > 1 ? ' +' + (to.length - 1) : '');
+  }
+  return shortFrom(t.from) || t.from || '';
+}
+// An explicit open (a click, Enter) in Drafts of a conversation that is ONLY a draft goes
+// straight to the editor - there is nothing else in it to read. j / k just show it, and
+// nothing is opened over a message you are in the middle of writing.
+async function mailOpenRow(id) {
+  await mailOpenThread(id);
+  const t = mbox.thread;
+  if (mbox.view !== 'DRAFT' || !t || t.id !== id || mbox.openId !== id || t.messages.length !== 1) return;
+  const m = t.messages[0];
+  if (!(m.labelIds || []).includes('DRAFT')) return;
+  if (mbox.draft && mailDraftDirty()) return;
+  mailEditDraft({ messageId: m.id });
+}
+// A draft was saved, deleted or sent: the Drafts list is asked for again.
+function mailDraftsChanged() {
+  if (mbox.view === 'DRAFT') mailLoad();
+}
 function mailRenderList() {
   const list = mailEl('.mail-list');
   if (!list) return;
@@ -12058,14 +12377,25 @@ function mailRenderList() {
       '<div class="mail-note">Google is not connected.<br /><button class="mail-btn" data-act="settings">Open Settings</button></div>';
     return;
   }
+  // marks only live on rows that are in the list
+  const marks = mailMarks();
+  if (marks.size) {
+    const have = new Set(mbox.threads.map((t) => t.id));
+    for (const id of [...marks]) if (!have.has(id)) marks.delete(id);
+  }
   const rows = mbox.threads.map((t, i) => {
-    const cls = 'mail-row' + (t.unread ? ' unread' : '') + (i === mbox.sel ? ' sel' : '') + (t.id === mbox.openId ? ' open' : '');
+    const on = marks.has(t.id);
+    const cls = 'mail-row' + (t.unread ? ' unread' : '') + (i === mbox.sel ? ' sel' : '') + (t.id === mbox.openId ? ' open' : '') + (on ? ' marked' : '');
     return (
       `<div class="${cls}" data-i="${i}">` +
+      '<span class="mr-side">' +
       `<button class="mr-star${t.starred ? ' on' : ''}" data-act="star" title="Star (s)">${t.starred ? '★' : '☆'}</button>` +
+      `<button class="mr-check" data-act="mark" title="Mark (x) - then archive, trash or label all marked at once. Shift+click: everything up to here">${on ? '☑' : '☐'}</button>` +
+      '</span>' +
       '<div class="mr-main">' +
       '<div class="mr-line1">' +
-      `<span class="mr-from">${escapeHtml(shortFrom(t.from) || t.from || '')}</span>` +
+      `<span class="mr-from">${escapeHtml(mailRowWho(t))}</span>` +
+      ((t.labelIds || []).includes('DRAFT') && mbox.view !== 'DRAFT' ? '<span class="mr-draft" title="There is an unsent draft in this conversation">Draft</span>' : '') +
       (t.count > 1 ? `<span class="mr-count">${t.count}</span>` : '') +
       (t.hasAttachment ? '<span class="mr-att" title="Probably has an attachment">📎</span>' : '') +
       `<span class="mr-date">${mailDate(t.date)}</span>` +
@@ -12082,8 +12412,24 @@ function mailRenderList() {
   else if (!mbox.threads.length) foot = '<div class="mail-note">Nothing here.</div>';
   else if (mbox.next) foot = '<button class="mail-btn mail-more">Load more</button>';
   const keep = list.scrollTop;
-  list.innerHTML = rows.join('') + foot;
-  list.scrollTop = keep;
+  const strip = marks.size
+    ? `<div class="mail-marks"><b>${marks.size} marked</b>` +
+      '<button class="mail-btn" data-mk="archive" title="Archive all marked (e)">🗃</button>' +
+      '<button class="mail-btn" data-mk="trash" title="Move all marked to Trash (#)">🗑</button>' +
+      '<button class="mail-btn" data-mk="label" title="Label all marked (l)">🏷</button>' +
+      '<button class="mail-btn" data-mk="read" title="Mark all marked read (Shift+I)">Read</button>' +
+      '<button class="mail-btn" data-mk="unread" title="Mark all marked unread (Shift+U)">Unread</button>' +
+      '<span class="mail-spacer"></span>' +
+      '<button class="mail-btn" data-mk="all" title="Mark every conversation loaded in the list">All</button>' +
+      '<button class="mail-x" data-mk="none" title="Unmark all (Esc)">✕</button></div>'
+    : '';
+  list.classList.toggle('has-marks', marks.size > 0);
+  list.innerHTML = strip + rows.join('') + foot;
+  // the strip takes room at the top: a list that was scrolled keeps the same rows in view
+  const stripEl = list.querySelector('.mail-marks');
+  const stripH = stripEl ? stripEl.offsetHeight : 0;
+  list.scrollTop = keep > 0 ? keep + stripH - (mbox.marksH || 0) : keep;
+  mbox.marksH = stripH;
   // Scroll to the selection only when a DIFFERENT thread is selected (j/k, a click, a row
   // archived away). Doing it on every render yanked you back up each time a page arrived -
   // and by thread, not position: new mail on top shifts every position by one.
@@ -12128,6 +12474,33 @@ async function mailOpenThread(id) {
   mailRenderThread();
   // Opening reads it, as in Gmail.
   if (mbox.thread.messages.some((m) => (m.labelIds || []).includes('UNREAD'))) mailSetFlag(id, 'UNREAD', false, true);
+}
+// Refresh (the button, Ctrl+R, Shift+N): ask Gmail again. The list is loaded afresh, and so is
+// the OPEN conversation - a reply that arrived while you were reading it used to show only
+// after closing and opening it again. It is redrawn only when its messages changed: a redraw
+// reloads every mail frame (loaded images, a translation), so an unchanged one is left
+// alone, and a changed one keeps your place (the same thread drawn again).
+async function mailReread() {
+  if (!mailRec()) return;
+  mailLoadLabels();
+  mailBadge(true);
+  const list = mailLoad();
+  const id = mbox.openId;
+  if (id && googleConnected && mbox.thread && mbox.thread.id === id) {
+    const res = await api.mailGetThread(id);
+    if (res && res.ok && mbox.openId === id && mbox.thread && mbox.thread.id === id) {
+      const all = res.messages || [];
+      const live = mbox.view === 'TRASH' ? all : all.filter((m) => !(m.labelIds || []).includes('TRASH'));
+      const next = live.length ? live : all;
+      const ids = (ms) => ms.map((m) => m.id).join(' ');
+      if (ids(next) !== ids(mbox.thread.messages)) {
+        mbox.thread = { id, messages: next };
+        mailRenderThread();
+        if (next.some((m) => (m.labelIds || []).includes('UNREAD'))) mailSetFlag(id, 'UNREAD', false, true);
+      }
+    }
+  }
+  return list;
 }
 function mailThreadHas(id, label) {
   const t = mbox.threads.find((x) => x.id === id);
@@ -12281,14 +12654,19 @@ function mailFillBody(el, m) {
     mailInviteMount(iv, m); // fills itself in, or removes itself if it is not an invitation after all
   }
   if (m.html) {
-    const clean = mailSanitize(m.html);
+    const clean = mailSanitize(m.html, { fold: mailFoldQuotes && !MAIL_FWD_SUBJ.test(m.subject || '') });
     let bar = null;
-    if (clean.remote) {
+    const trusted = !!clean.remote && mailImgTrusted(m.from); // their images load by themselves
+    const sender = mailAddr(m.from || '').toLowerCase();
+    if (clean.remote && !trusted) {
       bar = document.createElement('div');
       bar.className = 'mm-imgbar';
       bar.innerHTML =
         `🖼 ${clean.remote} remote image${clean.remote === 1 ? '' : 's'} blocked - they can tell the sender you opened this. ` +
-        '<button class="mail-btn">Load images</button>';
+        '<button class="mail-btn" data-img="once">Load images</button>' +
+        (sender.indexOf('@') > 0
+          ? ` <button class="mail-btn" data-img="always" title="Load them now, and by themselves in every mail from this address (the list is in Settings → Google)">Always from ${escapeHtml(sender)}</button>`
+          : '');
       body.appendChild(bar);
     }
     const ifr = document.createElement('iframe');
@@ -12301,16 +12679,250 @@ function mailFillBody(el, m) {
     ifr.setAttribute('referrerpolicy', 'no-referrer');
     ifr.srcdoc = mailSrcdoc(clean);
     ifr.addEventListener('load', () => mailFrameReady(ifr, m));
+    if (trusted) ifr.addEventListener('load', () => mailLoadImages(ifr, null));
     body.appendChild(ifr);
-    if (bar) bar.querySelector('button').addEventListener('click', () => mailLoadImages(ifr, bar));
+    if (bar)
+      bar.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-img]');
+        if (!b) return;
+        if (b.dataset.img === 'always') {
+          const a = mailTrustImgSender(m.from);
+          if (a) mailToast('Images from ' + a + ' load by themselves from now on (Settings → Google lists them)');
+        }
+        mailLoadImages(ifr, bar);
+      });
   } else {
     const d = document.createElement('div');
     d.className = 'mm-text';
-    d.innerHTML = mailTextHtml(m.text || mailDecodeEntities(m.snippet));
+    d.innerHTML = mailTextHtml(m.text || mailDecodeEntities(m.snippet), mailFoldQuotes && !MAIL_FWD_SUBJ.test(m.subject || ''));
+    const qb = d.querySelector('.mm-qbtn');
+    if (qb)
+      qb.addEventListener('click', () => {
+        const open = d.classList.toggle('q-open');
+        qb.title = open ? 'Hide the earlier mail again' : 'Show the earlier mail quoted here';
+      });
     body.appendChild(d);
   }
   const atts = mailAttachmentsEl(m);
   if (atts) body.appendChild(atts);
+}
+
+// ---- the earlier mail quoted under a reply, folded behind "⋯" ----
+// A reply drags the whole conversation along below it, so the end of the mail and its
+// attachments are a long scroll away. The quoted part is found here and hidden; a pill opens it.
+// Three shapes of quote:
+//  - wrapped: Gmail, Apple Mail, Thunderbird, Yahoo put it in an element of its own. Only
+//    that element is folded, so a reply written BELOW the quote stays in view.
+//  - Outlook writes no wrapper: the old mail starts at a "From: / Sent: / To:" block (or
+//    "-----Original Message-----") and runs to the end. Everything from there is folded.
+//  - plain text: "On ... wrote:" and lines starting with ">", or the Outlook block as text.
+// Left alone: a forward (the quoted mail IS the mail), answers written between the quoted
+// lines, a mail with nothing of its own above the quote, and a quote too short to be in the way.
+let mailFoldQuotes = true; // saved; the Aa panel switches it
+const MAIL_Q_MIN = 300; // characters of quoted text worth folding
+const MAIL_FWD_SUBJ = /^\s*(?:fwd?|wg|tr|rv|enc|i)\s*:/i;
+const MAIL_FWD_MARK = /forwarded message|weitergeleitete nachricht|begin forwarded|message transf[ée]r[ée]|doorgestuurd bericht|messaggio inoltrato/i;
+const MAIL_Q_WRAP =
+  '.gmail_quote_container,.gmail_quote,blockquote[type="cite"],.yahoo_quoted,.protonmail_quote,.zmail_extra,' +
+  '.moz-cite-prefix+blockquote,#mail-editor-reference-message-container,div[name="quote"]';
+const MAIL_Q_TAIL = '#divRplyFwdMsg,#appendonsend,.OutlookMessageHeader';
+const MAIL_Q_HEAD_FIRST = /^(?:from|von|de|da|van)\s*:/i;
+const MAIL_Q_HEAD =
+  /^(?:from|von|de|da|van)\s*:[\s\S]{0,400}?(?:sent|gesendet|date|datum|envoy[ée]|inviato|verzonden)\s*:[\s\S]{0,400}?(?:to|an|[àa]|aan|subject|betreff|objet|oggetto|onderwerp)\s*:/i;
+const MAIL_Q_ORIG = /^-{2,}\s*(?:original message|urspr(?:ü|ue)ngliche nachricht|message d.origine|messaggio originale)\s*-{2,}/i;
+const MAIL_Q_ATTR = /(?:wrote|schrieb|a écrit|ha scritto|escribió|schreef)[^:\n]{0,40}:\s*$/i;
+// Marks the quoted part of a parsed mail with data-cq and puts the pill in front of it.
+// Works on the inert document mailSanitize parsed, so the very first paint is already folded.
+function mailFoldQuote(doc) {
+  const body = doc && doc.body;
+  if (!body) return false;
+  // a mail cannot bring its own marks
+  body.querySelectorAll('[data-cq],[data-cq-btn]').forEach((n) => {
+    n.removeAttribute('data-cq');
+    n.removeAttribute('data-cq-btn');
+  });
+  const wraps = [...body.querySelectorAll(MAIL_Q_WRAP)].filter((w) => !w.parentElement || !w.parentElement.closest(MAIL_Q_WRAP));
+  const tail = body.querySelector(MAIL_Q_TAIL);
+  // Outlook: look for the header block of the mail underneath
+  let head = null;
+  const walker = doc.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+  let seen = 0;
+  for (let t = walker.nextNode(); t && seen < 20000 && !head; t = walker.nextNode(), seen++) {
+    const s = t.nodeValue.trim();
+    if (!s || !t.parentElement || t.parentElement.closest('style,title')) continue;
+    const orig = MAIL_Q_ORIG.test(s);
+    if (!orig && !MAIL_Q_HEAD_FIRST.test(s)) continue;
+    const block = t.parentElement.closest('p,div,td,li,pre,blockquote') || t.parentElement;
+    if (block === body) continue;
+    if (orig) head = block;
+    else if (MAIL_Q_HEAD.test(block.textContent.trim().slice(0, 900))) head = block;
+    else if (block.parentElement && block.parentElement !== body && MAIL_Q_HEAD.test(block.parentElement.textContent.trim().slice(0, 900))) head = block;
+  }
+  const isBefore = (a, b) => !!(a.compareDocumentPosition(b) & 4); // b follows a (or is inside it)
+  let start = null;
+  let kind = '';
+  for (const [n, k] of [[wraps[0], 'wrap'], [tail, 'tail'], [head, 'tail']]) {
+    if (n && (!start || isBefore(n, start))) {
+      start = n;
+      kind = k;
+    }
+  }
+  if (!start) return false;
+  const lead = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
+  if (MAIL_FWD_MARK.test(lead(start).slice(0, 300))) return false; // a forward: the quote is the mail
+  const prevOf = (n) => {
+    // the element right before n, with no text of its own in between
+    for (let p = n.previousSibling; p; p = p.previousSibling) {
+      if (p.nodeType === 1) return p;
+      if (p.nodeType === 3 && p.nodeValue.trim()) return null;
+    }
+    return null;
+  };
+  const marked = [];
+  const mark = (n) => {
+    if (n.nodeType === 1) {
+      n.setAttribute('data-cq', '');
+      marked.push(n);
+    } else if (n.nodeType === 3 && n.nodeValue.trim()) {
+      const sp = doc.createElement('span'); // a text node cannot carry the mark itself
+      sp.setAttribute('data-cq', '');
+      n.parentNode.replaceChild(sp, n);
+      sp.appendChild(n);
+      marked.push(sp);
+    }
+  };
+  const unmark = () => marked.forEach((n) => n.removeAttribute('data-cq'));
+  if (kind === 'wrap') {
+    for (const w of wraps) {
+      const p = prevOf(w);
+      if (p && MAIL_FWD_MARK.test(lead(p).slice(0, 300))) return unmark(), false;
+      // the "On ... wrote:" line above a quote belongs to it
+      if (p && lead(p).length < 300 && MAIL_Q_ATTR.test(lead(p))) mark(p);
+      mark(w);
+    }
+  } else {
+    const p = prevOf(start);
+    if (p && p.tagName === 'HR') start = p; // the rule Outlook draws above the old mail
+    for (let s = start; s; ) {
+      const nx = s.nextSibling;
+      mark(s);
+      s = nx;
+    }
+    for (let p2 = start.parentNode; p2 && p2 !== body; p2 = p2.parentNode) {
+      for (let s = p2.nextSibling; s; ) {
+        const nx = s.nextSibling;
+        mark(s);
+        s = nx;
+      }
+    }
+  }
+  if (!marked.length) return false;
+  // What is folded, what stays - and, for wrapped quotes, what the sender wrote BETWEEN them.
+  let folded = 0;
+  let rest = 0;
+  let own = 0; // inside Gmail's quote wrapper, but neither quoted nor the "wrote:" line
+  let between = 0; // after the first quote and before the last one
+  const firstW = wraps[0];
+  const lastW = wraps[wraps.length - 1];
+  const w2 = doc.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+  for (let t = w2.nextNode(); t; t = w2.nextNode()) {
+    const len = t.nodeValue.replace(/\s+/g, '').length;
+    const pe = t.parentElement;
+    if (!len || !pe || pe.closest('style,title')) continue;
+    const inq = pe.closest('[data-cq]');
+    if (inq) {
+      folded += len;
+      if (kind === 'wrap' && inq.matches('.gmail_quote_container,.gmail_quote:not(blockquote)') && !pe.closest('blockquote,.gmail_attr')) own += len;
+    } else {
+      rest += len;
+      if (kind === 'wrap' && wraps.length > 1 && isBefore(firstW, t) && isBefore(t, lastW)) between += len;
+    }
+  }
+  const ownPicture = [...body.querySelectorAll('img')].some((i) => !i.closest('[data-cq]'));
+  if (own > 30 || between > 30 || folded < MAIL_Q_MIN || (!rest && !ownPicture)) return unmark(), false;
+  const first = marked.reduce((a, b) => (isBefore(b, a) ? b : a));
+  const btn = doc.createElement('div');
+  btn.className = 'cockpit-q';
+  btn.setAttribute('data-cq-btn', '');
+  btn.setAttribute('title', 'Show the earlier mail quoted here');
+  btn.textContent = '⋯';
+  first.parentNode.insertBefore(btn, first);
+  return true;
+}
+// The same for plain text: the line the quoted mail starts at, or -1.
+function mailTextFoldAt(lines) {
+  const blank = (l) => !l.trim();
+  const quoted = (l) => /^\s*>/.test(l);
+  let at = -1;
+  let whole = false; // an Outlook-style quote: no ">" marks, it simply runs to the end
+  for (let i = 0; i < lines.length && at < 0; i++) {
+    const l = lines[i].trim();
+    if (!l) continue;
+    if (MAIL_Q_ORIG.test(l)) {
+      at = i;
+      whole = true;
+    } else if (MAIL_Q_HEAD_FIRST.test(l) && MAIL_Q_HEAD.test(lines.slice(i, i + 6).join('\n'))) {
+      at = i;
+      whole = true;
+    } else if (quoted(l) || MAIL_Q_ATTR.test(l) || MAIL_Q_ATTR.test(l + ' ' + (lines[i + 1] || '').trim())) {
+      // "On ... wrote:" (it may wrap onto a second line) followed by ">" lines, or bare ">" lines
+      let j = i;
+      if (!quoted(l)) {
+        j = i + 1;
+        if (!MAIL_Q_ATTR.test(l)) j++;
+        while (j < lines.length && blank(lines[j])) j++;
+        if (j >= lines.length || !quoted(lines[j])) continue;
+      }
+      // answers between the quoted lines: more than a line of the sender's own after this point
+      const ownAfter = lines.slice(j).filter((x) => !blank(x) && !quoted(x)).length;
+      if (ownAfter > 1) return -1;
+      at = i;
+    }
+  }
+  if (at < 0) return -1;
+  if (MAIL_FWD_MARK.test(lines.slice(Math.max(0, at - 1), at + 2).join(' '))) return -1;
+  while (at > 0 && (blank(lines[at - 1]) || /^[_-]{5,}\s*$/.test(lines[at - 1].trim()))) at--; // the rule and the gap above it go along
+  if (!lines.slice(0, at).some((x) => !blank(x))) return -1; // nothing of its own above
+  if (lines.slice(at).join('').replace(/\s+/g, '').length < MAIL_Q_MIN) return -1;
+  return at;
+}
+function mailApplyFoldQuotes() {
+  if (mbox.thread && mailEl('.mail-reader')) mailRenderThread(); // the same thread drawn again keeps its place
+}
+
+// ---- remote images: senders whose pictures load without asking ----
+// Remote images stay blocked because fetching one tells the sender the mail was opened. For a
+// sender you trust that is a click on every mail, so the bar offers "Always from <address>":
+// from then on their mail loads its images by itself (through the same checked fetch in the
+// main process), with no bar. The list is plain text in Settings -> Google: one address, or a
+// domain for everyone at it. A From line can be forged; the worst a forged one gets is the
+// images of that one mail loaded.
+let mailImgSenders = [];
+function mailCleanImgSenders(v) {
+  const list = Array.isArray(v) ? v : String(v || '').split(/[\s,;]+/);
+  const out = [];
+  for (const x of list) {
+    const s = String(x || '').trim().toLowerCase().replace(/^@/, '');
+    if (!s || s.length > 200 || s.indexOf('.') < 0 || !/^[a-z0-9._%+-]+(@[a-z0-9.-]+)?$/.test(s)) continue;
+    if (!out.includes(s)) out.push(s);
+  }
+  return out.slice(0, 500);
+}
+function mailImgTrusted(from) {
+  const a = mailAddr(from).toLowerCase();
+  const at = a.lastIndexOf('@');
+  if (at < 1) return false;
+  const dom = a.slice(at + 1);
+  return mailImgSenders.some((s) => (s.indexOf('@') >= 0 ? s === a : dom === s || dom.endsWith('.' + s)));
+}
+function mailTrustImgSender(from) {
+  const a = mailCleanImgSenders([mailAddr(from)])[0];
+  if (!a || a.indexOf('@') < 0) return '';
+  if (!mailImgSenders.includes(a)) {
+    mailImgSenders = mailImgSenders.concat(a);
+    api.saveSettings({ mailImgSenders });
+  }
+  return a;
 }
 
 // ---- rendering untrusted HTML ----
@@ -12322,7 +12934,45 @@ const MAIL_DROP =
   'meta,base,link,noscript,template,portal,audio,video,source,track,' +
   'animate,set,animateMotion,animateTransform,foreignObject';
 const MAIL_URL_ATTRS = /^(?:href|xlink:href|src|background|poster|action|formaction|srcset|ping|lowsrc|dynsrc|longdesc)$/;
-function mailSanitize(html) {
+// A bare address in a formatted mail ("URL: https://...") becomes a link, as it already does in
+// plain text. Many automatic mails (a script's output wrapped in HTML) carry their links as
+// text only. Text nodes only, never inside a link; the href is the text itself, so it is held
+// to the same http(s) rule as every other link, and the click goes the usual way (hover card,
+// tracker cleaning). "www." without a scheme is taken as https.
+function mailAutoLink(doc) {
+  const body = doc && doc.body;
+  if (!body) return 0;
+  const re = /\b(?:https?:\/\/|www\.(?=[a-z0-9-]+\.[a-z]))[^\s<>"']*[^\s<>"'.,;:!?)\]]/gi;
+  const walker = doc.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+  const todo = [];
+  for (let t = walker.nextNode(); t && todo.length < 500; t = walker.nextNode()) {
+    const v = t.nodeValue;
+    if (v.length < 8 || (v.indexOf('://') < 0 && v.toLowerCase().indexOf('www.') < 0)) continue;
+    if (!t.parentElement || t.parentElement.closest('a,style,title,svg')) continue;
+    todo.push(t);
+  }
+  let made = 0;
+  for (const t of todo) {
+    const v = t.nodeValue;
+    const frag = doc.createDocumentFragment();
+    let last = 0;
+    re.lastIndex = 0;
+    for (let m = re.exec(v); m; m = re.exec(v)) {
+      if (m.index > last) frag.appendChild(doc.createTextNode(v.slice(last, m.index)));
+      const a = doc.createElement('a');
+      a.setAttribute('href', /^www\./i.test(m[0]) ? 'https://' + m[0] : m[0]);
+      a.textContent = m[0];
+      frag.appendChild(a);
+      last = m.index + m[0].length;
+      made++;
+    }
+    if (!last) continue;
+    if (last < v.length) frag.appendChild(doc.createTextNode(v.slice(last)));
+    t.parentNode.replaceChild(frag, t);
+  }
+  return made;
+}
+function mailSanitize(html, opts) {
   const doc = new DOMParser().parseFromString(String(html || ''), 'text/html');
   doc.querySelectorAll(MAIL_DROP).forEach((n) => n.remove());
   let remote = 0;
@@ -12354,12 +13004,14 @@ function mailSanitize(html) {
       }
     }
   }
+  mailAutoLink(doc); // after the cleaning, so what it makes is not second-guessed by it
+  const folded = !!(opts && opts.fold) && mailFoldQuote(doc); // after the cleaning: it reads what will be shown
   const styles = [...doc.head.querySelectorAll('style')].map((s) => s.outerHTML).join('');
   const bodyAttrs = ['style', 'bgcolor', 'text', 'link', 'vlink']
     .filter((k) => doc.body && doc.body.hasAttribute(k))
     .map((k) => ` ${k}="${escapeHtml(doc.body.getAttribute(k))}"`)
     .join('');
-  return { html: styles + (doc.body ? doc.body.innerHTML : ''), bodyAttrs, remote };
+  return { html: styles + (doc.body ? doc.body.innerHTML : ''), bodyAttrs, remote, folded };
 }
 // Dark reading. Recolouring mail with CSS rules fights every mail that sets its own colours
 // (and many do, inline, on every table cell), so the whole document is inverted instead -
@@ -12393,8 +13045,15 @@ const MAIL_GREEN_CSS =
   'border-color:#1e5a31 !important;text-shadow:none !important;box-shadow:none !important}' +
   'a,a *{color:#9dffbf !important}' +
   'hr{border-color:#1e5a31 !important}';
+// One colour on black for a formatted mail: green, or - with a one-colour look on - that
+// look's colour, so a mail reads like the app around it.
+function mailMonoCss() {
+  const v = appLookVars(appLook);
+  if (!v) return MAIL_GREEN_CSS;
+  return MAIL_GREEN_CSS.split('#33ff66').join(v.root['--fg']).split('#1e5a31').join(v.root['--border']).split('#9dffbf').join(v.root['--fg-strong']);
+}
 function mailReadCss(mode) {
-  return mode === 'dark' ? MAIL_DARK_CSS : mode === 'green' ? MAIL_GREEN_CSS : '';
+  return mode === 'dark' ? MAIL_DARK_CSS : mode === 'green' ? mailMonoCss() : '';
 }
 function mailApplyReadMode(doc, mode) {
   if (!doc || !doc.documentElement) return;
@@ -12437,7 +13096,9 @@ function mailPaintDarkBtn(b) {
   if (!b) return;
   const next = MAIL_READ_MODES[(MAIL_READ_MODES.indexOf(mailReadMode) + 1) % MAIL_READ_MODES.length];
   b.textContent = MAIL_READ_LABEL[mailReadMode][0];
-  b.title = 'Reading: ' + MAIL_READ_LABEL[mailReadMode][1] + ' · click (or t) for ' + MAIL_READ_LABEL[next][1] + ' - remembered for every mail';
+  // with a one-colour look on, the 📟 mode is that look's colour
+  const say = (m) => (m === 'green' && appLook !== 'standard' ? APP_LOOKS[appLook].label.toLowerCase() + ', like the app' : MAIL_READ_LABEL[m][1]);
+  b.title = 'Reading: ' + say(mailReadMode) + ' · click (or t) for ' + say(next) + ' - remembered for every mail';
   b.classList.toggle('on', mailReadMode !== 'off');
 }
 function mailSrcdoc(clean) {
@@ -12447,7 +13108,12 @@ function mailSrcdoc(clean) {
     '<base target="_blank">' +
     '<style>html,body{margin:0}body{padding:12px 14px;font:14px/1.45 "Segoe UI",system-ui,sans-serif;' +
     'color:#202124;background:#fff;overflow-wrap:anywhere}img{max-width:100%;height:auto}a{color:#1a5fb4}' +
-    'blockquote{margin:0 0 0 .5em;padding-left:.8em;border-left:3px solid #ddd;color:#555}pre{white-space:pre-wrap}</style>' +
+    'blockquote{margin:0 0 0 .5em;padding-left:.8em;border-left:3px solid #ddd;color:#555}pre{white-space:pre-wrap}' +
+    // the quoted earlier mail, folded (mailFoldQuote put the marks there)
+    'html:not(.cq-open) [data-cq]{display:none !important}' +
+    '.cockpit-q{display:inline-block;margin:6px 0;padding:0 11px;border:1px solid #c4c7c5;border-radius:9px;background:#eceff1;' +
+    'color:#444;font:700 15px/17px "Segoe UI",system-ui,sans-serif;letter-spacing:1px;cursor:pointer;user-select:none}' +
+    '.cockpit-q:hover{background:#dde1e4}html.cq-open .cockpit-q{background:#d3e3fd;border-color:#a8c7fa}</style>' +
     (mailFontCss() ? '<style id="' + MAIL_FONT_ID + '">' + mailFontCss() + '</style>' : '') +
     (mailReadCss(mailReadMode) ? '<style id="' + MAIL_DARK_ID + '" data-mode="' + mailReadMode + '">' + mailReadCss(mailReadMode) + '</style>' : '') +
     '</head><body' + clean.bodyAttrs + '>' + clean.html + '</body></html>'
@@ -12472,6 +13138,29 @@ function mailFrameReady(ifr, m) {
     mailFollowLink(a.getAttribute('href'), background);
   };
   doc.addEventListener('click', (e) => follow(e, e.ctrlKey || e.metaKey));
+  // The ⋯ pill: show / hide the quoted earlier mail. The frame is as tall as its document, and
+  // a document never reports less than its frame - so to SHRINK, the frame is made small first
+  // and measured again; the reader's scroll position is held across that.
+  doc.addEventListener('click', (e) => {
+    const b = e.target && e.target.closest ? e.target.closest('[data-cq-btn]') : null;
+    if (!b) return;
+    e.preventDefault();
+    const open = doc.documentElement.classList.toggle('cq-open');
+    b.setAttribute('title', open ? 'Hide the earlier mail again' : 'Show the earlier mail quoted here');
+    const reader = ifr.closest('.mail-reader');
+    const top = reader ? reader.scrollTop : 0;
+    if (open) fit();
+    else {
+      // no scrollbar while it is small: one would narrow the page, wrap the text and measure too tall
+      const de = doc.documentElement;
+      const was = de.style.overflow;
+      de.style.overflow = 'hidden';
+      ifr.style.height = '20px';
+      fit();
+      de.style.overflow = was;
+    }
+    if (reader) reader.scrollTop = top;
+  });
   doc.addEventListener('auxclick', (e) => {
     if (e.button === 1) follow(e, true);
   });
@@ -12523,7 +13212,7 @@ function mailAbsUrl(u) {
 async function mailLoadImages(ifr, bar) {
   const doc = ifr.contentDocument;
   if (!doc) return;
-  bar.textContent = 'Loading images…';
+  if (bar) bar.textContent = 'Loading images…'; // no bar: a trusted sender, loaded without asking
   const cache = new Map();
   const get = (url) => {
     if (!cache.has(url)) cache.set(url, api.mailFetchImage(url).then((r) => (r && r.ok ? r.dataUrl : null)));
@@ -12541,8 +13230,10 @@ async function mailLoadImages(ifr, bar) {
       el.removeAttribute(isSrc ? 'data-remote-src' : 'data-remote-bg');
     })
   );
-  if (failed) bar.textContent = `${failed} image${failed === 1 ? '' : 's'} could not be loaded.`;
-  else bar.remove();
+  if (bar) {
+    if (failed) bar.textContent = `${failed} image${failed === 1 ? '' : 's'} could not be loaded.`;
+    else bar.remove();
+  }
   if (ifr._fit) setTimeout(ifr._fit, 50);
 }
 function mailLinkify(escaped) {
@@ -12551,15 +13242,23 @@ function mailLinkify(escaped) {
     (u) => `<a href="${u}" title="${u}">${u}</a>`
   );
 }
-function mailTextHtml(text) {
-  return String(text || '')
+function mailTextHtml(text, fold) {
+  const lines = String(text || '')
     .replace(/\r\n/g, '\n')
-    .split('\n')
-    .map((l) => {
+    .split('\n');
+  const html = lines.map((l) => {
       const h = mailLinkify(escapeHtml(l));
       return /^\s*>/.test(l) ? `<span class="mm-q">${h}</span>` : h;
-    })
-    .join('\n');
+    });
+  const at = fold ? mailTextFoldAt(lines) : -1;
+  if (at < 0) return html.join('\n');
+  return (
+    html.slice(0, at).join('\n') +
+    '\n<span class="mm-qbtn" role="button" title="Show the earlier mail quoted here">⋯</span>' +
+    '<span class="mm-qtail">\n' +
+    html.slice(at).join('\n') +
+    '</span>'
+  );
 }
 // ---- links: where they really go ----
 // Mail links are often wrapped: a Google or Outlook redirect, a newsletter click counter, a
@@ -13129,6 +13828,140 @@ async function mailSetFlag(id, label, on, quiet) {
 function mailToggleStar(id) {
   return mailSetFlag(id, 'STARRED', !mailThreadHas(id, 'STARRED'));
 }
+// ---- marking several conversations ----
+// x marks the selected row (Shift+X, or Shift+click on a box: everything from the last mark to
+// here). While anything is marked, archive / trash / spam / read / unread / star / important
+// and the label picker work on ALL of them, from the keys and from the strip above the list;
+// the buttons in the reader bar stay with the open mail. One toast, one undo for the lot.
+function mailMarks() {
+  if (!mbox.marked) mbox.marked = new Set();
+  return mbox.marked;
+}
+// in the order of the list
+function mailMarkedIds() {
+  const m = mailMarks();
+  return m.size ? mbox.threads.filter((t) => m.has(t.id)).map((t) => t.id) : [];
+}
+function mailToggleMark(id, range) {
+  const m = mailMarks();
+  const i = mbox.threads.findIndex((t) => t.id === id);
+  if (i === -1) return;
+  const j = range && mbox.markAnchor ? mbox.threads.findIndex((t) => t.id === mbox.markAnchor) : -1;
+  if (j !== -1) {
+    for (let k = Math.min(i, j); k <= Math.max(i, j); k++) m.add(mbox.threads[k].id);
+  } else {
+    if (m.has(id)) m.delete(id);
+    else m.add(id);
+    mbox.markAnchor = id;
+  }
+  mailRenderList();
+}
+function mailClearMarks() {
+  mailMarks().clear();
+  mbox.markAnchor = null;
+  mailRenderList();
+}
+const MAIL_MANY = ['archive', 'trash', 'spam', 'read', 'unread', 'label', 'star', 'important', 'unimportant'];
+// a few requests at a time, results in order
+async function mailEach(items, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const work = async () => {
+    while (next < items.length) {
+      const i = next++;
+      try {
+        out[i] = await fn(items[i]);
+      } catch (e) {
+        out[i] = { ok: false, error: String((e && e.message) || e) };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(6, items.length) }, work));
+  return out;
+}
+async function mailManyDo(act, ids) {
+  const n = ids.length;
+  const convs = n + ' conversation' + (n === 1 ? '' : 's');
+  if (act === 'archive' || act === 'trash' || act === 'spam') return mailRemoveMany(ids, act);
+  if (act === 'label') return mailLabelPicker(ids, mailEl('.mail-marks [data-mk="label"]'));
+  let label = 'UNREAD';
+  let on = act === 'unread';
+  let said = act === 'unread' ? 'marked unread' : 'marked read';
+  if (act === 'star') {
+    label = 'STARRED';
+    on = !ids.every((id) => mailThreadHas(id, 'STARRED'));
+    said = on ? 'starred' : 'unstarred';
+  } else if (act === 'important' || act === 'unimportant') {
+    label = 'IMPORTANT';
+    on = act === 'important';
+    said = on ? 'marked important' : 'marked not important';
+  }
+  if (act === 'unread' && mbox.openId && ids.includes(mbox.openId)) mailCloseReader(true);
+  const res = await mailEach(ids, (id) => mailSetFlag(id, label, on, true));
+  const bad = res.filter((r) => r !== true).length;
+  mailRenderList();
+  if (bad) mailToast(n - bad + ' of ' + convs + ' ' + said + ' - ' + bad + ' could not be updated', 'err');
+  else mailToast(convs + ' ' + said);
+}
+// Archive / trash / spam for many: the rows go at once; the ones Gmail refuses come back.
+async function mailRemoveMany(ids, how) {
+  const n = ids.length;
+  if (how === 'archive' && !mailViewHasInbox()) {
+    // outside the inbox views an archive only drops the label: the rows stay where you look
+    const res = await mailEach(ids, (id) => mailSetFlag(id, 'INBOX', false, true));
+    const bad = res.filter((r) => r !== true).length;
+    mailToast(n - bad + ' archived' + (bad ? ' - ' + bad + ' failed' : ''), bad ? 'err' : null);
+    return;
+  }
+  const taken = [];
+  mbox.threads.forEach((t, idx) => {
+    if (ids.includes(t.id)) taken.push({ id: t.id, row: t, idx, hadInbox: mailThreadHas(t.id, 'INBOX') });
+  });
+  if (!taken.length) return;
+  const gone = new Set(taken.map((x) => x.id));
+  mbox.threads = mbox.threads.filter((t) => !gone.has(t.id));
+  if (mbox.openId && gone.has(mbox.openId)) mailCloseReader(true);
+  mbox.sel = Math.max(Math.min(mbox.sel, mbox.threads.length - 1), mbox.threads.length ? 0 : -1);
+  for (const id of gone) mailMarks().delete(id);
+  mailRenderList();
+  const putBack = (items) => {
+    for (const it of items.slice().sort((a, b) => a.idx - b.idx)) {
+      if (mbox.threads.some((t) => t.id === it.id)) continue;
+      mbox.threads.splice(Math.min(it.idx, mbox.threads.length), 0, it.row);
+    }
+    if (mbox.sel < 0 && mbox.threads.length) mbox.sel = 0;
+    mailRenderList();
+  };
+  const res = await mailEach(taken, (it) =>
+    how === 'trash' ? api.mailTrashThread(it.id) : how === 'spam' ? api.mailModifyThread(it.id, ['SPAM'], ['INBOX']) : api.mailModifyThread(it.id, [], ['INBOX'])
+  );
+  const done = taken.filter((_, i) => res[i] && res[i].ok);
+  const failed = taken.filter((_, i) => !(res[i] && res[i].ok));
+  if (failed.length) putBack(failed);
+  mailBadge(true);
+  const word = { trash: 'Trash', spam: 'Spam', archive: 'Archive' }[how];
+  if (!done.length) {
+    const first = res.find((r) => r && r.error);
+    return mailToast(word + ' failed: ' + ((first && first.error) || 'unknown'), 'err');
+  }
+  const said = how === 'trash' ? ' moved to Trash' : how === 'spam' ? ' reported as spam' : ' archived';
+  mailToast(done.length + said + (failed.length ? ' - ' + failed.length + ' failed and are back in the list' : ''), null, async () => {
+    const back = await mailEach(done, async (it) => {
+      if (how === 'spam') return api.mailModifyThread(it.id, it.hadInbox ? ['INBOX'] : [], ['SPAM']);
+      if (how === 'trash') {
+        const r = await api.mailUntrashThread(it.id);
+        // Untrash does not promise the inbox back; ask for it when it was there.
+        return r && r.ok && it.hadInbox ? api.mailModifyThread(it.id, ['INBOX'], []) : r;
+      }
+      return api.mailModifyThread(it.id, ['INBOX'], []);
+    });
+    const ok = done.filter((_, i) => back[i] && back[i].ok);
+    putBack(ok);
+    mailBadge(true);
+    if (ok.length === done.length) mailToast('Undone');
+    else mailToast('Undo: ' + ok.length + ' of ' + done.length + ' came back', 'err');
+  });
+}
 // Archive or trash. Optimistic: the row goes at once and comes back if the call fails.
 // Archiving outside the inbox views only drops the INBOX label - the thread still
 // belongs where you are looking (Starred, a label, a search), so the row stays.
@@ -13231,6 +14064,9 @@ async function mailRemoveMessage(m, el) {
   });
 }
 function mailLabelPicker(id, anchor) {
+  const ids = Array.isArray(id) ? id : [id];
+  const hasAll = (lid) => ids.every((x) => mailThreadHas(x, lid));
+  const hasSome = (lid) => ids.some((x) => mailThreadHas(x, lid));
   const user = mbox.labels.filter((l) => l.type === 'user').sort((a, b) => a.name.localeCompare(b.name));
   if (!user.length) return mailToast('No labels yet - make one in Gmail first.', 'err');
   const pop = mailEl('.mail-pop');
@@ -13240,12 +14076,12 @@ function mailLabelPicker(id, anchor) {
       .filter((l) => !f || l.name.toLowerCase().includes(f))
       .map(
         (l) =>
-          `<button class="mp-item" data-label="${escapeHtml(l.id)}">${mailThreadHas(id, l.id) ? '☑' : '☐'} ${escapeHtml(l.name)}</button>`
+          `<button class="mp-item" data-label="${escapeHtml(l.id)}">${hasAll(l.id) ? '☑' : hasSome(l.id) ? '◪' : '☐'} ${escapeHtml(l.name)}</button>`
       )
       .join('');
   };
   pop.innerHTML =
-    '<div class="mp-cap">Label</div><input class="mp-filter" type="text" placeholder="Filter…" spellcheck="false" />' +
+    `<div class="mp-cap">Label${ids.length > 1 ? ' · ' + ids.length + ' conversations' : ''}</div><input class="mp-filter" type="text" placeholder="Filter…" spellcheck="false" />` +
     `<div class="mp-list">${render('')}</div>`;
   mailShowPop(anchor || mailEl('.mr-bar [data-act="label"]') || mailEl('.mail-row.sel') || mailEl('.mail-top'));
   const input = pop.querySelector('.mp-filter');
@@ -13264,11 +14100,18 @@ function mailLabelPicker(id, anchor) {
     const b = e.target.closest('[data-label]');
     if (!b) return;
     const lid = b.dataset.label;
-    const on = !mailThreadHas(id, lid);
+    const on = !hasAll(lid);
     mailHidePop();
     mailFocus();
-    if (await mailSetFlag(id, lid, on)) {
-      const l = mbox.labels.find((x) => x.id === lid);
+    const l = mbox.labels.find((x) => x.id === lid);
+    if (ids.length > 1) {
+      const res = await mailEach(ids, (x) => mailSetFlag(x, lid, on, true));
+      const bad = res.filter((r) => r !== true).length;
+      mailRenderList();
+      mailToast((on ? 'Labelled ' : 'Removed from ') + (ids.length - bad) + ' conversations: ' + (l ? l.name : 'label') + (bad ? ' - ' + bad + ' failed' : ''), bad ? 'err' : null);
+      return;
+    }
+    if (await mailSetFlag(ids[0], lid, on)) {
       mailToast((on ? 'Labelled ' : 'Removed ') + (l ? l.name : 'label'));
     }
   };
@@ -13298,6 +14141,22 @@ function mailToast(text, kind, undo) {
 function mailKeydown(e) {
   const t = e.target;
   const tag = t && t.tagName;
+  // The text size keys work everywhere in the tab, while writing too: Ctrl + / - / 0 mean
+  // nothing to a text field, and the compose panel follows the size.
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && ['+', '=', '-', '0'].includes(e.key)) {
+    e.preventDefault();
+    e.stopPropagation();
+    mailSetZoom(e.key === '0' ? 1 : mailZoom + (e.key === '-' ? -0.1 : 0.1), true);
+    return;
+  }
+  // Ctrl+R = read the mail again. Also up here: it means nothing to a text field, and a
+  // look for new mail must not depend on where the cursor happens to be.
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'r' || e.key === 'R')) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!e.repeat) mailDo('refresh');
+    return;
+  }
   // Compose and the pickers own their keys - a focused Send button plus "e" must not archive.
   if (t && t.closest && t.closest('.mail-compose, .mail-pop, .mail-snips')) return;
   if (t && (t.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT')) {
@@ -13316,10 +14175,6 @@ function mailKeydown(e) {
       e.preventDefault();
       e.stopPropagation();
       mailDo('unread');
-    } else if ((e.ctrlKey || e.metaKey) && !e.altKey && ['+', '=', '-', '0'].includes(e.key)) {
-      e.preventDefault(); // the mail text size, as Ctrl + / - / 0 do for a terminal's font
-      e.stopPropagation();
-      mailSetZoom(e.key === '0' ? 1 : mailZoom + (e.key === '-' ? -0.1 : 0.1), true);
     }
     return;
   }
@@ -13373,7 +14228,6 @@ function mailGo(where) {
     else mailToast('No labels yet - make one in Gmail first.', 'err');
     return;
   }
-  if (where === 'drafts') return mailSearch('in:drafts');
   mailSetView(where);
   mailFocus();
 }
@@ -13413,9 +14267,20 @@ function mailArchiveAndMove(id, dir) {
   if (wasOpen) mailOpenThread(t.id);
   else mailRenderList();
 }
-async function mailDo(act) {
+// `single`: the open mail's own buttons - never the marked rows.
+async function mailDo(act, single) {
   const id = mailTarget();
+  if (!single && MAIL_MANY.includes(act)) {
+    const many = mailMarkedIds();
+    if (many.length) return mailManyDo(act, many);
+  }
   switch (act) {
+    case 'mark':
+    case 'mark-range': {
+      const t = mbox.threads[mbox.sel];
+      if (t) mailToggleMark(t.id, act === 'mark-range');
+      return;
+    }
     case 'msg-next':
       return mailMsgMove(1);
     case 'msg-prev':
@@ -13442,7 +14307,7 @@ async function mailDo(act) {
     case 'open': {
       const t = mbox.threads[mbox.sel];
       if (t) {
-        mailOpenThread(t.id);
+        mailOpenRow(t.id);
         mailSetReadFocus(true, true);
       }
       return;
@@ -13456,6 +14321,7 @@ async function mailDo(act) {
       if (lb && !lb.classList.contains('hidden')) return lb.classList.add('hidden');
       if (keys && !keys.classList.contains('hidden')) return keys.classList.add('hidden');
       if (pop && !pop.classList.contains('hidden')) return mailHidePop();
+      if (mailMarks().size) return mailClearMarks(); // marks first, then the open mail
       if (mbox.openId) return mailCloseReader(true);
       return;
     }
@@ -13507,9 +14373,7 @@ async function mailDo(act) {
       if (mbox.thread && mbox.thread.id === id) agentDialog(agentTargetFromThread(mbox.thread));
       return;
     case 'refresh':
-      mailLoadLabels();
-      mailBadge(true);
-      return mailLoad();
+      return mailReread();
     case 'search': {
       const s = mailEl('.mail-search');
       if (s) {
@@ -14667,12 +15531,53 @@ function mailQuote(m) {
 }
 // Who a reply goes to, and the headers that keep it in the thread. Reply-all drops our
 // own address and anyone already in To, and never lists an address twice.
+// ---- which address a mail goes out AS ----
+// Gmail accounts often send as several addresses (Settings > Accounts > Send mail as). The
+// list comes from Gmail (`mail:sendAs`); with more than one, the compose panel shows a From
+// row. A reply goes out as the address the mail came TO; anything else as Gmail's default.
+// The chosen address is the From header of the mail (buildMime); Gmail only honours a
+// verified alias, which is all the list holds.
+let mailSendAs = []; // [{ email, name, isDefault, isPrimary, replyTo }]
+async function mailLoadSendAs() {
+  if (!googleConnected) return;
+  const r = await api.mailSendAs();
+  if (!r || !r.ok || !Array.isArray(r.list)) return;
+  mailSendAs = r.list.filter((a) => a && a.email);
+  if (mbox.draft) mailRenderCompose(); // a panel open before the list came gets its From row
+}
+// Every address that is mine: the account's and all it sends as (lower case).
+function mailMyAddrs() {
+  const out = new Set();
+  if (googleEmail) out.add(String(googleEmail).toLowerCase());
+  for (const a of mailSendAs) out.add(String(a.email).toLowerCase());
+  return out;
+}
+// The alias to answer FROM: the one the mail was sent to (To, then Cc), else the default.
+function mailSendAsFor(msg) {
+  if (mailSendAs.length < 2) return '';
+  const mine = mailSendAs.map((a) => String(a.email).toLowerCase());
+  for (const field of ['to', 'cc']) {
+    for (const x of mailSplit((msg && msg[field]) || '')) {
+      const a = mailAddr(x).toLowerCase();
+      if (mine.includes(a)) return mailSendAs[mine.indexOf(a)].email;
+    }
+  }
+  const def = mailSendAs.find((a) => a.isDefault) || mailSendAs.find((a) => a.isPrimary) || mailSendAs[0];
+  return def.email;
+}
+// The From header for a draft: '' = none (Gmail uses the primary), else 'Name <addr>'.
+function mailFromLine(d) {
+  const a = d && d.from ? mailSendAs.find((x) => String(x.email).toLowerCase() === String(d.from).toLowerCase()) : null;
+  if (!a) return '';
+  return a.name ? a.name + ' <' + a.email + '>' : a.email;
+}
 function mailReplyDraft(thread, mode) {
   const msgs = thread.messages || [];
   // A draft in the thread (an agent's, say) is not what a reply answers.
   const real = msgs.filter((m) => !(m.labelIds || []).includes('DRAFT'));
   const last = real[real.length - 1] || msgs[msgs.length - 1] || {};
   const me = String(googleEmail || '').toLowerCase();
+  const mine = mailMyAddrs();
   const addr = (s) => mailAddr(s).toLowerCase();
   const subj = last.subject || (msgs[0] && msgs[0].subject) || '';
   if (mode === 'forward') {
@@ -14688,13 +15593,14 @@ function mailReplyDraft(thread, mode) {
       subject: /^fwd?:/i.test(subj) ? subj : 'Fwd: ' + subj,
       body: '\n\n' + head + '\n' + mailBodyText(last),
       forwardOf: last,
+      from: mailSendAsFor(last),
     };
   }
-  const fromMe = !!me && addr(last.from) === me;
+  const fromMe = !!me && mine.has(addr(last.from));
   const to = fromMe ? last.to || '' : last.replyTo || last.from || '';
   let cc = '';
   if (mode === 'replyall') {
-    const seen = new Set([me].concat(mailSplit(to).map(addr)));
+    const seen = new Set([...mine].concat(mailSplit(to).map(addr))); // none of my addresses, not even an alias
     cc = mailSplit([last.to, last.cc].filter(Boolean).join(', '))
       .filter((x) => {
         const a = addr(x);
@@ -14712,6 +15618,7 @@ function mailReplyDraft(thread, mode) {
     threadId: thread.id,
     inReplyTo: last.messageId || '',
     references: [last.references, last.messageId].filter(Boolean).join(' ').trim(),
+    from: mailSendAsFor(last),
     body: '\n\n' + mailQuote(last),
   };
 }
@@ -14745,6 +15652,7 @@ async function mailEditDraft(ref, extra) {
   mbox.draft = null; // asked above; mailCompose must not ask again
   mailCompose({
     mode: 'draft',
+    from: mailAddr(m.from || ''),
     to: m.to || '',
     cc: m.cc || '',
     bcc: m.bcc || '',
@@ -14799,6 +15707,7 @@ async function mailSaveDraftNow() {
     mailFocus();
   }
   mailToast('Saved to Gmail Drafts');
+  mailDraftsChanged();
   if (mbox.openId && mbox.openId === d.threadId) mailOpenThread(mbox.openId);
 }
 async function mailDeleteDraftNow() {
@@ -14810,11 +15719,12 @@ async function mailDeleteDraftNow() {
   if (mbox.draft === d) mbox.draft = null;
   mailRenderCompose();
   mailToast('Draft deleted');
+  mailDraftsChanged();
   if (mbox.openId && mbox.openId === d.threadId) mailOpenThread(mbox.openId);
   mailFocus();
 }
 function mailDraftSnap(d) {
-  return JSON.stringify([d.to, d.cc, d.bcc, d.subject, d.body, d.attachments.length]);
+  return JSON.stringify([d.from || '', d.to, d.cc, d.bcc, d.subject, d.body, d.attachments.length]);
 }
 function mailDraftDirty() {
   const d = mbox.draft;
@@ -14837,6 +15747,8 @@ function mailCompose(init) {
   if (mbox.draft && mailDraftDirty() && !window.confirm('Discard the message you are writing?')) return;
   const d = Object.assign({ mode: 'new', to: '', cc: '', bcc: '', subject: '', body: '', attachments: [] }, init || {});
   d.attachments = [];
+  // the address it goes out as: one Gmail knows, else Gmail's default (an unknown From of a draft too)
+  if (mailSendAs.length > 1 && !mailSendAs.some((x) => String(x.email).toLowerCase() === String(d.from || '').toLowerCase())) d.from = mailSendAsFor(null);
   mbox.draft = d;
   // Forwarding brings the original's files along, and a draft keeps its own; fetch them
   // now, send waits for them.
@@ -14886,6 +15798,11 @@ function mailRenderCompose() {
     (aiReady() ? '<button class="mail-btn mc-aibtn" data-act="ai-write"></button>' : '') +
     '<button class="mail-x" data-act="close" title="Close (Esc)">✕</button></div>' +
     '<div class="mc-banner hidden">Sending needs one more permission. Reconnect Google in Settings and allow Gmail send - reading keeps working meanwhile. <button class="mail-btn" data-act="settings">Open Settings</button></div>' +
+    (mailSendAs.length > 1
+      ? '<label class="mc-field" data-row="from"><span>From</span><select data-f="from">' +
+        mailSendAs.map((a) => `<option value="${escapeHtml(a.email)}">${escapeHtml(a.name ? a.name + ' <' + a.email + '>' : a.email)}</option>`).join('') +
+        '</select></label>'
+      : '') +
     '<label class="mc-field"><span>To</span><input data-f="to" type="text" spellcheck="false" />' +
     `<button class="mail-link${showCc ? ' hidden' : ''}" data-act="cc">Cc / Bcc</button></label>` +
     `<label class="mc-field${showCc ? '' : ' hidden'}" data-row="cc"><span>Cc</span><input data-f="cc" type="text" spellcheck="false" /></label>` +
@@ -14893,7 +15810,9 @@ function mailRenderCompose() {
     '<label class="mc-field"><span>Subject</span><input data-f="subject" type="text" /></label>' +
     '<textarea class="mc-body" data-f="body"></textarea>' +
     '<div class="mc-atts"></div>' +
-    '<div class="mc-foot"><button class="mail-btn mail-primary" data-act="send" title="Send (Ctrl+Enter)">Send</button>' +
+    `<div class="mc-foot"><button class="mail-btn mail-primary" data-act="send" title="${
+      mailUndoSec ? 'Send, with ' + mailUndoSec + ' s to undo. Ctrl+Enter sends at once, without the wait.' : 'Send (Ctrl+Enter)'
+    }">Send</button>` +
     '<button class="mail-btn" data-act="attach" title="Attach a file">📎 Attach</button>' +
     '<button class="mail-btn" data-act="attach-shell" title="Attach a file from a terminal - it comes through the shell, so any ssh depth works">📎 From a terminal</button>' +
     '<button class="mail-btn" data-act="snip" title="Insert a snippet (;; or Ctrl+Space)">✂ Snippet</button>' +
@@ -14902,7 +15821,9 @@ function mailRenderCompose() {
       d.draftId ? 'Write your changes back to the Gmail draft and close (Ctrl+S)' : 'Save it to Gmail Drafts and close - finish it later, here or in Gmail (Ctrl+S)'
     }">💾 Save draft</button>` +
     (d.draftId ? '<button class="mail-btn" data-act="del-draft" title="Delete the draft from Gmail">🗑</button>' : '') +
-    `<span class="mc-undo" title="Undo send - change it in Settings → Google">${mailUndoSec ? '↶ ' + mailUndoSec + ' s to undo' : ''}</span>` +
+    `<span class="mc-undo" title="Undo send - change it in Settings → Google. Ctrl+Enter sends at once, without the wait.">${
+      mailUndoSec ? '↶ ' + mailUndoSec + ' s to undo · Ctrl+Enter: at once' : ''
+    }</span>` +
     '<span class="mc-status"></span></div>' +
     '<div class="mc-suggest hidden"></div>';
   box.querySelectorAll('[data-f]').forEach((inp) => {
@@ -14922,7 +15843,7 @@ function mailRenderCompose() {
     e.preventDefault();
     const act = b.dataset.act;
     if (act === 'close') mailCloseCompose();
-    else if (act === 'send') mailSend();
+    else if (act === 'send') mailSend(false);
     else if (act === 'attach') mailAttach();
     else if (act === 'attach-shell') mailAttachFromShell(b);
     else if (act === 'snip') mailSnippetPicker(box.querySelector('.mc-body'), 0);
@@ -14947,7 +15868,7 @@ function mailRenderCompose() {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       e.stopPropagation();
-      mailSend();
+      mailSend(true); // the key means "go": no undo wait
     } else if ((e.key === 'j' || e.key === 'J') && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && aiReady()) {
       e.preventDefault();
       e.stopPropagation();
@@ -14985,13 +15906,26 @@ function mailRenderCompose() {
     const it = e.target.closest('[data-i]');
     if (it && sug._owner && sug._accept) sug._accept(sug._owner.list[+it.dataset.i]);
   });
-  if (!d.to) box.querySelector('[data-f="to"]').focus();
-  else {
-    body.focus();
-    const at = Math.min(d.caret || 0, body.value.length); // a quick reply puts it after its text
-    body.setSelectionRange(at, at); // replies start above the quote
-    body.scrollTop = 0;
-  }
+  // Where the writing starts: the first empty line, above the signature and the quoted or
+  // forwarded mail (a quick reply puts it after its text). Set ALSO when the address field
+  // gets the focus - a new message, a forward: a text field filled by the page has its cursor
+  // at the END, so Tab from the address landed below the signature and the whole old mail.
+  const at = Math.min(d.caret || 0, body.value.length);
+  body.setSelectionRange(at, at);
+  body.scrollTop = 0;
+  const first = d.to ? body : box.querySelector('[data-f="to"]');
+  first.focus();
+  // What paints right after (the thread's frames, a fetched file, the send check) must not
+  // take the focus from the field: a moment later, if it went to nothing in particular - the
+  // pane, the page, a mail frame - the field takes it back. A field or button you moved to
+  // meanwhile is left alone.
+  const held = (mbox.composeFocusSeq = (mbox.composeFocusSeq || 0) + 1);
+  setTimeout(() => {
+    if (mbox.composeFocusSeq !== held || mbox.draft !== d || !first.isConnected) return;
+    const a = document.activeElement;
+    const loose = !a || a === document.body || a.classList.contains('mail-pane') || a.tagName === 'IFRAME';
+    if (loose) first.focus({ preventScroll: true });
+  }, 350);
   delete d.caret;
 }
 // ---- the compose window: drag it by its title bar, resize it from any edge or corner ----
@@ -15274,7 +16208,7 @@ function mailApplyFont() {
   });
 }
 function mailSaveFont() {
-  api.saveSettings({ mailFont, mailFontWeight, mailFontHtml, mailBg });
+  api.saveSettings({ mailFont, mailFontWeight, mailFontHtml, mailBg, mailBgOverLook, mailUnreadBar, mailFoldQuotes });
 }
 // The Mail tab's background. One colour; everything else is made from it - cards a step
 // lighter (or darker, on a light one), buttons, lines, the list's hover / selection, and the
@@ -15283,6 +16217,14 @@ function mailSaveFont() {
 // '' = the app's dark default. HTML mails keep their own design (the reading mode).
 let mailBg = '';
 let mailBgSaveTimer = null;
+// A bar on the left edge of unread rows: with a heavy weight (Semibold, Bold) the extra bold of
+// an unread row is no longer seen. Its own edge, not the selection's - a selected unread row
+// shows both. On by default.
+let mailUnreadBar = true;
+function mailApplyUnreadBar() {
+  const rec = mailRec();
+  if (rec) rec.paneEl.classList.toggle('unread-bar', mailUnreadBar);
+}
 const MAIL_BGS = [
   ['', 'Dark (standard)'],
   ['#2a2e33', 'Dim'],
@@ -15335,11 +16277,21 @@ function mailBgPalette(hex) {
     },
   };
 }
-function mailApplyBg() {
-  const rec = mailRec();
-  if (!rec) return;
-  const p = rec.paneEl;
-  const pal = mailBgPalette(mailBg);
+// Which background the Mail tab really uses. A one-colour look paints the mail too - a
+// background picked for the standard look is kept but waits (it returns with Standard) -
+// unless it was picked in the Aa panel WHILE that look was on: the later choice wins.
+let mailBgOverLook = false; // saved
+function mailBgNow() {
+  return appLook !== 'standard' && !mailBgOverLook ? '' : mailBg;
+}
+// `pane`: the tab being built (it is not registered yet); otherwise the open Mail tab.
+function mailApplyBg(pane) {
+  const rec = pane ? null : mailRec();
+  const p = pane || (rec && rec.paneEl);
+  if (!p) return;
+  let pal = mailBgPalette(mailBgNow());
+  const look = pal ? null : appLookVars(appLook); // no background of its own: the app's look
+  if (look) pal = { light: false, vars: look.mail };
   for (const v of MAIL_BG_VARS) p.style.removeProperty(v);
   p.classList.toggle('mail-bg', !!pal);
   p.classList.toggle('mail-light', !!(pal && pal.light));
@@ -15364,11 +16316,13 @@ function mailFontPanel(anchor) {
     '<div class="mf-row"><span>Weight</span><div class="mf-weights">' +
     MAIL_WEIGHTS.map(([w, l]) => `<button class="mail-btn mf-w${w === mailFontWeight ? ' sel' : ''}" data-w="${w}" style="font-weight:${w}">${l}</button>`).join('') +
     '</div></div>' +
+    `<label class="mf-row mf-check"><span></span><input type="checkbox" class="mf-unreadbar"${mailUnreadBar ? ' checked' : ''} /> Mark unread mails with a bar</label>` +
+    `<label class="mf-row mf-check" title="A reply carries the earlier mails below it. Folded, the end of the mail and its attachments are right there; ⋯ opens the rest."><span></span><input type="checkbox" class="mf-foldq"${mailFoldQuotes ? ' checked' : ''} /> Fold the earlier mail quoted in a reply (⋯)</label>` +
     `<div class="mf-row"><span>Size</span><div class="mf-size"><button class="mail-btn" data-z="-">−</button><b class="mf-pct">${Math.round(mailZoom * 100)} %</b><button class="mail-btn" data-z="+">+</button><button class="mail-btn" data-z="0" title="Ctrl+0">Reset</button></div></div>` +
     '<div class="mf-row"><span>Background</span><div class="mf-bgs">' +
     MAIL_BGS.map(
       ([c, l]) =>
-        `<button class="mf-bg${c === mailBg ? ' sel' : ''}" data-bg="${c}" title="${escapeHtml(l)}" style="background:${c || '#1d1f21'}"></button>`
+        `<button class="mf-bg${c === mailBgNow() ? ' sel' : ''}" data-bg="${c}" title="${escapeHtml(c || appLook === 'standard' ? l : 'As the app looks (' + APP_LOOKS[appLook].label + ')')}" style="background:${c || (appLook === 'standard' ? '#1d1f21' : '#000')}"></button>`
     ).join('') +
     `<label class="mf-bg mf-bgpick${mailBg && !MAIL_BGS.some(([c]) => c === mailBg) ? ' sel' : ''}" title="Any colour"><input type="color" class="mf-bgcolor" value="${escapeHtml(mailBg || '#1d1f21')}" /></label>` +
     '</div></div>' +
@@ -15387,12 +16341,14 @@ function mailFontPanel(anchor) {
   const sample = pop.querySelector('.mf-sample');
   const other = pop.querySelector('.mf-other');
   const paintBg = () => {
-    pop.querySelectorAll('.mf-bg[data-bg]').forEach((b) => b.classList.toggle('sel', b.dataset.bg === mailBg));
-    pop.querySelector('.mf-bgpick').classList.toggle('sel', !!mailBg && !MAIL_BGS.some(([c]) => c === mailBg));
+    const now = mailBgNow();
+    pop.querySelectorAll('.mf-bg[data-bg]').forEach((b) => b.classList.toggle('sel', b.dataset.bg === now));
+    pop.querySelector('.mf-bgpick').classList.toggle('sel', !!now && !MAIL_BGS.some(([c]) => c === now));
   };
   pop.querySelector('.mf-bgcolor').addEventListener('input', (e) => {
     if (!mailHexRgb(e.target.value)) return;
     mailBg = e.target.value.toLowerCase();
+    mailBgOverLook = appLook !== 'standard';
     mailApplyBg();
     paintBg();
     clearTimeout(mailBgSaveTimer);
@@ -15423,6 +16379,16 @@ function mailFontPanel(anchor) {
     mailFont = v;
     commit();
   });
+  pop.querySelector('.mf-foldq').addEventListener('change', (e) => {
+    mailFoldQuotes = e.target.checked;
+    mailApplyFoldQuotes();
+    mailSaveFont();
+  });
+  pop.querySelector('.mf-unreadbar').addEventListener('change', (e) => {
+    mailUnreadBar = e.target.checked;
+    mailApplyUnreadBar();
+    mailSaveFont();
+  });
   pop.querySelector('.mf-html').addEventListener('change', (e) => {
     mailFontHtml = e.target.value;
     commit();
@@ -15436,6 +16402,7 @@ function mailFontPanel(anchor) {
     const bg = e.target.closest('.mf-bg[data-bg]');
     if (bg) {
       mailBg = bg.dataset.bg;
+      mailBgOverLook = appLook !== 'standard' && mailBg !== ''; // the first swatch = follow the look again
       mailApplyBg();
       mailSaveFont();
       return paintBg();
@@ -15579,11 +16546,13 @@ async function mailAttachDropped(files, kinds) {
 // With undo on, the main process holds the message for mailUndoSec and the toast counts
 // down; Undo takes it back into compose untouched. The outcome arrives as an event
 // (onMailSendResult), because it can land long after this function has returned.
-let mailUndoSec = 15; // 0 = send at once
+let mailUndoSec = 15; // 0 = send at once. Ctrl+Enter always sends at once, whatever this says.
 const mailPendingSends = new Map(); // pending id -> { draft, sendAt, atts }
 let mailSendTick = null;
 function mailSendPayload(d, atts) {
+  const from = mailFromLine(d);
   return {
+    ...(from ? { from } : {}),
     to: d.to,
     cc: d.cc,
     bcc: d.bcc,
@@ -15597,9 +16566,13 @@ function mailSendPayload(d, atts) {
     ...(d.html && d.body === d.bodyOrig ? { html: d.html } : {}),
   };
 }
-async function mailSend() {
+// `now`: true = at once (Ctrl+Enter), false = with the undo wait (the Send button). Left out =
+// whatever this message was last asked for, which is how "Send anyway" on a warning bar keeps
+// the choice that led to the warning. Every check still runs for a send at once.
+async function mailSend(now) {
   const d = mbox.draft;
   if (!d || d.sending) return;
+  if (now !== undefined) d.sendNow = !!now;
   if (!mailSplit([d.to, d.cc, d.bcc].join(',')).length) return mailComposeStatus('Add a recipient first.', true);
   if (mbox.canSend === false) {
     mailRenderBanner();
@@ -15619,7 +16592,7 @@ async function mailSend() {
     return mailComposeStatus('Still fetching ' + coming.map((a) => a.name).join(', ') + ' - send once it is attached.', true);
   }
   const atts = d.attachments.filter((a) => a.b64);
-  const res = await api.mailSend({ ...mailSendPayload(d, atts), delayMs: Math.max(0, mailUndoSec) * 1000 });
+  const res = await api.mailSend({ ...mailSendPayload(d, atts), delayMs: d.sendNow ? 0 : Math.max(0, mailUndoSec) * 1000 });
   d.sending = false;
   if (!res || !res.ok) {
     const err = (res && res.error) || 'unknown';
@@ -15656,6 +16629,7 @@ function mailAfterSent(d, res, sentAtts) {
     ref: { type: 'mail', id: res.id, threadId: res.threadId },
   });
   if (mbox.openId && res.threadId === mbox.openId) mailOpenThread(mbox.openId);
+  if (d.draftId) mailDraftsChanged(); // a sent draft leaves Drafts
 }
 // Built once and then only its number changes: repainting the buttons several times a
 // second would swallow a click that lands between mousedown and mouseup.
@@ -18073,6 +19047,7 @@ els.setGoogleConnect.addEventListener('click', async () => {
   if (mailRec()) {
     mailLoad();
     mailLoadLabels();
+    mailLoadSendAs();
   }
 });
 
@@ -18432,6 +19407,8 @@ function buildMeadow(group, opts) {
 function exposeKind(rec) {
   const colors = { ssh: '#4ea1ff', local: '#7ee787', slack: '#c285e0', web: '#3bbf9f', notes: '#f0c674', mail: '#ea8a5c' };
   const glyphs = { ssh: '>_', local: '🖥', slack: '#', web: '🌐', notes: '📝', mail: '📧' };
+  const game = gameTabs[rec.kind];
+  if (game) return { color: game.color, glyph: game.glyph };
   return { color: colors[rec.kind] || '#8a8f94', glyph: glyphs[rec.kind] || '?' };
 }
 function exposeTitle(rec) {
@@ -18983,7 +19960,10 @@ window.addEventListener(
   const menuBtn = document.getElementById('tab-menu-btn');
   const menu = document.getElementById('tab-menu');
   if (menuBtn && menu) {
-    const closeMenu = () => menu.classList.add('hidden');
+    const closeMenu = () => {
+      menu.classList.add('hidden');
+      menu.querySelectorAll('.tab-menu-sub.open').forEach((s) => s.classList.remove('open')); // fold submenus back
+    };
     menuBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       menu.classList.toggle('hidden');
@@ -20882,6 +21862,7 @@ setInterval(() => {
     fontSize = Math.max(8, Math.min(36, settings.fontSize));
   }
   if (settings && THEMES[settings.theme]) currentTheme = settings.theme;
+  if (settings && APP_LOOKS[settings.appLook]) applyAppLook(settings.appLook); // the terminal theme is its own saved choice
   if (settings && ['all', 'mentions', 'off'].includes(settings.slackNotify)) {
     slackNotify = settings.slackNotify;
   }
@@ -20917,6 +21898,11 @@ setInterval(() => {
   if (settings && typeof settings.mailFont === 'string' && (settings.mailFont === '' || MAIL_FONT_NAME.test(settings.mailFont))) mailFont = settings.mailFont;
   if (settings && MAIL_WEIGHTS.some(([w]) => w === settings.mailFontWeight)) mailFontWeight = settings.mailFontWeight;
   if (settings && ['off', 'default', 'override'].includes(settings.mailFontHtml)) mailFontHtml = settings.mailFontHtml;
+  if (settings && typeof settings.mailUnreadBar === 'boolean') mailUnreadBar = settings.mailUnreadBar;
+  if (settings && typeof settings.mailFoldQuotes === 'boolean') mailFoldQuotes = settings.mailFoldQuotes;
+  // every game gets its saved state before the tabs come back (games.js)
+  for (const k of Object.keys(gameTabs)) if (settings && settings[k]) gameTabs[k].restore(settings[k]);
+  if (settings && typeof settings.mailBgOverLook === 'boolean') mailBgOverLook = settings.mailBgOverLook;
   if (settings && typeof settings.mailBg === 'string' && (settings.mailBg === '' || /^#[0-9a-f]{6}$/i.test(settings.mailBg))) mailBg = settings.mailBg.toLowerCase();
   if (settings && typeof settings.aiTranslateTo === 'string' && /^[\p{L} ()-]{2,40}$/u.test(settings.aiTranslateTo)) aiTranslateTo = settings.aiTranslateTo;
   {
@@ -20930,6 +21916,7 @@ setInterval(() => {
   clipConfig(); // start (or not) the clipboard history in the main process
   if (settings && typeof settings.mailLearnSnippets === 'boolean') mailLearnSnippets = settings.mailLearnSnippets;
   if (settings && typeof settings.mailCleanLinks === 'boolean') mailCleanLinks = settings.mailCleanLinks;
+  if (settings && Array.isArray(settings.mailImgSenders)) mailImgSenders = mailCleanImgSenders(settings.mailImgSenders);
   if (settings && typeof settings.mailSigInternal === 'string') mailSigInternal = settings.mailSigInternal.slice(0, 4000);
   if (settings && typeof settings.mailSigExternal === 'string') mailSigExternal = settings.mailSigExternal.slice(0, 4000);
   if (settings && typeof settings.mailInternalDomains === 'string') mailInternalDomains = settings.mailInternalDomains.slice(0, 1000);
@@ -21048,6 +22035,9 @@ setInterval(() => {
   }
   updatePet(false); // set the pet's initial mood from restored notes
   if (settings && Array.isArray(settings.quickCommands)) quickCommands = settings.quickCommands;
+  presetSetText(settings && typeof settings.termPresets === 'string' ? settings.termPresets : '', false);
+  if (settings && typeof settings.presetAutoRun === 'boolean') presetAutoRun = settings.presetAutoRun;
+  presetWireMenu();
   if (settings && Number.isFinite(settings.remoteDebugPort)) remoteDebugPort = settings.remoteDebugPort;
   if (settings && typeof settings.terminalCwd === 'string') terminalCwd = settings.terminalCwd;
   // Auto-hops, keyed per server. Migrate from the old per-tab `commands` if needed.
@@ -21072,6 +22062,14 @@ setInterval(() => {
   }
   els.themeSelect.value = currentTheme;
   els.themeSelect.addEventListener('change', () => applyTheme(els.themeSelect.value));
+  for (const [k, L] of Object.entries(APP_LOOKS)) {
+    const o = document.createElement('option');
+    o.value = k;
+    o.textContent = L.label;
+    els.setAppLook.appendChild(o);
+  }
+  els.setAppLook.value = appLook;
+  els.setAppLook.addEventListener('change', () => applyAppLook(els.setAppLook.value, true));
 
   await refreshSaved();
   // Prefill a discovered key to make first connect easy.
@@ -21112,9 +22110,13 @@ setInterval(() => {
       else if (t.kind === 'notes') created = !!createNotesTab();
       else if (t.kind === 'deck') created = !!createDeckTab();
       else if (t.kind === 'mail') created = !!createMailTab();
+      else if (gameTabs[t.kind]) created = !!gameTabs[t.kind].create();
       else if (t.kind === 'slack' && slackReady && t.channel) created = !!createSlackTab(t.channel);
       // Each create activates the new tab — reapply a manual rename to it.
       if (created && t.title && activeTabId) applyRestoredTitle(activeTabId, t.title);
+      // a terminal that belongs to a preset - it was started with one, or its title matches one:
+      // the preset runs by itself, or (setting off) waits behind a Run button
+      if (created && (t.kind === 'local' || t.kind === 'ssh') && activeTabId) presetAtLaunch(activeTabId, t.preset);
     }
   } else {
     // Legacy restore (settings saved before tab order was tracked).
